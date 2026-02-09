@@ -1,5 +1,7 @@
 package gopresentation
 
+import "sort"
+
 // ChartShape represents a chart embedded in a slide.
 type ChartShape struct {
 	BaseShape
@@ -353,11 +355,15 @@ const (
 )
 
 // NewChartSeries creates a new chart series.
+// Note: map iteration order is non-deterministic in Go, so category order may vary.
+// Use NewChartSeriesOrdered for deterministic ordering.
 func NewChartSeries(title string, data map[string]float64) *ChartSeries {
 	cats := make([]string, 0, len(data))
 	for k := range data {
 		cats = append(cats, k)
 	}
+	// Sort for deterministic output
+	sort.Strings(cats)
 	return &ChartSeries{
 		Title:      title,
 		Values:     data,
@@ -368,11 +374,15 @@ func NewChartSeries(title string, data map[string]float64) *ChartSeries {
 }
 
 // NewChartSeriesOrdered creates a series with ordered categories.
+// If len(values) < len(categories), missing values default to 0.
+// Extra values beyond len(categories) are ignored.
 func NewChartSeriesOrdered(title string, categories []string, values []float64) *ChartSeries {
-	data := make(map[string]float64)
+	data := make(map[string]float64, len(categories))
 	for i, cat := range categories {
 		if i < len(values) {
 			data[cat] = values[i]
+		} else {
+			data[cat] = 0
 		}
 	}
 	return &ChartSeries{

@@ -1,5 +1,7 @@
 package gopresentation
 
+import "errors"
+
 // GroupShape represents a group of shapes.
 type GroupShape struct {
 	BaseShape
@@ -92,8 +94,4 @@ func (p *PlaceholderShape) GetPlaceholderIndex() int {
 }
 
 // errors
-var errOutOfRange = errorString("index out of range")
-
-type errorString string
-
-func (e errorString) Error() string { return string(e) }
+var errOutOfRange = errors.New("index out of range")

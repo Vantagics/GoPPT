@@ -50,7 +50,7 @@ func (b *BaseShape) SetOffsetY(y int64) *BaseShape  { b.offsetY = y; return b }
 func (b *BaseShape) SetWidth(w int64) *BaseShape     { b.width = w; return b }
 func (b *BaseShape) SetHeight(h int64) *BaseShape    { b.height = h; return b }
 func (b *BaseShape) SetName(n string) *BaseShape     { b.name = n; return b }
-func (b *BaseShape) SetRotation(r int) *BaseShape    { b.rotation = r; return b }
+func (b *BaseShape) SetRotation(r int) *BaseShape    { b.rotation = ((r % 360) + 360) % 360; return b }
 
 func (b *BaseShape) GetDescription() string          { return b.description }
 func (b *BaseShape) SetDescription(d string)         { b.description = d }

@@ -54,14 +54,19 @@ func (w *PPTXWriter) Save(path string) error {
 	if err != nil {
 		return fmt.Errorf("failed to create file: %w", err)
 	}
-	defer f.Close()
-	return w.WriteTo(f)
+
+	writeErr := w.WriteTo(f)
+	closeErr := f.Close()
+
+	if writeErr != nil {
+		return writeErr
+	}
+	return closeErr
 }
 
 // WriteTo writes the presentation to a writer.
 func (w *PPTXWriter) WriteTo(writer io.Writer) error {
 	zw := zip.NewWriter(writer)
-	defer zw.Close()
 
 	w.relID = 0
 
@@ -173,5 +178,5 @@ func (w *PPTXWriter) WriteTo(writer io.Writer) error {
 		}
 	}
 
-	return nil
+	return zw.Close()
 }

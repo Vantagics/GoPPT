@@ -117,14 +117,37 @@ func (p *Presentation) GetSlideCount() int {
 }
 
 // RemoveSlideByIndex removes a slide by index.
+// Returns an error if the index is out of range or if it would remove the last slide.
 func (p *Presentation) RemoveSlideByIndex(index int) error {
 	if index < 0 || index >= len(p.slides) {
 		return errors.New("slide index out of range")
+	}
+	if len(p.slides) <= 1 {
+		return errors.New("cannot remove the last slide")
 	}
 	p.slides = append(p.slides[:index], p.slides[index+1:]...)
 	if p.activeSlideIndex >= len(p.slides) && len(p.slides) > 0 {
 		p.activeSlideIndex = len(p.slides) - 1
 	}
+	return nil
+}
+
+// MoveSlide moves a slide from one index to another.
+func (p *Presentation) MoveSlide(fromIndex, toIndex int) error {
+	if fromIndex < 0 || fromIndex >= len(p.slides) {
+		return errors.New("fromIndex out of range")
+	}
+	if toIndex < 0 || toIndex >= len(p.slides) {
+		return errors.New("toIndex out of range")
+	}
+	if fromIndex == toIndex {
+		return nil
+	}
+	slide := p.slides[fromIndex]
+	// Remove from old position
+	p.slides = append(p.slides[:fromIndex], p.slides[fromIndex+1:]...)
+	// Insert at new position
+	p.slides = append(p.slides[:toIndex], append([]*Slide{slide}, p.slides[toIndex:]...)...)
 	return nil
 }
 

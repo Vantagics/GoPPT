@@ -112,15 +112,22 @@ func (r *PPTXReader) ReadFromReader(reader io.ReaderAt, size int64) (*Presentati
 	return pres, nil
 }
 
+// maxZipEntrySize is the maximum allowed size for a single file extracted from a ZIP.
+// This prevents zip bomb attacks.
+const maxZipEntrySize = 256 << 20 // 256 MB
+
 func readFileFromZip(zr *zip.Reader, name string) ([]byte, error) {
 	for _, f := range zr.File {
 		if f.Name == name {
+			if f.UncompressedSize64 > maxZipEntrySize {
+				return nil, fmt.Errorf("file %s exceeds maximum allowed size (%d bytes)", name, maxZipEntrySize)
+			}
 			rc, err := f.Open()
 			if err != nil {
 				return nil, err
 			}
 			defer rc.Close()
-			return io.ReadAll(rc)
+			return io.ReadAll(io.LimitReader(rc, int64(maxZipEntrySize)))
 		}
 	}
 	return nil, fmt.Errorf("file not found in zip: %s", name)

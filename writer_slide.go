@@ -7,7 +7,38 @@ import (
 	"strings"
 )
 
+// buildHyperlinkRelMap pre-computes the relationship IDs for all hyperlinks in a slide.
+// This ensures the XML shape content and the .rels file use the same IDs.
+func (w *PPTXWriter) buildHyperlinkRelMap(slide *Slide) map[*TextRun]string {
+	m := make(map[*TextRun]string)
+	relIdx := 2 // rId1 is slideLayout
+	for _, shape := range slide.shapes {
+		switch s := shape.(type) {
+		case *DrawingShape:
+			if s.data != nil || s.path != "" {
+				relIdx++
+			}
+		case *ChartShape:
+			relIdx++
+		}
+		if bs, ok := shape.(*RichTextShape); ok {
+			for _, para := range bs.paragraphs {
+				for _, elem := range para.elements {
+					if tr, ok := elem.(*TextRun); ok && tr.hyperlink != nil && !tr.hyperlink.IsInternal {
+						m[tr] = fmt.Sprintf("rId%d", relIdx)
+						relIdx++
+					}
+				}
+			}
+		}
+	}
+	return m
+}
+
 func (w *PPTXWriter) writeSlide(zw *zip.Writer, slide *Slide, slideNum int) error {
+	// Pre-compute hyperlink relationship IDs so the XML references match the .rels file.
+	hlinkRelMap := w.buildHyperlinkRelMap(slide)
+
 	var shapesXML strings.Builder
 	shapeID := 2 // 1 is reserved for the group shape
 
@@ -30,6 +61,13 @@ func (w *PPTXWriter) writeSlide(zw *zip.Writer, slide *Slide, slideNum int) erro
 		case *GroupShape:
 			shapesXML.WriteString(w.writeGroupShapeXML(s, &shapeID, slideNum))
 		}
+	}
+
+	// Replace hyperlink placeholders with actual relationship IDs
+	result := shapesXML.String()
+	for tr, relID := range hlinkRelMap {
+		placeholder := fmt.Sprintf("rId_hlink_%p", tr)
+		result = strings.Replace(result, placeholder, relID, 1)
 	}
 
 	// Background XML
@@ -62,12 +100,14 @@ func (w *PPTXWriter) writeSlide(zw *zip.Writer, slide *Slide, slideNum int) erro
   <p:clrMapOvr>
     <a:masterClrMapping/>
   </p:clrMapOvr>
-</p:sld>`, nsDrawingML, nsOfficeDocRels, nsPresentationML, bgXML, shapesXML.String())
+</p:sld>`, nsDrawingML, nsOfficeDocRels, nsPresentationML, bgXML, result)
 
 	return writeRawXMLToZip(zw, fmt.Sprintf("ppt/slides/slide%d.xml", slideNum), content)
 }
 
 func (w *PPTXWriter) writeSlideRels(zw *zip.Writer, slide *Slide, slideNum int) error {
+	hlinkRelMap := w.buildHyperlinkRelMap(slide)
+
 	rels := fmt.Sprintf(`<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
 <Relationships xmlns="%s">
   <Relationship Id="rId1" Type="%s" Target="../slideLayouts/slideLayout1.xml"/>`, nsRelationships, relTypeSlideLayout)
@@ -97,9 +137,10 @@ func (w *PPTXWriter) writeSlideRels(zw *zip.Writer, slide *Slide, slideNum int) 
 				for _, elem := range para.elements {
 					if tr, ok := elem.(*TextRun); ok && tr.hyperlink != nil {
 						if !tr.hyperlink.IsInternal {
+							rid := hlinkRelMap[tr]
 							rels += fmt.Sprintf(`
-  <Relationship Id="rId%d" Type="%s" Target="%s" TargetMode="External"/>`,
-								relIdx, relTypeHyperlink, xmlEscape(tr.hyperlink.URL))
+  <Relationship Id="%s" Type="%s" Target="%s" TargetMode="External"/>`,
+								rid, relTypeHyperlink, xmlEscape(tr.hyperlink.URL))
 							relIdx++
 						}
 					}
@@ -286,7 +327,7 @@ func (w *PPTXWriter) writeTextRunXML(tr *TextRun) string {
 	hlinkEnd := ""
 	if tr.hyperlink != nil && !tr.hyperlink.IsInternal {
 		hlinkStart = fmt.Sprintf(`
-              <a:hlinkClick r:id="rId_hlink"/>`)
+              <a:hlinkClick r:id="rId_hlink_%p"/>`, tr)
 	}
 
 	return fmt.Sprintf(`            <a:r>
@@ -308,19 +349,20 @@ func (w *PPTXWriter) writeDrawingShapeXML(s *DrawingShape, shapeID *int, slideNu
 		name = fmt.Sprintf("Picture %d", id)
 	}
 
-	// Find the relationship ID for this image
+	// Find the relationship ID for this image within the current slide
 	relIdx := 2 // rId1 is slideLayout
-	for _, sl := range w.presentation.slides {
-		for _, shape := range sl.shapes {
-			if ds, ok := shape.(*DrawingShape); ok && (ds.data != nil || ds.path != "") {
-				if ds == s {
-					goto found
-				}
-				relIdx++
+	currentSlide := w.presentation.slides[slideNum-1]
+	for _, shape := range currentSlide.shapes {
+		if ds, ok := shape.(*DrawingShape); ok && (ds.data != nil || ds.path != "") {
+			if ds == s {
+				break
 			}
+			relIdx++
+		}
+		if _, ok := shape.(*ChartShape); ok {
+			relIdx++
 		}
 	}
-found:
 
 	shadowXML := ""
 	if s.shadow != nil && s.shadow.Visible {
@@ -454,7 +496,7 @@ func (w *PPTXWriter) writeLineShapeXML(s *LineShape, shapeID *int) string {
       </p:cxnSp>
 `, id, xmlEscape(name),
 		s.offsetX, s.offsetY, s.width, s.height,
-		s.lineWidth*12700,
+		int64(s.lineWidth)*12700,
 		s.lineColor.ARGB[2:])
 }
 

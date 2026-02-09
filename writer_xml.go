@@ -385,11 +385,12 @@ func (w *PPTXWriter) writeCoreProperties(zw *zip.Writer) error {
 	return writeRawXMLToZip(zw, "docProps/core.xml", content)
 }
 
+// xmlEscape escapes special XML characters using the standard library.
 func xmlEscape(s string) string {
-	s = strings.ReplaceAll(s, "&", "&amp;")
-	s = strings.ReplaceAll(s, "<", "&lt;")
-	s = strings.ReplaceAll(s, ">", "&gt;")
-	s = strings.ReplaceAll(s, "\"", "&quot;")
-	s = strings.ReplaceAll(s, "'", "&apos;")
-	return s
+	var b strings.Builder
+	if err := xml.EscapeText(&b, []byte(s)); err != nil {
+		// EscapeText writing to strings.Builder never fails, but handle gracefully.
+		return s
+	}
+	return b.String()
 }

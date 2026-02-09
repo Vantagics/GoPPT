@@ -48,8 +48,14 @@ func (pp *PresentationProperties) GetZoom() float64 {
 	return pp.zoom
 }
 
-// SetZoom sets the zoom level.
+// SetZoom sets the zoom level (clamped to 0.1–4.0).
 func (pp *PresentationProperties) SetZoom(zoom float64) {
+	if zoom < 0.1 {
+		zoom = 0.1
+	}
+	if zoom > 4.0 {
+		zoom = 4.0
+	}
 	pp.zoom = zoom
 }
 
@@ -165,8 +171,14 @@ func (dl *DocumentLayout) SetLayout(name string) {
 	}
 }
 
-// SetCustomLayout sets custom dimensions in EMU.
+// SetCustomLayout sets custom dimensions in EMU. Both values must be positive.
 func (dl *DocumentLayout) SetCustomLayout(cx, cy int64) {
+	if cx <= 0 {
+		cx = 9144000 // default 10 inches
+	}
+	if cy <= 0 {
+		cy = 6858000 // default 7.5 inches
+	}
 	dl.CX = cx
 	dl.CY = cy
 	dl.Name = LayoutCustom
