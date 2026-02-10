@@ -339,10 +339,11 @@ func (w *PPTXWriter) writeAppProperties(zw *zip.Writer) error {
 	props := w.presentation.properties
 	content := fmt.Sprintf(`<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
 <Properties xmlns="%s" xmlns:vt="http://schemas.openxmlformats.org/officeDocument/2006/docPropsVTypes">
-  <Application>GoPresentation</Application>
+  <Application>GoPresentation v%s</Application>
   <Company>%s</Company>
+  <AppVersion>%s</AppVersion>
   <Slides>%d</Slides>
-</Properties>`, nsExtProperties, xmlEscape(props.Company), len(w.presentation.slides))
+</Properties>`, nsExtProperties, Version, xmlEscape(props.Company), Version, len(w.presentation.slides))
 	return writeRawXMLToZip(zw, "docProps/app.xml", content)
 }
 

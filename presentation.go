@@ -3,6 +3,8 @@
 //
 // It is inspired by PHPOffice/PHPPresentation and provides an idiomatic Go API
 // for creating, manipulating, and saving presentation documents.
+//
+// See the Version variable for the current library version.
 package gopresentation
 
 import (
