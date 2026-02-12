@@ -46,11 +46,11 @@ func (w *PPTXWriter) nextRelID() string {
 func (w *PPTXWriter) Save(path string) error {
 	dir := filepath.Dir(path)
 	if dir != "" && dir != "." {
-		if err := os.MkdirAll(dir, 0755); err != nil {
+		if err := os.MkdirAll(dir, 0750); err != nil {
 			return fmt.Errorf("failed to create directory: %w", err)
 		}
 	}
-	f, err := os.Create(path)
+	f, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0644)
 	if err != nil {
 		return fmt.Errorf("failed to create file: %w", err)
 	}
@@ -59,6 +59,8 @@ func (w *PPTXWriter) Save(path string) error {
 	closeErr := f.Close()
 
 	if writeErr != nil {
+		// Attempt cleanup on write failure
+		os.Remove(path)
 		return writeErr
 	}
 	return closeErr
@@ -66,6 +68,10 @@ func (w *PPTXWriter) Save(path string) error {
 
 // WriteTo writes the presentation to a writer.
 func (w *PPTXWriter) WriteTo(writer io.Writer) error {
+	if w.presentation == nil {
+		return fmt.Errorf("presentation is nil")
+	}
+
 	zw := zip.NewWriter(writer)
 
 	w.relID = 0

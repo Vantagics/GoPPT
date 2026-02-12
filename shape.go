@@ -423,8 +423,19 @@ func (d *DrawingShape) GetImageData() []byte { return d.data }
 // GetMimeType returns the image MIME type.
 func (d *DrawingShape) GetMimeType() string { return d.mimeType }
 
+// maxImageFileSize is the maximum allowed size for an image file loaded from disk.
+const maxImageFileSize = 50 << 20 // 50 MB
+
 // SetImageFromFile loads an image from a file path and sets the data and MIME type.
+// Returns an error if the file exceeds maxImageFileSize or cannot be read.
 func (d *DrawingShape) SetImageFromFile(path string) error {
+	info, err := os.Stat(path)
+	if err != nil {
+		return fmt.Errorf("failed to stat image file: %w", err)
+	}
+	if info.Size() > maxImageFileSize {
+		return fmt.Errorf("image file too large: %d bytes (max %d)", info.Size(), maxImageFileSize)
+	}
 	data, err := os.ReadFile(path)
 	if err != nil {
 		return fmt.Errorf("failed to read image file: %w", err)

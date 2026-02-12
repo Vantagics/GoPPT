@@ -390,7 +390,7 @@ func (w *PPTXWriter) writeTextRunXML(tr *TextRun) string {
 	solidFill := ""
 	if font.Color.ARGB != "" {
 		solidFill = fmt.Sprintf(`
-              <a:solidFill><a:srgbClr val="%s"/></a:solidFill>`, font.Color.ARGB[2:])
+              <a:solidFill><a:srgbClr val="%s"/></a:solidFill>`, colorRGB(font.Color))
 	}
 
 	latin := ""
@@ -443,7 +443,7 @@ func (w *PPTXWriter) writeDrawingShapeXML(s *DrawingShape, shapeID *int, slideNu
 			s.shadow.BlurRadius*12700,
 			s.shadow.Distance*12700,
 			s.shadow.Direction*60000,
-			s.shadow.Color.ARGB[2:],
+			colorRGB(s.shadow.Color),
 			s.shadow.Alpha*1000)
 	}
 
@@ -571,7 +571,7 @@ func (w *PPTXWriter) writeLineShapeXML(s *LineShape, shapeID *int) string {
 		xfrmAttrs(&s.BaseShape),
 		s.offsetX, s.offsetY, s.width, s.height,
 		int64(s.lineWidth)*12700,
-		s.lineColor.ARGB[2:])
+		colorRGB(s.lineColor))
 }
 
 // --- Table Shape XML ---
@@ -610,7 +610,7 @@ func (w *PPTXWriter) writeTableShapeXML(s *TableShape, shapeID *int) string {
 			cellFill := ""
 			if cell.fill != nil && cell.fill.Type == FillSolid {
 				cellFill = fmt.Sprintf(`
-                  <a:solidFill><a:srgbClr val="%s"/></a:solidFill>`, cell.fill.Color.ARGB[2:])
+                  <a:solidFill><a:srgbClr val="%s"/></a:solidFill>`, colorRGB(cell.fill.Color))
 			}
 
 			var cellText strings.Builder
@@ -676,7 +676,7 @@ func (w *PPTXWriter) writeFillXML(f *Fill) string {
 	}
 	switch f.Type {
 	case FillSolid:
-		return fmt.Sprintf("          <a:solidFill><a:srgbClr val=\"%s\"/></a:solidFill>\n", f.Color.ARGB[2:])
+		return fmt.Sprintf("          <a:solidFill><a:srgbClr val=\"%s\"/></a:solidFill>\n", colorRGB(f.Color))
 	case FillGradientLinear:
 		return fmt.Sprintf(`          <a:gradFill>
             <a:gsLst>
@@ -685,7 +685,7 @@ func (w *PPTXWriter) writeFillXML(f *Fill) string {
             </a:gsLst>
             <a:lin ang="%d" scaled="1"/>
           </a:gradFill>
-`, f.Color.ARGB[2:], f.EndColor.ARGB[2:], f.Rotation*60000)
+`, colorRGB(f.Color), colorRGB(f.EndColor), f.Rotation*60000)
 	default:
 		return ""
 	}
@@ -696,7 +696,7 @@ func (w *PPTXWriter) writeBorderXML(b *Border) string {
 		return ""
 	}
 	return fmt.Sprintf("          <a:ln w=\"%d\"><a:solidFill><a:srgbClr val=\"%s\"/></a:solidFill></a:ln>\n",
-		b.Width, b.Color.ARGB[2:])
+		b.Width, colorRGB(b.Color))
 }
 
 // --- Media ---
@@ -716,6 +716,13 @@ func (w *PPTXWriter) writeMedia(zw *zip.Writer) error {
 				}
 				imgIdx++
 			} else if ds.path != "" {
+				info, err := os.Stat(ds.path)
+				if err != nil {
+					return fmt.Errorf("failed to stat image %s: %w", ds.path, err)
+				}
+				if info.Size() > maxImageFileSize {
+					return fmt.Errorf("image file %s too large: %d bytes (max %d)", ds.path, info.Size(), maxImageFileSize)
+				}
 				data, err := os.ReadFile(ds.path)
 				if err != nil {
 					return fmt.Errorf("failed to read image %s: %w", ds.path, err)
@@ -951,7 +958,7 @@ func (w *PPTXWriter) writeBulletXML(b *Bullet) string {
 
 	// Bullet color
 	if b.Color != nil {
-		sb.WriteString(fmt.Sprintf("\n              <a:buClr><a:srgbClr val=\"%s\"/></a:buClr>", b.Color.ARGB[2:]))
+		sb.WriteString(fmt.Sprintf("\n              <a:buClr><a:srgbClr val=\"%s\"/></a:buClr>", colorRGB(*b.Color)))
 	}
 
 	// Bullet size

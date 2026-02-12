@@ -367,8 +367,28 @@ type Hyperlink struct {
 	SlideNumber int
 }
 
+// allowedHyperlinkSchemes defines the URL schemes permitted in hyperlinks.
+// This prevents injection of dangerous schemes like javascript: or data:.
+var allowedHyperlinkSchemes = []string{"http://", "https://", "mailto:", "ftp://", "ftps://"}
+
+// isValidHyperlinkURL checks that a URL uses an allowed scheme.
+func isValidHyperlinkURL(url string) bool {
+	lower := strings.ToLower(strings.TrimSpace(url))
+	for _, scheme := range allowedHyperlinkSchemes {
+		if strings.HasPrefix(lower, scheme) {
+			return true
+		}
+	}
+	return false
+}
+
 // NewHyperlink creates a new external hyperlink.
+// The URL must use an allowed scheme (http, https, mailto, ftp, ftps).
+// Returns nil if the URL scheme is not allowed.
 func NewHyperlink(url string) *Hyperlink {
+	if !isValidHyperlinkURL(url) {
+		return nil
+	}
 	return &Hyperlink{URL: url}
 }
 

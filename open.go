@@ -63,9 +63,14 @@ func (p *Presentation) SaveToFile(path string) error {
 	return p.Save(path)
 }
 
-// Close is a no-op cleanup method for API compatibility with unioffice.
-// Since this library doesn't use temporary files, there is nothing to clean up.
+// Close releases resources held by the presentation.
+// It clears internal references to allow garbage collection.
 func (p *Presentation) Close() error {
+	p.slides = nil
+	p.slideMasters = nil
+	p.properties = nil
+	p.presentationProperties = nil
+	p.layout = nil
 	return nil
 }
 
@@ -130,18 +135,26 @@ func (p *Presentation) AddDefaultSlideWithLayout(layoutName string) (*Slide, err
 }
 
 // CopySlide creates a deep copy of the slide at the given index and appends it.
+// Note: shapes are shallow-copied (reference types). Modify the returned slide's
+// shapes independently by replacing them rather than mutating in place.
 func (p *Presentation) CopySlide(index int) (*Slide, error) {
 	if index < 0 || index >= len(p.slides) {
-		return nil, fmt.Errorf("slide index out of range")
+		return nil, fmt.Errorf("slide index %d out of range (0-%d)", index, len(p.slides)-1)
 	}
 	src := p.slides[index]
 	dst := newSlide()
 	dst.name = src.name
 	dst.notes = src.notes
 	dst.visible = src.visible
-	dst.transition = src.transition
-	dst.background = src.background
-	// Shallow copy shapes (shapes are reference types)
+	if src.transition != nil {
+		t := *src.transition
+		dst.transition = &t
+	}
+	if src.background != nil {
+		bg := *src.background
+		dst.background = &bg
+	}
+	// Copy shapes slice (shapes are reference types)
 	dst.shapes = make([]Shape, len(src.shapes))
 	copy(dst.shapes, src.shapes)
 	dst.comments = make([]*Comment, len(src.comments))

@@ -235,8 +235,25 @@ func (r *PPTXReader) parseSlideXML(decoder *xml.Decoder, slide *Slide, rels []xm
 	var prstGeom string
 	var textAnchor TextAnchorType
 
+	// Deferred shape-level fill (spPr solidFill comes before txBody)
+	var pendingShapeFill *Fill
+
 	// Group shape nesting depth
 	grpDepth := 0
+
+	// Saved group-level properties (child shapes overwrite the shared variables)
+	type grpSaved struct {
+		name     string
+		descr    string
+		offX     int64
+		offY     int64
+		extCX    int64
+		extCY    int64
+		flipH    bool
+		flipV    bool
+		rotation int
+	}
+	var savedGrp *grpSaved
 
 	for {
 		token, err := decoder.Token()
@@ -283,6 +300,7 @@ func (r *PPTXReader) parseSlideXML(decoder *xml.Decoder, slide *Slide, rels []xm
 					prstGeom = ""
 					shapeRotation = 0
 					textAnchor = TextAnchorNone
+					pendingShapeFill = nil
 				}
 			case "pic":
 				if state.inSpTree || state.inGrpSp {
@@ -564,6 +582,10 @@ func (r *PPTXReader) parseSlideXML(decoder *xml.Decoder, slide *Slide, rels []xm
 							if state.inSp {
 								if currentRichText != nil {
 									currentRichText.GetFill().SetSolid(c)
+								} else {
+									// spPr comes before txBody, so defer the fill
+									pendingShapeFill = NewFill()
+									pendingShapeFill.SetSolid(c)
 								}
 							}
 						}
@@ -722,18 +744,19 @@ func (r *PPTXReader) parseSlideXML(decoder *xml.Decoder, slide *Slide, rels []xm
 					grpDepth--
 					if grpDepth <= 0 {
 						state.inGrpSp = false
-						if currentGroup != nil {
-							currentGroup.name = shapeName
-							currentGroup.offsetX = offX
-							currentGroup.offsetY = offY
-							currentGroup.width = extCX
-							currentGroup.height = extCY
-							currentGroup.flipHorizontal = flipH
-							currentGroup.flipVertical = flipV
-							currentGroup.rotation = shapeRotation
+						if currentGroup != nil && savedGrp != nil {
+							currentGroup.name = savedGrp.name
+							currentGroup.offsetX = savedGrp.offX
+							currentGroup.offsetY = savedGrp.offY
+							currentGroup.width = savedGrp.extCX
+							currentGroup.height = savedGrp.extCY
+							currentGroup.flipHorizontal = savedGrp.flipH
+							currentGroup.flipVertical = savedGrp.flipV
+							currentGroup.rotation = savedGrp.rotation
 							slide.shapes = append(slide.shapes, currentGroup)
 						}
 						currentGroup = nil
+						savedGrp = nil
 					}
 				}
 			case "sp":
@@ -796,6 +819,11 @@ func (r *PPTXReader) parseSlideXML(decoder *xml.Decoder, slide *Slide, rels []xm
 						currentRichText.flipVertical = flipV
 						currentRichText.rotation = shapeRotation
 						currentRichText.textAnchor = textAnchor
+						// Apply deferred shape-level fill (spPr comes before txBody)
+						if pendingShapeFill != nil {
+							currentRichText.fill = pendingShapeFill
+							pendingShapeFill = nil
+						}
 						if state.inGrpSp && currentGroup != nil {
 							currentGroup.AddShape(currentRichText)
 						} else {
@@ -897,6 +925,17 @@ func (r *PPTXReader) parseSlideXML(decoder *xml.Decoder, slide *Slide, rels []xm
 			case "spPr", "grpSpPr":
 				state.inSpPr = false
 				state.inLn = false
+				// When the group's shape properties end, save position/size
+				// before child shapes overwrite the shared variables.
+				if t.Name.Local == "grpSpPr" && state.inGrpSp && savedGrp != nil {
+					savedGrp.offX = offX
+					savedGrp.offY = offY
+					savedGrp.extCX = extCX
+					savedGrp.extCY = extCY
+					savedGrp.flipH = flipH
+					savedGrp.flipV = flipV
+					savedGrp.rotation = shapeRotation
+				}
 			case "ln":
 				state.inLn = false
 			case "buClr":
@@ -906,6 +945,14 @@ func (r *PPTXReader) parseSlideXML(decoder *xml.Decoder, slide *Slide, rels []xm
 				state.inTcText = false
 			case "nvSpPr", "nvPicPr", "nvCxnSpPr", "nvGraphicFramePr", "nvGrpSpPr":
 				state.inNvSpPr = false
+				// When the group's non-visual properties end, save the group name
+				// before child shapes overwrite the shared shapeName variable.
+				if t.Name.Local == "nvGrpSpPr" && state.inGrpSp && currentGroup != nil && savedGrp == nil {
+					savedGrp = &grpSaved{
+						name:  shapeName,
+						descr: shapeDescr,
+					}
+				}
 			}
 		}
 	}
@@ -934,12 +981,20 @@ func resolveRelativePath(base, rel string) string {
 			if len(result) > 0 {
 				result = result[:len(result)-1]
 			}
-		} else if part != "." {
+		} else if part != "." && part != "" {
 			result = append(result, part)
 		}
 	}
 
-	return strings.Join(result, "/")
+	resolved := strings.Join(result, "/")
+
+	// Security: ensure resolved path stays within the ppt/ directory to prevent
+	// path traversal attacks via malicious relationship targets.
+	if !strings.HasPrefix(resolved, "ppt/") && !strings.HasPrefix(resolved, "docProps/") && resolved != "[Content_Types].xml" && !strings.HasPrefix(resolved, "_rels/") {
+		return "ppt/" + resolved
+	}
+
+	return resolved
 }
 
 func guessMimeType(path string) string {

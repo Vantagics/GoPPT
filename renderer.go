@@ -118,6 +118,13 @@ func (p *Presentation) SlideToImage(slideIndex int, opts *RenderOptions) (image.
 
 // SlidesToImages renders all slides to images.
 func (p *Presentation) SlidesToImages(opts *RenderOptions) ([]image.Image, error) {
+	if opts == nil {
+		opts = DefaultRenderOptions()
+	}
+	// Share a single FontCache across all slides to avoid repeated system font scans.
+	if opts.FontCache == nil {
+		opts.FontCache = NewFontCache(opts.FontDirs...)
+	}
 	images := make([]image.Image, len(p.slides))
 	for i := range p.slides {
 		img, err := p.SlideToImage(i, opts)
@@ -157,27 +164,33 @@ func saveImage(img image.Image, path string, opts *RenderOptions) error {
 
 	dir := filepath.Dir(path)
 	if dir != "" && dir != "." {
-		if err := os.MkdirAll(dir, 0o755); err != nil {
+		if err := os.MkdirAll(dir, 0750); err != nil {
 			return fmt.Errorf("create directory: %w", err)
 		}
 	}
 
-	f, err := os.Create(path)
+	f, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0644)
 	if err != nil {
 		return fmt.Errorf("create file: %w", err)
 	}
-	defer f.Close()
 
+	var encodeErr error
 	switch opts.Format {
 	case ImageFormatJPEG:
 		quality := opts.JPEGQuality
 		if quality <= 0 || quality > 100 {
 			quality = 90
 		}
-		return jpeg.Encode(f, img, &jpeg.Options{Quality: quality})
+		encodeErr = jpeg.Encode(f, img, &jpeg.Options{Quality: quality})
 	default:
-		return png.Encode(f, img)
+		encodeErr = png.Encode(f, img)
 	}
+
+	closeErr := f.Close()
+	if encodeErr != nil {
+		return encodeErr
+	}
+	return closeErr
 }
 
 // --- renderer ---
@@ -259,7 +272,7 @@ func (r *renderer) renderRichText(s *RichTextShape) {
 	}
 
 	// Draw text
-	r.drawParagraphs(s.paragraphs, x, y, w, h)
+	r.drawParagraphs(s.paragraphs, x, y, w, h, s.textAnchor)
 }
 
 func (r *renderer) renderDrawing(s *DrawingShape) {
@@ -268,12 +281,20 @@ func (r *renderer) renderDrawing(s *DrawingShape) {
 	w := r.emuToPixelX(s.width)
 	h := r.emuToPixelY(s.height)
 
-	if len(s.data) == 0 {
+	imgData := s.data
+	// Fallback: load from file path if in-memory data is empty.
+	if len(imgData) == 0 && s.path != "" {
+		data, err := os.ReadFile(s.path)
+		if err == nil {
+			imgData = data
+		}
+	}
+	if len(imgData) == 0 {
 		return
 	}
 
 	// Decode image data
-	reader := bytes.NewReader(s.data)
+	reader := bytes.NewReader(imgData)
 	srcImg, _, err := image.Decode(reader)
 	if err != nil {
 		// If we can't decode, just draw a placeholder rectangle
@@ -374,7 +395,7 @@ func (r *renderer) renderTable(s *TableShape) {
 			r.drawRect(cellRect, color.RGBA{R: 0, G: 0, B: 0, A: 255}, 1)
 
 			// Cell text
-			r.drawParagraphs(cell.paragraphs, cx+2, cy+2, cellW-4, cellH-4)
+			r.drawParagraphs(cell.paragraphs, cx+2, cy+2, cellW-4, cellH-4, TextAnchorNone)
 		}
 	}
 }
@@ -552,7 +573,7 @@ func buildTextLine(runs []textRun, align HorizontalAlignment) textLine {
 	return textLine{runs: runs, width: totalW, height: maxH, alignment: align}
 }
 
-func (r *renderer) drawParagraphs(paragraphs []*Paragraph, x, y, w, h int) {
+func (r *renderer) drawParagraphs(paragraphs []*Paragraph, x, y, w, h int, anchor TextAnchorType) {
 	var allLines []textLine
 
 	for _, para := range paragraphs {
@@ -597,8 +618,22 @@ func (r *renderer) drawParagraphs(paragraphs []*Paragraph, x, y, w, h int) {
 		wrappedLines = append(wrappedLines, wrapRunLine(line, w)...)
 	}
 
-	// Draw
+	// Compute total text height for vertical alignment.
+	totalTextH := 0
+	for _, line := range wrappedLines {
+		totalTextH += line.height
+	}
+
+	// Apply text anchor (vertical alignment within the shape).
 	curY := y
+	switch anchor {
+	case TextAnchorMiddle:
+		curY = y + (h-totalTextH)/2
+	case TextAnchorBottom:
+		curY = y + h - totalTextH
+	}
+
+	// Draw
 	for _, line := range wrappedLines {
 		curY += line.height
 		if curY > y+h {
@@ -700,12 +735,30 @@ func scaleImage(src image.Image, dstW, dstH int) image.Image {
 	}
 
 	dst := image.NewRGBA(image.Rect(0, 0, dstW, dstH))
+
+	// Fast path: if source is *image.RGBA, read directly from Pix slice.
+	if srcRGBA, ok := src.(*image.RGBA); ok {
+		for y := 0; y < dstH; y++ {
+			srcY := srcBounds.Min.Y + y*srcH/dstH
+			dstOff := y * dst.Stride
+			for x := 0; x < dstW; x++ {
+				srcX := srcBounds.Min.X + x*srcW/dstW
+				sOff := (srcY-srcRGBA.Rect.Min.Y)*srcRGBA.Stride + (srcX-srcRGBA.Rect.Min.X)*4
+				copy(dst.Pix[dstOff:dstOff+4], srcRGBA.Pix[sOff:sOff+4])
+				dstOff += 4
+			}
+		}
+		return dst
+	}
+
+	// Slow path: generic image.Image via At()
 	for y := 0; y < dstH; y++ {
+		srcY := srcBounds.Min.Y + y*srcH/dstH
 		for x := 0; x < dstW; x++ {
 			srcX := srcBounds.Min.X + x*srcW/dstW
-			srcY := srcBounds.Min.Y + y*srcH/dstH
 			dst.Set(x, y, src.At(srcX, srcY))
 		}
 	}
 	return dst
 }
+

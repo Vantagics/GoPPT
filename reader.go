@@ -62,9 +62,20 @@ func (r *PPTXReader) Read(path string) (*Presentation, error) {
 
 // ReadFromReader reads a presentation from an io.ReaderAt.
 func (r *PPTXReader) ReadFromReader(reader io.ReaderAt, size int64) (*Presentation, error) {
+	if size <= 0 {
+		return nil, fmt.Errorf("invalid reader size: %d", size)
+	}
+	if size > int64(maxZipTotalSize) {
+		return nil, fmt.Errorf("file size %d exceeds maximum allowed (%d bytes)", size, maxZipTotalSize)
+	}
+
 	zr, err := zip.NewReader(reader, size)
 	if err != nil {
 		return nil, fmt.Errorf("failed to open zip: %w", err)
+	}
+
+	if len(zr.File) > maxZipEntries {
+		return nil, fmt.Errorf("zip archive contains too many entries (%d > %d)", len(zr.File), maxZipEntries)
 	}
 
 	pres := &Presentation{
@@ -75,11 +86,8 @@ func (r *PPTXReader) ReadFromReader(reader io.ReaderAt, size int64) (*Presentati
 		layout:                 NewDocumentLayout(),
 	}
 
-	// Read core properties
-	if err := r.readCoreProperties(zr, pres); err != nil {
-		// Non-fatal: continue without properties
-		_ = err
-	}
+	// Read core properties (non-fatal: missing properties are acceptable)
+	_ = r.readCoreProperties(zr, pres)
 
 	// Read presentation.xml to get slide list and layout
 	slideRels, err := r.readPresentation(zr, pres)
@@ -122,11 +130,19 @@ func (r *PPTXReader) ReadFromReader(reader io.ReaderAt, size int64) (*Presentati
 }
 
 // maxZipEntrySize is the maximum allowed size for a single file extracted from a ZIP.
-// This prevents zip bomb attacks.
-const maxZipEntrySize = 256 << 20 // 256 MB
+// This prevents zip bomb attacks. 50 MB is generous for any legitimate PPTX part.
+const maxZipEntrySize = 50 << 20 // 50 MB
+
+// maxZipTotalSize is the cumulative limit for all extracted content from a single ZIP.
+const maxZipTotalSize = 200 << 20 // 200 MB
+
+// maxZipEntries is the maximum number of files allowed in a ZIP archive.
+const maxZipEntries = 10000
 
 func readFileFromZip(zr *zip.Reader, name string) ([]byte, error) {
-	// Build index on first call per reader (callers may also use zipIndex for batch).
+	if len(zr.File) > maxZipEntries {
+		return nil, fmt.Errorf("zip archive contains too many entries (%d > %d)", len(zr.File), maxZipEntries)
+	}
 	for _, f := range zr.File {
 		if f.Name == name {
 			if f.UncompressedSize64 > maxZipEntrySize {
@@ -134,10 +150,17 @@ func readFileFromZip(zr *zip.Reader, name string) ([]byte, error) {
 			}
 			rc, err := f.Open()
 			if err != nil {
-				return nil, err
+				return nil, fmt.Errorf("failed to open %s in zip: %w", name, err)
 			}
 			defer rc.Close()
-			return io.ReadAll(io.LimitReader(rc, int64(maxZipEntrySize)))
+			data, err := io.ReadAll(io.LimitReader(rc, int64(maxZipEntrySize)+1))
+			if err != nil {
+				return nil, fmt.Errorf("failed to read %s from zip: %w", name, err)
+			}
+			if int64(len(data)) > int64(maxZipEntrySize) {
+				return nil, fmt.Errorf("file %s actual size exceeds maximum allowed size", name)
+			}
+			return data, nil
 		}
 	}
 	return nil, fmt.Errorf("file not found in zip: %s", name)

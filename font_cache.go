@@ -1,6 +1,7 @@
 package gopresentation
 
 import (
+	"fmt"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -93,7 +94,7 @@ func (fc *FontCache) findFont(name string, bold, italic bool) *opentype.Font {
 		}
 	}
 	if bold {
-		for _, suffix := range []string{" bold", "bd", "b", " bold"} {
+		for _, suffix := range []string{" bold", "bd", "b"} {
 			if f, ok := fc.fonts[lower+suffix]; ok {
 				return f
 			}
@@ -117,7 +118,15 @@ func (fc *FontCache) findFont(name string, bold, italic bool) *opentype.Font {
 
 
 // LoadFont manually loads a TrueType/OpenType font file and registers it under the given name.
+// Returns an error if the file exceeds maxFontFileSize.
 func (fc *FontCache) LoadFont(name string, path string) error {
+	info, err := os.Stat(path)
+	if err != nil {
+		return err
+	}
+	if info.Size() > maxFontFileSize {
+		return fmt.Errorf("font file too large: %d bytes (max %d)", info.Size(), maxFontFileSize)
+	}
 	data, err := os.ReadFile(path)
 	if err != nil {
 		return err
@@ -164,15 +173,27 @@ func (fc *FontCache) ensureScanned() {
 	}
 }
 
+// maxFontScanDepth limits recursive directory traversal when scanning for fonts.
+const maxFontScanDepth = 3
+
+// maxFontFileSize limits the size of individual font files loaded into memory.
+const maxFontFileSize = 20 << 20 // 20 MB
+
 func (fc *FontCache) scanDir(dir string) {
+	fc.scanDirDepth(dir, 0)
+}
+
+func (fc *FontCache) scanDirDepth(dir string, depth int) {
+	if depth > maxFontScanDepth {
+		return
+	}
 	entries, err := os.ReadDir(dir)
 	if err != nil {
 		return
 	}
 	for _, entry := range entries {
 		if entry.IsDir() {
-			// Recurse one level into subdirectories (e.g. Windows font families)
-			fc.scanDir(filepath.Join(dir, entry.Name()))
+			fc.scanDirDepth(filepath.Join(dir, entry.Name()), depth+1)
 			continue
 		}
 		name := entry.Name()
@@ -182,6 +203,13 @@ func (fc *FontCache) scanDir(dir string) {
 		}
 
 		path := filepath.Join(dir, name)
+
+		// Check file size before reading
+		info, err := entry.Info()
+		if err != nil || info.Size() > maxFontFileSize {
+			continue
+		}
+
 		data, err := os.ReadFile(path)
 		if err != nil {
 			continue

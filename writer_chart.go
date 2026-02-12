@@ -232,7 +232,7 @@ func (w *PPTXWriter) writeGridlinesXML(tag string, gl *Gridlines) string {
             </a:ln>
           </c:spPr>
         </%s>
-`, tag, gl.Width*12700, gl.Color.ARGB[2:], tag)
+`, tag, gl.Width*12700, colorRGB(gl.Color), tag)
 }
 
 func (w *PPTXWriter) writeSeriesXML(series []*ChartSeries, categories []string, withMarker bool) string {
@@ -241,7 +241,7 @@ func (w *PPTXWriter) writeSeriesXML(series []*ChartSeries, categories []string, 
 		fillXML := ""
 		if s.FillColor.ARGB != "" {
 			fillXML = fmt.Sprintf(`          <c:spPr><a:solidFill><a:srgbClr val="%s"/></a:solidFill></c:spPr>
-`, s.FillColor.ARGB[2:])
+`, colorRGB(s.FillColor))
 		}
 
 		sb.WriteString(fmt.Sprintf(`        <c:ser>
@@ -392,7 +392,7 @@ func (w *PPTXWriter) writeScatterChartXML(c *ScatterChart, cats []string) string
 		fillXML := ""
 		if s.FillColor.ARGB != "" {
 			fillXML = fmt.Sprintf(`          <c:spPr><a:solidFill><a:srgbClr val="%s"/></a:solidFill></c:spPr>
-`, s.FillColor.ARGB[2:])
+`, colorRGB(s.FillColor))
 		}
 		sb.WriteString(fmt.Sprintf(`        <c:ser>
           <c:idx val="%d"/>

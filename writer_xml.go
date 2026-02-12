@@ -388,3 +388,15 @@ func xmlEscape(s string) string {
 	}
 	return b.String()
 }
+
+// colorRGB safely extracts the 6-character RGB portion from an 8-character ARGB string.
+// Returns "000000" if the input is invalid.
+func colorRGB(c Color) string {
+	if len(c.ARGB) >= 8 {
+		return c.ARGB[2:]
+	}
+	if len(c.ARGB) == 6 {
+		return c.ARGB
+	}
+	return "000000"
+}
