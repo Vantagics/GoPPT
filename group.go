@@ -11,6 +11,9 @@ type GroupShape struct {
 	childOffY int64
 	childExtX int64
 	childExtY int64
+	// groupFill is the fill defined on the group's grpSpPr, inherited by
+	// child shapes that use <a:grpFill/>.
+	groupFill *Fill
 }
 
 // ShapeTypeGroup is the shape type for groups.
@@ -34,6 +37,10 @@ func (g *GroupShape) AddShape(s Shape) *GroupShape {
 // GetShapes returns all shapes in the group.
 func (g *GroupShape) GetShapes() []Shape {
 	return g.shapes
+}
+// GetGroupFill returns the group-level fill (from grpSpPr), if any.
+func (g *GroupShape) GetGroupFill() *Fill {
+	return g.groupFill
 }
 
 // GetShapeCount returns the number of shapes in the group.

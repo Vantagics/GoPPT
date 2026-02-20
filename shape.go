@@ -599,6 +599,10 @@ const (
 	AutoShapeBentArrow       AutoShapeType = "bentArrow"
 	AutoShapeUturnArrow      AutoShapeType = "uturnArrow"
 	AutoShapeMathEqual       AutoShapeType = "mathEqual"
+	AutoShapeCurvedRightArrow AutoShapeType = "curvedRightArrow"
+	AutoShapeCurvedLeftArrow  AutoShapeType = "curvedLeftArrow"
+	AutoShapeCurvedUpArrow    AutoShapeType = "curvedUpArrow"
+	AutoShapeCurvedDownArrow  AutoShapeType = "curvedDownArrow"
 )
 
 func (a *AutoShape) GetType() ShapeType { return ShapeTypeAutoShape }
@@ -663,8 +667,9 @@ type LineShape struct {
 	lineColor     Color
 	headEnd       *LineEnd
 	tailEnd       *LineEnd
-	connectorType string         // prstGeom value: "line", "straightConnector1", "bentConnector3", etc.
-	adjustValues  map[string]int // adjustment values for connector geometry
+	connectorType string           // prstGeom value: "line", "straightConnector1", "bentConnector3", etc.
+	adjustValues  map[string]int   // adjustment values for connector geometry
+	customPath    *CustomGeomPath  // non-nil for custGeom connectors (freeform curved arrows)
 }
 
 func (l *LineShape) GetType() ShapeType { return ShapeTypeLine }

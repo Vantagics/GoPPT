@@ -424,7 +424,6 @@ func (r *renderer) renderRotated(x, y, w, h, rotation int, flipH, flipV bool, dr
 	r.renderRotatedExpanded(x, y, w, h, h, rotation, flipH, flipV, drawFn)
 }
 
-
 // renderRotatedExpanded is like renderRotated but uses bufH for the temp buffer
 // height, allowing text to overflow the shape bounds without being clipped.
 // The rotation center remains at the center of the original shape (w × h).
@@ -548,7 +547,6 @@ func (r *renderer) renderGroup(g *GroupShape) {
 		}
 	})
 }
-
 
 // --- Shape rendering ---
 
@@ -793,7 +791,6 @@ func (r *renderer) renderDrawing(s *DrawingShape) {
 	}
 }
 
-
 func (r *renderer) renderAutoShape(s *AutoShape) {
 	x := r.emuToPixelX(s.offsetX)
 	y := r.emuToPixelY(s.offsetY)
@@ -825,7 +822,17 @@ func (r *renderer) renderAutoShape(s *AutoShape) {
 		}
 		rect := image.Rect(ox, oy, ox+w, oy+h)
 		if s.shadow != nil && s.shadow.Visible {
-			tr.renderShadow(s.shadow, rect)
+			if s.shapeType == AutoShapeRoundedRect {
+				sRadius := minInt(w, h) * 16667 / 100000
+				if s.adjustValues != nil {
+					if adj, ok := s.adjustValues["adj"]; ok {
+						sRadius = minInt(w, h) * adj / 200000
+					}
+				}
+				tr.renderShadowRounded(s.shadow, rect, sRadius)
+			} else {
+				tr.renderShadow(s.shadow, rect)
+			}
 		}
 		tr.renderAutoShapeFill(s, ox, oy, w, h)
 		tr.renderAutoShapeBorder(s, ox, oy, w, h)
@@ -948,7 +955,12 @@ func (r *renderer) renderAutoShapeFill(s *AutoShape, x, y, w, h int) {
 			r.fillGradientLinear(rect, s.fill)
 		}
 	case AutoShapeRoundedRect:
-		radius := minInt(w, h) / 5
+		radius := minInt(w, h) * 16667 / 100000
+		if s.adjustValues != nil {
+			if adj, ok := s.adjustValues["adj"]; ok {
+				radius = minInt(w, h) * adj / 200000
+			}
+		}
 		if s.fill.Type == FillSolid {
 			r.fillRoundedRect(x, y, w, h, radius, fc)
 		} else {
@@ -1010,7 +1022,13 @@ func (r *renderer) renderAutoShapeBorder(s *AutoShape, x, y, w, h int) {
 	case AutoShapeEllipse:
 		r.drawEllipseAA(x, y, w, h, bc, pw)
 	case AutoShapeRoundedRect:
-		r.drawRoundedRect(x, y, w, h, minInt(w, h)/5, bc, pw)
+		radius := minInt(w, h) * 16667 / 100000
+		if s.adjustValues != nil {
+			if adj, ok := s.adjustValues["adj"]; ok {
+				radius = minInt(w, h) * adj / 200000
+			}
+		}
+		r.drawRoundedRect(x, y, w, h, radius, bc, pw)
 	case AutoShapeTriangle:
 		r.drawTriangle(x, y, w, h, bc, pw)
 	case AutoShapeDiamond:
@@ -1135,113 +1153,151 @@ func (r *renderer) renderLine(s *LineShape) {
 
 // renderLineRotated handles connectors with rotation by transforming path points.
 func (r *renderer) renderLineRotated(s *LineShape) {
-	w := r.emuToPixelX(s.width)
-	h := r.emuToPixelY(s.height)
-	ox := r.emuToPixelX(s.offsetX)
-	oy := r.emuToPixelY(s.offsetY)
+	// Use float64 EMU coordinates throughout to avoid precision loss.
+	// When the bounding box is very narrow (e.g. width=10390 EMU -> 1 pixel),
+	// computing in pixel space destroys the adjustment value information.
+	wEmu := float64(s.width)
+	hEmu := float64(s.height)
+	oxEmu := float64(s.offsetX)
+	oyEmu := float64(s.offsetY)
 	rotation := s.GetRotation()
 
-	// Build path in local coordinates (0,0)-(w,h), no flip applied yet
-	var pathPts [][2]int
-	x1, y1, x2, y2 := 0, 0, w, h
+	// Build path in local EMU coordinates (0,0)-(wEmu,hEmu)
+	type fpt [2]float64
+	var pathPts []fpt
 
 	switch {
 	case s.connectorType == "bentConnector3":
-		adjPct := 50000
+		adjPct := 50000.0
 		if v, ok := s.adjustValues["adj1"]; ok {
-			adjPct = v
+			adjPct = float64(v)
 		}
-		midX := x1 + int(float64(x2-x1)*float64(adjPct)/100000.0)
-		pathPts = [][2]int{{x1, y1}, {midX, y1}, {midX, y2}, {x2, y2}}
+		midX := wEmu * adjPct / 100000.0
+		pathPts = []fpt{{0, 0}, {midX, 0}, {midX, hEmu}, {wEmu, hEmu}}
 
 	case s.connectorType == "bentConnector2":
-		pathPts = [][2]int{{x1, y1}, {x2, y1}, {x2, y2}}
+		pathPts = []fpt{{0, 0}, {wEmu, 0}, {wEmu, hEmu}}
 
 	case s.connectorType == "bentConnector4":
-		adjPct1 := 50000
-		adjPct2 := 50000
+		adjPct1 := 50000.0
+		adjPct2 := 50000.0
 		if v, ok := s.adjustValues["adj1"]; ok {
-			adjPct1 = v
+			adjPct1 = float64(v)
 		}
 		if v, ok := s.adjustValues["adj2"]; ok {
-			adjPct2 = v
+			adjPct2 = float64(v)
 		}
-		midX := x1 + int(float64(x2-x1)*float64(adjPct1)/100000.0)
-		midY := y1 + int(float64(y2-y1)*float64(adjPct2)/100000.0)
-		pathPts = [][2]int{{x1, y1}, {midX, y1}, {midX, midY}, {x2, midY}, {x2, y2}}
+		midX := wEmu * adjPct1 / 100000.0
+		midY := hEmu * adjPct2 / 100000.0
+		pathPts = []fpt{{0, 0}, {midX, 0}, {midX, midY}, {wEmu, midY}, {wEmu, hEmu}}
 
 	case s.connectorType == "bentConnector5":
-		adjPct1 := 50000
-		adjPct2 := 50000
-		adjPct3 := 50000
+		adjPct1 := 50000.0
+		adjPct2 := 50000.0
+		adjPct3 := 50000.0
 		if v, ok := s.adjustValues["adj1"]; ok {
-			adjPct1 = v
+			adjPct1 = float64(v)
 		}
 		if v, ok := s.adjustValues["adj2"]; ok {
-			adjPct2 = v
+			adjPct2 = float64(v)
 		}
 		if v, ok := s.adjustValues["adj3"]; ok {
-			adjPct3 = v
+			adjPct3 = float64(v)
 		}
-		midX1 := x1 + int(float64(x2-x1)*float64(adjPct1)/100000.0)
-		midY := y1 + int(float64(y2-y1)*float64(adjPct2)/100000.0)
-		midX2 := x1 + int(float64(x2-x1)*float64(adjPct3)/100000.0)
-		pathPts = [][2]int{{x1, y1}, {midX1, y1}, {midX1, midY}, {midX2, midY}, {midX2, y2}, {x2, y2}}
+		midX1 := wEmu * adjPct1 / 100000.0
+		midY := hEmu * adjPct2 / 100000.0
+		midX2 := wEmu * adjPct3 / 100000.0
+		pathPts = []fpt{{0, 0}, {midX1, 0}, {midX1, midY}, {midX2, midY}, {midX2, hEmu}, {wEmu, hEmu}}
+
+	case strings.HasPrefix(s.connectorType, "curvedConnector"):
+		// For curved connectors with rotation, compute endpoints in EMU,
+		// rotate, convert to pixels, then delegate to renderCurvedConnector.
+		cx := wEmu / 2.0
+		cy := hEmu / 2.0
+		rad := float64(rotation) * math.Pi / 180.0
+		cosA := math.Cos(rad)
+		sinA := math.Sin(rad)
+		destCX := oxEmu + cx
+		destCY := oyEmu + cy
+
+		sx, sy := 0.0, 0.0
+		ex, ey := wEmu, hEmu
+		if s.flipHorizontal {
+			sx, ex = wEmu-sx, wEmu-ex
+		}
+		if s.flipVertical {
+			sy, ey = hEmu-sy, hEmu-ey
+		}
+		rsx := (sx-cx)*cosA - (sy-cy)*sinA + destCX
+		rsy := (sx-cx)*sinA + (sy-cy)*cosA + destCY
+		rex := (ex-cx)*cosA - (ey-cy)*sinA + destCX
+		rey := (ex-cx)*sinA + (ey-cy)*cosA + destCY
+
+		px1 := int(math.Round(rsx * r.scaleX))
+		py1 := int(math.Round(rsy * r.scaleY))
+		px2 := int(math.Round(rex * r.scaleX))
+		py2 := int(math.Round(rey * r.scaleY))
+
+		pw := maxInt(int(float64(maxInt(s.lineWidth, 1))*12700.0*r.scaleX), 1)
+		c := argbToRGBA(s.lineColor)
+		r.renderCurvedConnector(s.connectorType, px1, py1, px2, py2, s.adjustValues, c, pw, s.lineStyle, s.headEnd, s.tailEnd)
+		return
 
 	default:
-		// Straight line
-		pathPts = [][2]int{{x1, y1}, {x2, y2}}
+		pathPts = []fpt{{0, 0}, {wEmu, hEmu}}
 	}
 
-	// Apply flips in local coordinates
+	// Apply flips in EMU space
 	if s.flipHorizontal {
 		for i := range pathPts {
-			pathPts[i][0] = w - pathPts[i][0]
+			pathPts[i][0] = wEmu - pathPts[i][0]
 		}
 	}
 	if s.flipVertical {
 		for i := range pathPts {
-			pathPts[i][1] = h - pathPts[i][1]
+			pathPts[i][1] = hEmu - pathPts[i][1]
 		}
 	}
 
-	// Rotate each point around the center of the bounding box
-	cx := float64(w) / 2.0
-	cy := float64(h) / 2.0
+	// Rotate each point around the center of the bounding box in EMU space
+	cx := wEmu / 2.0
+	cy := hEmu / 2.0
 	rad := float64(rotation) * math.Pi / 180.0
 	cosA := math.Cos(rad)
 	sinA := math.Sin(rad)
+	destCX := oxEmu + cx
+	destCY := oyEmu + cy
 
-	// The destination center on the slide
-	destCX := float64(ox) + cx
-	destCY := float64(oy) + cy
-
+	// Transform to slide EMU coordinates, then convert to pixels
 	transformed := make([][2]int, len(pathPts))
 	for i, pt := range pathPts {
-		// Translate to center-relative
-		rx := float64(pt[0]) - cx
-		ry := float64(pt[1]) - cy
-		// Rotate (clockwise in screen coords: same as renderRotated forward transform)
-		nx := rx*cosA - ry*sinA
-		ny := rx*sinA + ry*cosA
-		// Translate to slide coordinates
+		rx := pt[0] - cx
+		ry := pt[1] - cy
+		nx := rx*cosA - ry*sinA + destCX
+		ny := rx*sinA + ry*cosA + destCY
 		transformed[i] = [2]int{
-			int(math.Round(nx + destCX)),
-			int(math.Round(ny + destCY)),
+			int(math.Round(nx * r.scaleX)),
+			int(math.Round(ny * r.scaleY)),
 		}
 	}
 
 	pw := maxInt(int(float64(maxInt(s.lineWidth, 1))*12700.0*r.scaleX), 1)
 	c := argbToRGBA(s.lineColor)
+	ls := s.lineStyle
 
-	// Draw the transformed path segments
-	for i := 0; i+1 < len(transformed); i++ {
-		r.drawLineAA(transformed[i][0], transformed[i][1],
-			transformed[i+1][0], transformed[i+1][1], c, pw)
+	drawSeg := func(ax, ay, bx, by int) {
+		if ls == BorderDash || ls == BorderDot {
+			r.drawDashedLineAA(ax, ay, bx, by, c, pw, ls)
+		} else {
+			r.drawLineAA(ax, ay, bx, by, c, pw)
+		}
 	}
 
-	// Draw arrows using the transformed path
-	// headEnd at the first point, tailEnd at the last point
+	for i := 0; i+1 < len(transformed); i++ {
+		drawSeg(transformed[i][0], transformed[i][1],
+			transformed[i+1][0], transformed[i+1][1])
+	}
+
 	if s.headEnd != nil && s.headEnd.Type != ArrowNone && s.headEnd.Type != "" {
 		r.drawArrowOnPath(transformed[0][0], transformed[0][1], transformed, c, pw, s.headEnd)
 	}
@@ -1250,7 +1306,6 @@ func (r *renderer) renderLineRotated(s *LineShape) {
 		r.drawArrowOnPath(last[0], last[1], transformed, c, pw, s.tailEnd)
 	}
 }
-
 
 // renderLineAt draws a line/connector with the bounding box top-left at (ox, oy).
 // Flip and adjust values are applied relative to this origin.
@@ -1504,7 +1559,6 @@ func (r *renderer) renderCurvedConnector(connType string, x1, y1, x2, y2 int, ad
 	}
 }
 
-
 // drawArrowOnPath draws an arrow at the visual endpoint (vx,vy) using the
 // direction from the visual path. It finds which end of the path is closest to
 // the visual point and uses the appropriate segment for direction.
@@ -1738,7 +1792,6 @@ func (r *renderer) renderTable(s *TableShape) {
 		}
 	}
 }
-
 
 func (r *renderer) renderCellBorders(cb *CellBorders, rect image.Rectangle) {
 	drawBorder := func(b *Border, x1, y1, x2, y2 int) {
@@ -1998,6 +2051,70 @@ func (r *renderer) renderShadow(shadow *Shadow, rect image.Rectangle) {
 			r.fillRectBlend(image.Rect(inner.Max.X, inner.Min.Y, expanded.Max.X, inner.Max.Y), c)
 		} else {
 			r.fillRectBlend(expanded, c)
+		}
+	}
+}
+
+
+func (r *renderer) renderShadowRounded(shadow *Shadow, rect image.Rectangle, radius int) {
+	if shadow == nil || !shadow.Visible {
+		return
+	}
+	rad := float64(shadow.Direction) * math.Pi / 180.0
+	dist := float64(shadow.Distance) * r.scaleX
+	dx := int(dist * math.Cos(rad))
+	dy := int(dist * math.Sin(rad))
+	shadowColor := argbToRGBA(shadow.Color)
+	shadowColor.A = uint8(float64(shadow.Alpha) * 255 / 100)
+	shadowRect := rect.Add(image.Pt(dx, dy))
+
+	blur := shadow.BlurRadius
+	if blur <= 0 {
+		sw := shadowRect.Dx()
+		sh := shadowRect.Dy()
+		r.fillRoundedRect(shadowRect.Min.X, shadowRect.Min.Y, sw, sh, radius, shadowColor)
+		return
+	}
+
+	steps := minInt(blur, 10)
+	outerRect := shadowRect.Inset(-steps)
+	tmpW := outerRect.Dx()
+	tmpH := outerRect.Dy()
+	if tmpW <= 0 || tmpH <= 0 {
+		return
+	}
+	tmp := image.NewRGBA(image.Rect(0, 0, tmpW, tmpH))
+	tmpR := &renderer{img: tmp, scaleX: r.scaleX, scaleY: r.scaleY}
+
+	for i := steps; i >= 0; i-- {
+		t := float64(i) / float64(steps)
+		alpha := uint8(float64(shadowColor.A) * (1 - t*t))
+		c := color.RGBA{R: shadowColor.R, G: shadowColor.G, B: shadowColor.B, A: alpha}
+		expanded := shadowRect.Inset(-i)
+		ex := expanded.Min.X - outerRect.Min.X
+		ey := expanded.Min.Y - outerRect.Min.Y
+		ew := expanded.Dx()
+		eh := expanded.Dy()
+		er := radius + i
+		tmpR.fillRoundedRect(ex, ey, ew, eh, er, c)
+	}
+
+	bounds := r.img.Bounds()
+	for py := 0; py < tmpH; py++ {
+		ddy := outerRect.Min.Y + py
+		if ddy < bounds.Min.Y || ddy >= bounds.Max.Y {
+			continue
+		}
+		for px := 0; px < tmpW; px++ {
+			ddx := outerRect.Min.X + px
+			if ddx < bounds.Min.X || ddx >= bounds.Max.X {
+				continue
+			}
+			sc := tmp.RGBAAt(px, py)
+			if sc.A == 0 {
+				continue
+			}
+			r.blendPixel(ddx, ddy, sc)
 		}
 	}
 }
@@ -2606,10 +2723,18 @@ func (r *renderer) fillPolygonGradient(pts []fpoint, fill *Fill) {
 	// Compute bounding box
 	minX, minY, maxX, maxY := pts[0].x, pts[0].y, pts[0].x, pts[0].y
 	for _, p := range pts[1:] {
-		if p.x < minX { minX = p.x }
-		if p.y < minY { minY = p.y }
-		if p.x > maxX { maxX = p.x }
-		if p.y > maxY { maxY = p.y }
+		if p.x < minX {
+			minX = p.x
+		}
+		if p.y < minY {
+			minY = p.y
+		}
+		if p.x > maxX {
+			maxX = p.x
+		}
+		if p.y > maxY {
+			maxY = p.y
+		}
 	}
 	bw := maxX - minX
 	bh := maxY - minY
@@ -2667,13 +2792,21 @@ func (r *renderer) fillPolygonGradient(pts []fpoint, fill *Fill) {
 			if x1 > x2 {
 				continue
 			}
-			if x1 < bounds.Min.X { x1 = bounds.Min.X }
-			if x2 >= bounds.Max.X { x2 = bounds.Max.X - 1 }
+			if x1 < bounds.Min.X {
+				x1 = bounds.Min.X
+			}
+			if x2 >= bounds.Max.X {
+				x2 = bounds.Max.X - 1
+			}
 			off := (y-bounds.Min.Y)*stride + (x1-bounds.Min.X)*4
 			for px := x1; px <= x2; px++ {
 				dxf := float64(px) - minX - cx
 				t := (dxf*cosA + rowBase) * invMaxProj
-				if t < 0 { t = 0 } else if t > 1 { t = 1 }
+				if t < 0 {
+					t = 0
+				} else if t > 1 {
+					t = 1
+				}
 				it := 1 - t
 				pix[off] = uint8(float64(startC.R)*it + float64(endC.R)*t)
 				pix[off+1] = uint8(float64(startC.G)*it + float64(endC.G)*t)
@@ -2985,10 +3118,10 @@ func (r *renderer) fillBentArrow(x, y, w, h int, c color.RGBA, adj map[string]in
 
 	pts = append(pts,
 		fpoint{arrowBaseX, bendY - shaftW}, // top edge to arrowhead base
-		fpoint{arrowBaseX, arrowTop},        // arrowhead top
-		fpoint{tipX, arrowCenterY},          // arrowhead tip
-		fpoint{arrowBaseX, arrowBot},        // arrowhead bottom
-		fpoint{arrowBaseX, bendY},           // bottom of horizontal shaft
+		fpoint{arrowBaseX, arrowTop},       // arrowhead top
+		fpoint{tipX, arrowCenterY},         // arrowhead tip
+		fpoint{arrowBaseX, arrowBot},       // arrowhead bottom
+		fpoint{arrowBaseX, bendY},          // bottom of horizontal shaft
 	)
 
 	// Inner corner: rounded arc from horizontal bottom to vertical inner edge
@@ -3013,10 +3146,6 @@ func (r *renderer) fillBentArrow(x, y, w, h int, c color.RGBA, adj map[string]in
 	pts = append(pts, fpoint{innerX, fy + fh}) // bottom of inner vertical edge
 	r.fillPolygon(pts, c)
 }
-
-
-
-
 
 func (r *renderer) fillUturnArrow(x, y, w, h int, c color.RGBA, adj map[string]int) {
 	// OOXML uturnArrow preset geometry.
@@ -3199,10 +3328,10 @@ func (r *renderer) fillUturnArrowTransposed(x, y, w, h int, c color.RGBA, adj ma
 	// adj3/adj5 control X-direction dimensions → use fw (long axis in buffer,
 	// becomes visual height after rotation, must span all boxes).
 	shaftW := fh * float64(adj1v) / 100000.0    // shaft thickness (Y direction)
-	headExtra := fh * float64(adj2v) / 100000.0  // extra arrowhead width beyond shaft
-	headH := fw * float64(adj3v) / 100000.0      // arrowhead length (X direction)
-	uWidth := fh * float64(adj4v) / 100000.0     // U-turn span between shafts (Y direction)
-	totalH := fw * float64(adj5v) / 100000.0     // total shaft length (X direction)
+	headExtra := fh * float64(adj2v) / 100000.0 // extra arrowhead width beyond shaft
+	headH := fw * float64(adj3v) / 100000.0     // arrowhead length (X direction)
+	uWidth := fh * float64(adj4v) / 100000.0    // U-turn span between shafts (Y direction)
+	totalH := fw * float64(adj5v) / 100000.0    // total shaft length (X direction)
 
 	// Two shafts side by side in Y, running along X.
 	// U-turn arc at LEFT (low X), arrowhead at RIGHT (high X).
@@ -3241,7 +3370,7 @@ func (r *renderer) fillUturnArrowTransposed(x, y, w, h int, c color.RGBA, adj ma
 		innerRx = 0
 	}
 
-	shaftLeft := fx              // left edge (arrowhead end)
+	shaftLeft := fx                // left edge (arrowhead end)
 	arcCX := fx + totalH - outerRx // arc center near right edge
 
 	// Arrowhead on TOP shaft, pointing LEFT (→ visual top after rotation)
@@ -3309,16 +3438,6 @@ func (r *renderer) fillUturnArrowTransposed(x, y, w, h int, c color.RGBA, adj ma
 
 	r.fillPolygon(pts, c)
 }
-
-
-
-
-
-
-
-
-
-
 
 // --- Text rendering ---
 
@@ -4107,7 +4226,6 @@ func mapSymbolChar(fontName, ch string) string {
 	return "•" // fallback
 }
 
-
 // formatBulletNumber formats a number according to the bullet format.
 func formatBulletNumber(num int, format string) string {
 	switch format {
@@ -4226,7 +4344,6 @@ func splitASCIIWords(text string) []string {
 	}
 	return segments
 }
-
 
 // wrapRunLine wraps text runs into multiple lines that fit within maxWidth.
 func (r *renderer) wrapRunLine(runs []textRun, maxWidth int) []textLine {
@@ -5366,7 +5483,6 @@ func drawWMFText(canvas *image.RGBA, x, y int, text string, scale int, centerH b
 	d.DrawString(text)
 }
 
-
 // parseDIB parses a BITMAPINFOHEADER + pixel data into an image.
 func parseDIB(data []byte, maxLen int) image.Image {
 	if len(data) < 40 {
@@ -5538,6 +5654,9 @@ func decodeEMFBitmap(data []byte) image.Image {
 
 		pos += int(recSize)
 	}
-	return bestImg
+	if bestImg != nil {
+		return bestImg
+	}
+	// Fallback: try vector rendering for EMFs without embedded bitmaps
+	return renderEMFVector(data)
 }
-

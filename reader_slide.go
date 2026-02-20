@@ -263,6 +263,10 @@ func (r *PPTXReader) parseSlideXML(decoder *xml.Decoder, slide *Slide, rels []xm
 		inCustGeom  bool
 		inPathLst   bool
 		inCustPath  bool
+
+		// effectLst / outerShdw tracking
+		inEffectLst  bool
+		inOuterShdw  bool
 	}
 
 	state := &parseState{}
@@ -277,10 +281,9 @@ func (r *PPTXReader) parseSlideXML(decoder *xml.Decoder, slide *Slide, rels []xm
 	var currentTableRow int
 	var currentTableCol int
 
-	// Pending custom geometry path (WIP: not yet consumed by renderer)
+	// Pending custom geometry path
 	var pendingCustomPath *CustomGeomPath
 	var pendingPathCmds []PathCommand
-	_ = pendingCustomPath
 
 	// Default font properties from defRPr (paragraph-level defaults)
 	var defFont *Font
@@ -323,6 +326,9 @@ func (r *PPTXReader) parseSlideXML(decoder *xml.Decoder, slide *Slide, rels []xm
 	// Deferred adjustment values from avLst
 	var pendingAdjustValues map[string]int
 
+	// Deferred shadow (spPr effectLst outerShdw)
+	var pendingShadow *Shadow
+
 	// Deferred blipFill image data (spPr blipFill for shapes)
 	var pendingBlipFillData []byte
 	var pendingBlipFillMime string
@@ -352,6 +358,7 @@ func (r *PPTXReader) parseSlideXML(decoder *xml.Decoder, slide *Slide, rels []xm
 		flipH    bool
 		flipV    bool
 		rotation int
+		grpFill  *Fill // solidFill from grpSpPr, inherited by child <a:grpFill/>
 	}
 	var grpStack []*grpSaved
 
@@ -407,6 +414,7 @@ func (r *PPTXReader) parseSlideXML(decoder *xml.Decoder, slide *Slide, rels []xm
 					pendingHeadEnd = nil
 					pendingTailEnd = nil
 					pendingAdjustValues = nil
+					pendingShadow = nil
 					pendingBlipFillData = nil
 					pendingBlipFillMime = ""
 					pendingCustomPath = nil
@@ -430,6 +438,7 @@ func (r *PPTXReader) parseSlideXML(decoder *xml.Decoder, slide *Slide, rels []xm
 					shapeName = ""
 					prstGeom = ""
 					shapeRotation = 0
+					pendingCustomPath = nil
 				}
 			case "graphicFrame":
 				if state.inSpTree {
@@ -1078,6 +1087,16 @@ func (r *PPTXReader) parseSlideXML(decoder *xml.Decoder, slide *Slide, rels []xm
 						}
 					}
 				}
+			case "grpFill":
+				// <a:grpFill/> — inherit fill from parent group's grpSpPr
+				if state.inSpPr && !state.inTxBody && !state.inLn && state.inSp && state.inGrpSp && len(grpStack) > 0 {
+					gf := grpStack[len(grpStack)-1].grpFill
+					if gf != nil {
+						inherited := NewFill()
+						*inherited = *gf
+						pendingShapeFill = inherited
+					}
+				}
 			case "gradFill":
 				if state.inRunProps && currentFont != nil {
 					// gradFill inside rPr — use first stop color as text color
@@ -1146,6 +1165,14 @@ func (r *PPTXReader) parseSlideXML(decoder *xml.Decoder, slide *Slide, rels []xm
 							gradStopColors = append(gradStopColors, c)
 							gradStopPositions = append(gradStopPositions, state.gradFillPos)
 							lastColor = &gradStopColors[len(gradStopColors)-1]
+						}
+					}
+				} else if state.inOuterShdw && pendingShadow != nil {
+					// Shadow color
+					for _, attr := range t.Attr {
+						if attr.Name.Local == "val" {
+							pendingShadow.Color = NewColor("FF" + attr.Value)
+							lastColor = &pendingShadow.Color
 						}
 					}
 				} else if state.inTcPrSolidFill {
@@ -1226,7 +1253,13 @@ func (r *PPTXReader) parseSlideXML(decoder *xml.Decoder, slide *Slide, rels []xm
 					for _, attr := range t.Attr {
 						if attr.Name.Local == "val" {
 							c := NewColor("FF" + attr.Value)
-							if state.inSp {
+							if state.inGrpSp && !state.inSp && len(grpStack) > 0 {
+								// solidFill inside grpSpPr — store as group fill
+								f := NewFill()
+								f.SetSolid(c)
+								grpStack[len(grpStack)-1].grpFill = f
+								lastColor = &grpStack[len(grpStack)-1].grpFill.Color
+							} else if state.inSp {
 								if currentRichText != nil {
 									currentRichText.GetFill().SetSolid(c)
 									lastColor = &currentRichText.GetFill().Color
@@ -1289,6 +1322,9 @@ func (r *PPTXReader) parseSlideXML(decoder *xml.Decoder, slide *Slide, rels []xm
 					gradStopColors = append(gradStopColors, c)
 					gradStopPositions = append(gradStopPositions, state.gradFillPos)
 					lastColor = &gradStopColors[len(gradStopColors)-1]
+				} else if state.inOuterShdw && pendingShadow != nil {
+					pendingShadow.Color = c
+					lastColor = &pendingShadow.Color
 				} else if state.inFontRef {
 					fontRefColor = &c
 					lastColor = fontRefColor
@@ -1307,7 +1343,12 @@ func (r *PPTXReader) parseSlideXML(decoder *xml.Decoder, slide *Slide, rels []xm
 						lastColor = &pendingBorder.Color
 					}
 				} else if state.inSolidFill && state.inSpPr && !state.inRunProps && !state.inTxBody && !state.inLn {
-					if state.inSp {
+					if state.inGrpSp && !state.inSp && len(grpStack) > 0 {
+						f := NewFill()
+						f.SetSolid(c)
+						grpStack[len(grpStack)-1].grpFill = f
+						lastColor = &grpStack[len(grpStack)-1].grpFill.Color
+					} else if state.inSp {
 						if currentRichText != nil {
 							currentRichText.GetFill().SetSolid(c)
 							lastColor = &currentRichText.GetFill().Color
@@ -1350,6 +1391,9 @@ func (r *PPTXReader) parseSlideXML(decoder *xml.Decoder, slide *Slide, rels []xm
 							gradStopColors = append(gradStopColors, c)
 							gradStopPositions = append(gradStopPositions, state.gradFillPos)
 							lastColor = &gradStopColors[len(gradStopColors)-1]
+						} else if state.inOuterShdw && pendingShadow != nil {
+							pendingShadow.Color = c
+							lastColor = &pendingShadow.Color
 						} else if state.inTcPrSolidFill {
 							if state.inTcPrLn {
 								lastColor = &c
@@ -1401,7 +1445,12 @@ func (r *PPTXReader) parseSlideXML(decoder *xml.Decoder, slide *Slide, rels []xm
 								lastColor = &pendingBorder.Color
 							}
 						} else if state.inSolidFill && state.inSpPr && !state.inRunProps && !state.inTxBody && !state.inLn {
-							if state.inSp {
+							if state.inGrpSp && !state.inSp && len(grpStack) > 0 {
+								f := NewFill()
+								f.SetSolid(c)
+								grpStack[len(grpStack)-1].grpFill = f
+								lastColor = &grpStack[len(grpStack)-1].grpFill.Color
+							} else if state.inSp {
 								if currentRichText != nil {
 									currentRichText.GetFill().SetSolid(c)
 									lastColor = &currentRichText.GetFill().Color
@@ -1441,7 +1490,10 @@ func (r *PPTXReader) parseSlideXML(decoder *xml.Decoder, slide *Slide, rels []xm
 				}
 				if sysLastClr != "" {
 					c := NewColor("FF" + sysLastClr)
-					if state.inTcPrSolidFill {
+					if state.inOuterShdw && pendingShadow != nil {
+						pendingShadow.Color = c
+						lastColor = &pendingShadow.Color
+					} else if state.inTcPrSolidFill {
 						if state.inTcPrLn {
 							lastColor = &c
 							if currentTable != nil && currentTableRow >= 0 && currentTableCol >= 0 &&
@@ -1491,7 +1543,12 @@ func (r *PPTXReader) parseSlideXML(decoder *xml.Decoder, slide *Slide, rels []xm
 							lastColor = &pendingBorder.Color
 						}
 					} else if state.inSolidFill && state.inSpPr && !state.inRunProps && !state.inTxBody && !state.inLn {
-						if state.inSp {
+						if state.inGrpSp && !state.inSp && len(grpStack) > 0 {
+							f := NewFill()
+							f.SetSolid(c)
+							grpStack[len(grpStack)-1].grpFill = f
+							lastColor = &grpStack[len(grpStack)-1].grpFill.Color
+						} else if state.inSp {
 							if currentRichText != nil {
 								currentRichText.GetFill().SetSolid(c)
 								lastColor = &currentRichText.GetFill().Color
@@ -1525,15 +1582,21 @@ func (r *PPTXReader) parseSlideXML(decoder *xml.Decoder, slide *Slide, rels []xm
 						if attr.Name.Local == "val" {
 							if v, err := strconv.Atoi(attr.Value); err == nil {
 								// val is in 1/1000 of a percent, e.g. 67000 = 67%
-								// PowerPoint treats val="0" as fully opaque (no-op),
-								// so skip zero to avoid making text invisible.
-								if v <= 0 {
+								// For text run properties, skip val="0" to avoid
+								// making text invisible (PowerPoint quirk).
+								// For line/fill/gradient contexts, val="0" genuinely
+								// means fully transparent.
+								if v <= 0 && (state.inRunProps || state.inDefRPr) {
 									continue
 								}
 								alpha := uint8(v * 255 / 100000)
 								// Replace the alpha byte in the ARGB string
 								alphaHex := fmt.Sprintf("%02X", alpha)
 								lastColor.ARGB = alphaHex + lastColor.ARGB[2:]
+								// Also update shadow Alpha when inside outerShdw
+								if state.inOuterShdw && pendingShadow != nil {
+									pendingShadow.Alpha = v / 1000 // convert to 0-100
+								}
 							}
 						}
 					}
@@ -1888,6 +1951,32 @@ func (r *PPTXReader) parseSlideXML(decoder *xml.Decoder, slide *Slide, rels []xm
 						}
 					}
 				}
+			case "effectLst":
+				if state.inSpPr && !state.inLn {
+					state.inEffectLst = true
+				}
+			case "outerShdw":
+				if state.inEffectLst {
+					state.inOuterShdw = true
+					pendingShadow = NewShadow()
+					pendingShadow.Visible = true
+					for _, attr := range t.Attr {
+						switch attr.Name.Local {
+						case "blurRad":
+							if v, err := strconv.Atoi(attr.Value); err == nil {
+								pendingShadow.BlurRadius = v / 12700
+							}
+						case "dist":
+							if v, err := strconv.Atoi(attr.Value); err == nil {
+								pendingShadow.Distance = v / 12700
+							}
+						case "dir":
+							if v, err := strconv.Atoi(attr.Value); err == nil {
+								pendingShadow.Direction = v / 60000
+							}
+						}
+					}
+				}
 			case "spPr", "grpSpPr":
 				if state.inSp || state.inPic || state.inCxnSp || state.inGrpSp {
 					state.inSpPr = true
@@ -2049,6 +2138,7 @@ func (r *PPTXReader) parseSlideXML(decoder *xml.Decoder, slide *Slide, rels []xm
 							g.flipHorizontal = top.flipH
 							g.flipVertical = top.flipV
 							g.rotation = top.rotation
+							g.groupFill = top.grpFill
 							// Add to parent group or slide
 							if len(grpStack) > 0 {
 								parentGroup := grpStack[len(grpStack)-1].group
@@ -2112,6 +2202,11 @@ func (r *PPTXReader) parseSlideXML(decoder *xml.Decoder, slide *Slide, rels []xm
 						if pendingBorder != nil {
 							autoShape.border = pendingBorder
 							pendingBorder = nil
+						}
+						// Apply deferred shadow
+						if pendingShadow != nil {
+							autoShape.shadow = pendingShadow
+							pendingShadow = nil
 						}
 						// Copy paragraphs from richtext if any (preserves font info)
 						if currentRichText != nil && len(currentRichText.paragraphs) > 0 {
@@ -2188,6 +2283,11 @@ func (r *PPTXReader) parseSlideXML(decoder *xml.Decoder, slide *Slide, rels []xm
 							currentRichText.border = pendingBorder
 							pendingBorder = nil
 						}
+						// Apply deferred shadow
+						if pendingShadow != nil {
+							currentRichText.shadow = pendingShadow
+							pendingShadow = nil
+						}
 						// Apply deferred arrow ends
 						if pendingHeadEnd != nil {
 							currentRichText.headEnd = pendingHeadEnd
@@ -2206,6 +2306,81 @@ func (r *PPTXReader) parseSlideXML(decoder *xml.Decoder, slide *Slide, rels []xm
 							currentGroup.AddShape(currentRichText)
 						} else {
 							slide.shapes = append(slide.shapes, currentRichText)
+						}
+					} else if pendingCustomPath != nil {
+						// Shape has custom geometry but no text body — create a
+						// RichTextShape to carry the custom path, fill, and border.
+						rt := NewRichTextShape()
+						rt.name = shapeName
+						rt.description = shapeDescr
+						rt.offsetX = offX
+						rt.offsetY = offY
+						rt.width = extCX
+						rt.height = extCY
+						rt.flipHorizontal = flipH
+						rt.flipVertical = flipV
+						rt.rotation = shapeRotation
+						rt.customPath = pendingCustomPath
+						pendingCustomPath = nil
+						if pendingShapeFill != nil {
+							rt.fill = pendingShapeFill
+							pendingShapeFill = nil
+						}
+						if pendingBorder != nil {
+							rt.border = pendingBorder
+							pendingBorder = nil
+						}
+						if pendingShadow != nil {
+							rt.shadow = pendingShadow
+							pendingShadow = nil
+						}
+						if pendingHeadEnd != nil {
+							rt.headEnd = pendingHeadEnd
+							pendingHeadEnd = nil
+						}
+						if pendingTailEnd != nil {
+							rt.tailEnd = pendingTailEnd
+							pendingTailEnd = nil
+						}
+						if state.inGrpSp && currentGroup != nil {
+							currentGroup.AddShape(rt)
+						} else {
+							slide.shapes = append(slide.shapes, rt)
+						}
+					} else if prstGeom != "" && (pendingShapeFill != nil || pendingBorder != nil || pendingShadow != nil) {
+						// Shape with geometry (including rect) that has fill or border
+						// but no text body — create an AutoShape so it gets rendered.
+						autoShape := NewAutoShape()
+						autoShape.name = shapeName
+						autoShape.description = shapeDescr
+						autoShape.offsetX = offX
+						autoShape.offsetY = offY
+						autoShape.width = extCX
+						autoShape.height = extCY
+						autoShape.flipHorizontal = flipH
+						autoShape.flipVertical = flipV
+						autoShape.rotation = shapeRotation
+						autoShape.shapeType = AutoShapeType(prstGeom)
+						if pendingAdjustValues != nil {
+							autoShape.adjustValues = pendingAdjustValues
+							pendingAdjustValues = nil
+						}
+						if pendingShapeFill != nil {
+							autoShape.fill = pendingShapeFill
+							pendingShapeFill = nil
+						}
+						if pendingBorder != nil {
+							autoShape.border = pendingBorder
+							pendingBorder = nil
+						}
+						if pendingShadow != nil {
+							autoShape.shadow = pendingShadow
+							pendingShadow = nil
+						}
+						if state.inGrpSp && currentGroup != nil {
+							currentGroup.AddShape(autoShape)
+						} else {
+							slide.shapes = append(slide.shapes, autoShape)
 						}
 					}
 					currentRichText = nil
@@ -2248,6 +2423,10 @@ func (r *PPTXReader) parseSlideXML(decoder *xml.Decoder, slide *Slide, rels []xm
 						if pendingAdjustValues != nil {
 							currentLine.adjustValues = pendingAdjustValues
 							pendingAdjustValues = nil
+						}
+						if pendingCustomPath != nil {
+							currentLine.customPath = pendingCustomPath
+							pendingCustomPath = nil
 						}
 						if state.inGrpSp && currentGroup != nil {
 							currentGroup.AddShape(currentLine)
@@ -2376,10 +2555,16 @@ func (r *PPTXReader) parseSlideXML(decoder *xml.Decoder, slide *Slide, rels []xm
 				state.inSrgbClr = false
 			case "schemeClr":
 				state.inSrgbClr = false
+			case "outerShdw":
+				state.inOuterShdw = false
+			case "effectLst":
+				state.inEffectLst = false
 			case "spPr", "grpSpPr":
 				state.inSpPr = false
 				state.inLn = false
 				state.inExtLst = false
+				state.inEffectLst = false
+				state.inOuterShdw = false
 				state.inSpPrBlipFill = false
 				// When the group's shape properties end, save position/size
 				// before child shapes overwrite the shared variables.
@@ -3467,7 +3652,10 @@ func (r *PPTXReader) parseLayoutImages(data []byte, rels []xmlRelForRead, zr *zi
 					for _, attr := range t.Attr {
 						if attr.Name.Local == "val" {
 							if v, err := strconv.Atoi(attr.Value); err == nil {
-								if v <= 0 {
+								// For text run properties, skip val="0" to avoid
+								// making text invisible. For line/fill contexts,
+								// val="0" genuinely means fully transparent.
+								if v <= 0 && (inRunProps || inDefRPr) {
 									continue
 								}
 								alpha := uint8(v * 255 / 100000)
