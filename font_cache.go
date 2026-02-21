@@ -25,11 +25,12 @@ type fontKey struct {
 // It searches system font directories and user-specified directories
 // for .ttf and .otf files, then caches parsed fonts and rendered faces.
 type FontCache struct {
-	mu       sync.RWMutex
-	dirs     []string            // directories to search for fonts
-	fonts    map[string]*opentype.Font // lowercase font name -> parsed font
-	faces    map[fontKey]font.Face     // cached faces
-	scanned  bool
+	mu           sync.RWMutex
+	dirs         []string                  // directories to search for fonts
+	fonts        map[string]*opentype.Font // lowercase font name -> parsed font
+	faces        map[fontKey]font.Face     // cached render faces (HintingFull)
+	measureFaces map[fontKey]font.Face     // cached measure faces (HintingNone)
+	scanned      bool
 }
 
 // NewFontCache creates a FontCache that searches the given directories
@@ -37,9 +38,10 @@ type FontCache struct {
 func NewFontCache(extraDirs ...string) *FontCache {
 	dirs := append(systemFontDirs(), extraDirs...)
 	return &FontCache{
-		dirs:  dirs,
-		fonts: make(map[string]*opentype.Font),
-		faces: make(map[fontKey]font.Face),
+		dirs:         dirs,
+		fonts:        make(map[string]*opentype.Font),
+		faces:        make(map[fontKey]font.Face),
+		measureFaces: make(map[fontKey]font.Face),
 	}
 }
 
@@ -75,6 +77,43 @@ func (fc *FontCache) GetFace(name string, sizePt float64, bold, italic bool) fon
 
 	fc.mu.Lock()
 	fc.faces[key] = face
+	fc.mu.Unlock()
+	return face
+}
+
+// GetMeasureFace returns a font.Face with HintingNone for text measurement.
+// PowerPoint's text layout engine uses unhinted (ideal) glyph metrics for
+// line wrapping and text measurement. Using HintingNone produces glyph
+// advances that match PowerPoint's DirectWrite layout, so wrapping occurs
+// at the same character positions.
+func (fc *FontCache) GetMeasureFace(name string, sizePt float64, bold, italic bool) font.Face {
+	fc.ensureScanned()
+
+	key := fontKey{name: strings.ToLower(name), size: sizePt, bold: bold, italic: italic}
+
+	fc.mu.RLock()
+	if face, ok := fc.measureFaces[key]; ok {
+		fc.mu.RUnlock()
+		return face
+	}
+	fc.mu.RUnlock()
+
+	f := fc.findFont(name, bold, italic)
+	if f == nil {
+		return nil
+	}
+
+	face, err := opentype.NewFace(f, &opentype.FaceOptions{
+		Size:    sizePt,
+		DPI:     72,
+		Hinting: font.HintingNone,
+	})
+	if err != nil {
+		return nil
+	}
+
+	fc.mu.Lock()
+	fc.measureFaces[key] = face
 	fc.mu.Unlock()
 	return face
 }

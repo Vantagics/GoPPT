@@ -4263,6 +4263,81 @@ func (r *renderer) getCJKFace(f *Font) font.Face {
 	return nil
 }
 
+// getMeasureFace returns a font.Face with HintingNone for text measurement.
+// PowerPoint uses unhinted glyph metrics for text layout, so using HintingNone
+// produces glyph advances that match PowerPoint's wrapping positions.
+func (r *renderer) getMeasureFace(f *Font) font.Face {
+	if r.fontCache == nil {
+		return nil
+	}
+	sizePt := float64(f.Size)
+	if sizePt <= 0 {
+		sizePt = 10
+	}
+	if r.fontScale > 0 && r.fontScale != 1.0 {
+		sizePt *= r.fontScale
+	}
+	sizePixels := sizePt * 12700.0 * r.scaleX
+
+	face := r.fontCache.GetMeasureFace(f.Name, sizePixels, f.Bold, f.Italic)
+	if face != nil {
+		return face
+	}
+	if f.NameEA != "" {
+		face = r.fontCache.GetMeasureFace(f.NameEA, sizePixels, f.Bold, f.Italic)
+		if face != nil {
+			return face
+		}
+	}
+	for _, fallback := range []string{
+		"Microsoft YaHei", "SimSun", "SimHei", "NSimSun",
+		"Yu Gothic", "Meiryo", "MS Gothic",
+		"Malgun Gothic", "Gulim",
+		"Noto Sans CJK SC", "Noto Sans SC", "WenQuanYi Micro Hei",
+		"Arial", "Helvetica", "DejaVu Sans",
+	} {
+		face = r.fontCache.GetMeasureFace(fallback, sizePixels, f.Bold, f.Italic)
+		if face != nil {
+			return face
+		}
+	}
+	return nil
+}
+
+// getCJKMeasureFace returns a HintingNone font.Face for CJK text measurement.
+func (r *renderer) getCJKMeasureFace(f *Font) font.Face {
+	if r.fontCache == nil {
+		return nil
+	}
+	sizePt := float64(f.Size)
+	if sizePt <= 0 {
+		sizePt = 10
+	}
+	if r.fontScale > 0 && r.fontScale != 1.0 {
+		sizePt *= r.fontScale
+	}
+	sizePixels := sizePt * 12700.0 * r.scaleX
+
+	if f.NameEA != "" {
+		face := r.fontCache.GetMeasureFace(f.NameEA, sizePixels, f.Bold, f.Italic)
+		if face != nil {
+			return face
+		}
+	}
+	for _, name := range []string{
+		"Microsoft YaHei", "SimSun", "SimHei", "NSimSun",
+		"Yu Gothic", "Meiryo", "MS Gothic",
+		"Malgun Gothic", "Gulim",
+		"Noto Sans CJK SC", "Noto Sans SC", "WenQuanYi Micro Hei",
+	} {
+		face := r.fontCache.GetMeasureFace(name, sizePixels, f.Bold, f.Italic)
+		if face != nil {
+			return face
+		}
+	}
+	return nil
+}
+
 // containsCJK returns true if the string contains any CJK characters.
 func containsCJK(s string) bool {
 	for _, r := range s {
@@ -4273,10 +4348,63 @@ func containsCJK(s string) bool {
 	return false
 }
 
+// buildParaTextRuns builds textRun slices for a paragraph's elements,
+// using HintingNone measure faces for width calculation and HintingFull
+// render faces for drawing. This is the single place where render/measure
+// face pairs are created, ensuring consistent layout across measurement
+// and drawing code paths.
+func (r *renderer) buildParaTextRuns(elements []ParagraphElement) []textRun {
+	var runs []textRun
+	for _, elem := range elements {
+		switch e := elem.(type) {
+		case *TextRun:
+			if e.text == "" {
+				continue
+			}
+			f := e.font
+			if f == nil {
+				f = NewFont()
+			}
+			if containsCJK(e.text) && r.fontCache != nil {
+				sizePt := float64(f.Size)
+				if sizePt <= 0 {
+					sizePt = 10
+				}
+				if r.fontScale > 0 && r.fontScale != 1.0 {
+					sizePt *= r.fontScale
+				}
+				scaledPt := sizePt * 12700.0 * r.scaleX
+				latinFace := r.fontCache.GetFace(f.Name, scaledPt, f.Bold, f.Italic)
+				if latinFace == nil {
+					latinFace = r.getFace(f)
+				}
+				cjkFace := r.getCJKFace(f)
+				latinMeasure := r.getMeasureFace(f)
+				cjkMeasure := r.getCJKMeasureFace(f)
+				subRuns := r.splitRunByCJK(e.text, f, latinFace, cjkFace, latinMeasure, cjkMeasure)
+				runs = append(runs, subRuns...)
+			} else {
+				face := r.getFace(f)
+				mf := r.getMeasureFace(f)
+				runs = append(runs, textRun{
+					text:        e.text,
+					font:        f,
+					face:        face,
+					measureFace: mf,
+					width:       measureStringWithKern(face, e.text).Ceil(),
+				})
+			}
+		case *BreakElement:
+			runs = append(runs, textRun{text: "\n"})
+		}
+	}
+	return runs
+}
+
 // splitRunByCJK splits a text run into sub-runs where CJK and non-CJK
 // segments use different font faces. This ensures CJK characters are
 // rendered with a CJK-capable font even when the primary font is Latin-only.
-func (r *renderer) splitRunByCJK(text string, f *Font, latinFace, cjkFace font.Face) []textRun {
+func (r *renderer) splitRunByCJK(text string, f *Font, latinFace, cjkFace, latinMeasure, cjkMeasure font.Face) []textRun {
 	if cjkFace == nil || latinFace == nil {
 		// Can't split, return single run
 		face := latinFace
@@ -4286,11 +4414,16 @@ func (r *renderer) splitRunByCJK(text string, f *Font, latinFace, cjkFace font.F
 		if face == nil {
 			face = basicfont.Face7x13
 		}
+		mf := latinMeasure
+		if mf == nil {
+			mf = cjkMeasure
+		}
 		return []textRun{{
-			text:  text,
-			font:  f,
-			face:  face,
-			width: measureStringWithKern(face, text).Ceil(),
+			text:        text,
+			font:        f,
+			face:        face,
+			measureFace: mf,
+			width:       measureStringWithKern(face, text).Ceil(),
 		}}
 	}
 
@@ -4305,14 +4438,17 @@ func (r *renderer) splitRunByCJK(text string, f *Font, latinFace, cjkFace font.F
 			// Flush buffer
 			seg := buf.String()
 			face := latinFace
+			mf := latinMeasure
 			if wasCJK {
 				face = cjkFace
+				mf = cjkMeasure
 			}
 			runs = append(runs, textRun{
-				text:  seg,
-				font:  f,
-				face:  face,
-				width: measureStringWithKern(face, seg).Ceil(),
+				text:        seg,
+				font:        f,
+				face:        face,
+				measureFace: mf,
+				width:       measureStringWithKern(face, seg).Ceil(),
 			})
 			buf.Reset()
 		}
@@ -4323,14 +4459,17 @@ func (r *renderer) splitRunByCJK(text string, f *Font, latinFace, cjkFace font.F
 	if buf.Len() > 0 {
 		seg := buf.String()
 		face := latinFace
+		mf := latinMeasure
 		if wasCJK {
 			face = cjkFace
+			mf = cjkMeasure
 		}
 		runs = append(runs, textRun{
-			text:  seg,
-			font:  f,
-			face:  face,
-			width: measureStringWithKern(face, seg).Ceil(),
+			text:        seg,
+			font:        f,
+			face:        face,
+			measureFace: mf,
+			width:       measureStringWithKern(face, seg).Ceil(),
 		})
 	}
 	return runs
@@ -4338,10 +4477,20 @@ func (r *renderer) splitRunByCJK(text string, f *Font, latinFace, cjkFace font.F
 
 // textRun holds a measured run of text with its formatting.
 type textRun struct {
-	text  string
-	font  *Font
-	face  font.Face
-	width int
+	text        string
+	font        *Font
+	face        font.Face // render face (HintingFull) for drawing
+	measureFace font.Face // measure face (HintingNone) for layout; nil falls back to face
+	width       int
+}
+
+// mface returns the face to use for measurement. If a dedicated measure face
+// is set it is preferred; otherwise the render face is used.
+func (tr *textRun) mface() font.Face {
+	if tr.measureFace != nil {
+		return tr.measureFace
+	}
+	return tr.face
 }
 
 // textLine holds a line of text runs with total metrics.
@@ -4367,7 +4516,11 @@ func (r *renderer) buildTextLine(runs []textRun) textLine {
 		if !hasCJK && containsCJK(run.text) {
 			hasCJK = true
 		}
-		metrics := run.face.Metrics()
+		// Use measure face (HintingNone) for line metrics when available.
+		// HintingFull rounds ascent/descent to pixel boundaries, inflating
+		// line heights. HintingNone gives ideal metrics matching PowerPoint.
+		metricFace := run.mface()
+		metrics := metricFace.Metrics()
 		asc := metrics.Ascent.Ceil()
 		desc := metrics.Descent.Ceil()
 		if asc > tl.ascent {
@@ -4376,9 +4529,6 @@ func (r *renderer) buildTextLine(runs []textRun) textLine {
 		if desc > tl.descent {
 			tl.descent = desc
 		}
-		// metrics.Height is the recommended line-to-line spacing which includes
-		// the font's internal line gap (leading). PowerPoint's default single
-		// spacing uses this full height, not just ascent+descent.
 		if h := metrics.Height.Ceil(); h > maxHeight {
 			maxHeight = h
 		}
@@ -4390,17 +4540,14 @@ func (r *renderer) buildTextLine(runs []textRun) textLine {
 	if tl.lineHeight < tl.ascent+tl.descent {
 		tl.lineHeight = tl.ascent + tl.descent
 	}
-	// CJK fonts often report an excessively large metrics.Height (line gap)
-	// compared to what PowerPoint's DirectWrite renderer actually uses.
-	// Additionally, Go's truetype library reads ascent/descent from the OS/2
-	// table which produces values ~7-8% larger than what PowerPoint's
-	// DirectWrite renderer uses for CJK text. Cap the line height to 93% of
-	// (ascent+descent) to compensate, keeping font size unchanged.
+	// CJK fonts report a larger metrics.Height (line gap) than what
+	// PowerPoint's DirectWrite renderer uses. Even with HintingNone, the
+	// OS/2 table values are slightly larger. Cap line height to
+	// ascent+descent (no extra line gap) for CJK lines.
 	if hasCJK {
 		adSum := tl.ascent + tl.descent
-		cjkHeight := int(math.Round(float64(adSum) * 0.93))
-		if tl.lineHeight > cjkHeight {
-			tl.lineHeight = cjkHeight
+		if tl.lineHeight > adSum {
+			tl.lineHeight = adSum
 		}
 	}
 	if tl.lineHeight < 1 {
@@ -4440,45 +4587,7 @@ func (r *renderer) measureParagraphsHeight(paragraphs []*Paragraph, w, h int, an
 				paraRuns = append(paraRuns, bRun)
 			}
 		}
-		for _, elem := range para.elements {
-			switch e := elem.(type) {
-			case *TextRun:
-				if e.text == "" {
-					continue
-				}
-				f := e.font
-				if f == nil {
-					f = NewFont()
-				}
-				if containsCJK(e.text) && r.fontCache != nil {
-					sizePt := float64(f.Size)
-					if sizePt <= 0 {
-						sizePt = 10
-					}
-					if r.fontScale > 0 && r.fontScale != 1.0 {
-						sizePt *= r.fontScale
-					}
-					scaledPt := sizePt * 12700.0 * r.scaleX
-					latinFace := r.fontCache.GetFace(f.Name, scaledPt, f.Bold, f.Italic)
-					if latinFace == nil {
-						latinFace = r.getFace(f)
-					}
-					cjkFace := r.getCJKFace(f)
-					subRuns := r.splitRunByCJK(e.text, f, latinFace, cjkFace)
-					paraRuns = append(paraRuns, subRuns...)
-				} else {
-					face := r.getFace(f)
-					paraRuns = append(paraRuns, textRun{
-						text:  e.text,
-						font:  f,
-						face:  face,
-						width: measureStringWithKern(face, e.text).Ceil(),
-					})
-				}
-			case *BreakElement:
-				paraRuns = append(paraRuns, textRun{text: "\n"})
-			}
-		}
+		paraRuns = append(paraRuns, r.buildParaTextRuns(para.elements)...)
 		baseW := w - marginLeft - marginRight
 		firstLineW := baseW - indent
 		if firstLineW < 10 {
@@ -4553,45 +4662,7 @@ func (r *renderer) measureMaxLineWidth(paragraphs []*Paragraph, w int, wordWrap 
 				paraRuns = append(paraRuns, bRun)
 			}
 		}
-		for _, elem := range para.elements {
-			switch e := elem.(type) {
-			case *TextRun:
-				if e.text == "" {
-					continue
-				}
-				f := e.font
-				if f == nil {
-					f = NewFont()
-				}
-				if containsCJK(e.text) && r.fontCache != nil {
-					sizePt := float64(f.Size)
-					if sizePt <= 0 {
-						sizePt = 10
-					}
-					if r.fontScale > 0 && r.fontScale != 1.0 {
-						sizePt *= r.fontScale
-					}
-					scaledPt := sizePt * 12700.0 * r.scaleX
-					latinFace := r.fontCache.GetFace(f.Name, scaledPt, f.Bold, f.Italic)
-					if latinFace == nil {
-						latinFace = r.getFace(f)
-					}
-					cjkFace := r.getCJKFace(f)
-					subRuns := r.splitRunByCJK(e.text, f, latinFace, cjkFace)
-					paraRuns = append(paraRuns, subRuns...)
-				} else {
-					face := r.getFace(f)
-					paraRuns = append(paraRuns, textRun{
-						text:  e.text,
-						font:  f,
-						face:  face,
-						width: measureStringWithKern(face, e.text).Ceil(),
-					})
-				}
-			case *BreakElement:
-				paraRuns = append(paraRuns, textRun{text: "\n"})
-			}
-		}
+		paraRuns = append(paraRuns, r.buildParaTextRuns(para.elements)...)
 		baseW := w - marginLeft - marginRight
 		firstLineW := baseW - indent
 		if firstLineW < 10 {
@@ -4616,6 +4687,7 @@ func (r *renderer) measureMaxLineWidth(paragraphs []*Paragraph, w int, wordWrap 
 	}
 	return maxW
 }
+
 
 // drawParagraphs renders paragraphs within the given bounding box.
 func (r *renderer) drawParagraphs(paragraphs []*Paragraph, x, y, w, h int, anchor TextAnchorType, wordWrap bool) {
@@ -4659,48 +4731,7 @@ func (r *renderer) drawParagraphs(paragraphs []*Paragraph, x, y, w, h int, ancho
 			}
 		}
 
-		for _, elem := range para.elements {
-			switch e := elem.(type) {
-			case *TextRun:
-				if e.text == "" {
-					continue
-				}
-				f := e.font
-				if f == nil {
-					f = NewFont()
-				}
-				// If text contains CJK characters, split into CJK/Latin segments
-				// so each segment uses an appropriate font face
-				if containsCJK(e.text) && r.fontCache != nil {
-					sizePt := float64(f.Size)
-					if sizePt <= 0 {
-						sizePt = 10
-					}
-					if r.fontScale > 0 && r.fontScale != 1.0 {
-						sizePt *= r.fontScale
-					}
-					scaledPt := sizePt * 12700.0 * r.scaleX
-					latinFace := r.fontCache.GetFace(f.Name, scaledPt, f.Bold, f.Italic)
-					if latinFace == nil {
-						latinFace = r.getFace(f)
-					}
-					cjkFace := r.getCJKFace(f)
-					subRuns := r.splitRunByCJK(e.text, f, latinFace, cjkFace)
-					paraRuns = append(paraRuns, subRuns...)
-				} else {
-					face := r.getFace(f)
-					paraRuns = append(paraRuns, textRun{
-						text:  e.text,
-						font:  f,
-						face:  face,
-						width: measureStringWithKern(face, e.text).Ceil(),
-					})
-				}
-			case *BreakElement:
-				// Force a new line
-				paraRuns = append(paraRuns, textRun{text: "\n"})
-			}
-		}
+		paraRuns = append(paraRuns, r.buildParaTextRuns(para.elements)...)
 
 		// Wrap runs into lines.
 		// In PowerPoint, indent only affects the first line of a paragraph.
@@ -5311,12 +5342,14 @@ func (r *renderer) wrapRunLine(runs []textRun, maxWidth int) []textLine {
 		maxWidth = 1
 	}
 
-	maxW26_6 := fixed.I(maxWidth)
-	// Add a small tolerance (~3%) to account for differences between Go's
-	// text measurement and PowerPoint's DirectWrite renderer. Go's opentype
-	// package doesn't apply the same GPOS/GSUB shaping as DirectWrite,
-	// causing text segments (especially mixed Latin+CJK) to measure wider.
-	maxW26_6 += maxW26_6 * 3 / 100
+	// Reserve 1px safety margin. HintingFull glyph bitmaps can be slightly
+	// wider than the advance width reported by GlyphAdvance, causing the
+	// last character on a line to overshoot the text box edge by a fraction
+	// of a pixel. Subtracting 1px from the wrap limit prevents this.
+	maxW26_6 := fixed.I(maxWidth - 1)
+	if maxW26_6 < fixed.I(1) {
+		maxW26_6 = fixed.I(1)
+	}
 
 	var lines []textLine
 	var currentRuns []textRun
@@ -5333,7 +5366,17 @@ func (r *renderer) wrapRunLine(runs []textRun, maxWidth int) []textLine {
 			continue
 		}
 
-		runW := measureStringWithKern(run.face, run.text)
+		mf := run.mface()
+		// Use the larger of measure-face and render-face widths for wrapping.
+		// Measure face (HintingNone) matches PowerPoint's layout but can be
+		// narrower than the render face (HintingFull). Using the max prevents
+		// fitting more characters than the render face can actually display.
+		runMW := measureStringWithKern(mf, run.text)
+		runRW := measureStringWithKern(run.face, run.text)
+		runW := runMW
+		if runRW > runW {
+			runW = runRW
+		}
 
 		// If the run fits, add it whole
 		if currentWidth+runW <= maxW26_6 {
@@ -5370,15 +5413,21 @@ func (r *renderer) wrapRunLine(runs []textRun, maxWidth int) []textLine {
 		var partial strings.Builder
 		for _, seg := range segments {
 			test := partial.String() + seg
-			tw := measureStringWithKern(run.face, test)
+			twM := measureStringWithKern(mf, test)
+			twR := measureStringWithKern(run.face, test)
+			tw := twM
+			if twR > tw {
+				tw = twR
+			}
 			if currentWidth+tw > maxW26_6 && (len(currentRuns) > 0 || partial.Len() > 0) {
 				if partial.Len() > 0 {
 					pText := partial.String()
 					currentRuns = append(currentRuns, textRun{
-						text:  pText,
-						font:  run.font,
-						face:  run.face,
-						width: measureStringWithKern(run.face, pText).Ceil(),
+						text:        pText,
+						font:        run.font,
+						face:        run.face,
+						measureFace: run.measureFace,
+						width:       measureStringWithKern(run.face, pText).Ceil(),
 					})
 				}
 				lines = append(lines, r.buildTextLine(currentRuns))
@@ -5392,12 +5441,18 @@ func (r *renderer) wrapRunLine(runs []textRun, maxWidth int) []textLine {
 		}
 		if partial.Len() > 0 {
 			pText := partial.String()
-			pw := measureStringWithKern(run.face, pText)
+			pwM := measureStringWithKern(mf, pText)
+			pwR := measureStringWithKern(run.face, pText)
+			pw := pwM
+			if pwR > pw {
+				pw = pwR
+			}
 			wr := textRun{
-				text:  pText,
-				font:  run.font,
-				face:  run.face,
-				width: pw.Ceil(),
+				text:        pText,
+				font:        run.font,
+				face:        run.face,
+				measureFace: run.measureFace,
+				width:       measureStringWithKern(run.face, pText).Ceil(),
 			}
 			currentRuns = append(currentRuns, wr)
 			currentWidth += pw
@@ -5430,8 +5485,11 @@ func (r *renderer) wrapRunLineWithIndent(runs []textRun, firstLineWidth, contLin
 		if lineIdx == 0 {
 			w = firstLineWidth
 		}
+		// 1px safety margin, same as wrapRunLine.
+		if w > 1 {
+			w--
+		}
 		mw := fixed.I(w)
-		mw += mw * 3 / 100 // 3% tolerance
 		return mw
 	}
 
@@ -5451,8 +5509,16 @@ func (r *renderer) wrapRunLineWithIndent(runs []textRun, firstLineWidth, contLin
 			continue
 		}
 
+		mf := run.mface()
 		maxW := getMaxW()
-		runW := measureStringWithKern(run.face, run.text)
+		// Use the larger of measure-face and render-face widths for wrapping,
+		// same logic as wrapRunLine.
+		runMW := measureStringWithKern(mf, run.text)
+		runRW := measureStringWithKern(run.face, run.text)
+		runW := runMW
+		if runRW > runW {
+			runW = runRW
+		}
 
 		if currentWidth+runW <= maxW {
 			currentRuns = append(currentRuns, run)
@@ -5482,16 +5548,22 @@ func (r *renderer) wrapRunLineWithIndent(runs []textRun, firstLineWidth, contLin
 		var partial strings.Builder
 		for _, seg := range segments {
 			test := partial.String() + seg
-			tw := measureStringWithKern(run.face, test)
+			twM := measureStringWithKern(mf, test)
+			twR := measureStringWithKern(run.face, test)
+			tw := twM
+			if twR > tw {
+				tw = twR
+			}
 			maxW = getMaxW()
 			if currentWidth+tw > maxW && (len(currentRuns) > 0 || partial.Len() > 0) {
 				if partial.Len() > 0 {
 					pText := partial.String()
 					currentRuns = append(currentRuns, textRun{
-						text:  pText,
-						font:  run.font,
-						face:  run.face,
-						width: measureStringWithKern(run.face, pText).Ceil(),
+						text:        pText,
+						font:        run.font,
+						face:        run.face,
+						measureFace: run.measureFace,
+						width:       measureStringWithKern(run.face, pText).Ceil(),
 					})
 				}
 				lines = append(lines, r.buildTextLine(currentRuns))
@@ -5506,12 +5578,18 @@ func (r *renderer) wrapRunLineWithIndent(runs []textRun, firstLineWidth, contLin
 		}
 		if partial.Len() > 0 {
 			pText := partial.String()
-			pw := measureStringWithKern(run.face, pText)
+			pwM := measureStringWithKern(mf, pText)
+			pwR := measureStringWithKern(run.face, pText)
+			pw := pwM
+			if pwR > pw {
+				pw = pwR
+			}
 			currentRuns = append(currentRuns, textRun{
-				text:  pText,
-				font:  run.font,
-				face:  run.face,
-				width: pw.Ceil(),
+				text:        pText,
+				font:        run.font,
+				face:        run.face,
+				measureFace: run.measureFace,
+				width:       measureStringWithKern(run.face, pText).Ceil(),
 			})
 			currentWidth += pw
 		}
