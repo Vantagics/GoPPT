@@ -581,6 +581,15 @@ func (w *PPTXWriter) writeLineShapeXML(s *LineShape, shapeID *int) string {
 		prstGeom = s.connectorType
 	}
 
+	// Build dash style XML
+	var dashXML string
+	switch s.lineStyle {
+	case BorderDash:
+		dashXML = "\n            <a:prstDash val=\"dash\"/>"
+	case BorderDot:
+		dashXML = "\n            <a:prstDash val=\"dot\"/>"
+	}
+
 	return fmt.Sprintf(`      <p:cxnSp>
         <p:nvCxnSpPr>
           <p:cNvPr id="%d" name="%s"/>
@@ -598,7 +607,7 @@ func (w *PPTXWriter) writeLineShapeXML(s *LineShape, shapeID *int) string {
           <a:ln w="%d">
             <a:solidFill>
               <a:srgbClr val="%s"/>
-            </a:solidFill>%s%s
+            </a:solidFill>%s%s%s
           </a:ln>
         </p:spPr>
       </p:cxnSp>
@@ -606,9 +615,9 @@ func (w *PPTXWriter) writeLineShapeXML(s *LineShape, shapeID *int) string {
 		xfrmAttrs(&s.BaseShape),
 		s.offsetX, s.offsetY, s.width, s.height,
 		prstGeom,
-		int64(s.lineWidth)*12700,
+		int64(s.GetLineWidthEMU()),
 		colorRGB(s.lineColor),
-		headEndXML, tailEndXML)
+		dashXML, headEndXML, tailEndXML)
 }
 
 // --- Table Shape XML ---
@@ -731,6 +740,17 @@ func (w *PPTXWriter) writeFillXML(f *Fill) string {
 func (w *PPTXWriter) writeBorderXML(b *Border) string {
 	if b == nil || b.Style == BorderNone {
 		return ""
+	}
+	var dashXML string
+	switch b.Style {
+	case BorderDash:
+		dashXML = "<a:prstDash val=\"dash\"/>"
+	case BorderDot:
+		dashXML = "<a:prstDash val=\"dot\"/>"
+	}
+	if dashXML != "" {
+		return fmt.Sprintf("          <a:ln w=\"%d\"><a:solidFill><a:srgbClr val=\"%s\"/></a:solidFill>%s</a:ln>\n",
+			b.Width, colorRGB(b.Color), dashXML)
 	}
 	return fmt.Sprintf("          <a:ln w=\"%d\"><a:solidFill><a:srgbClr val=\"%s\"/></a:solidFill></a:ln>\n",
 		b.Width, colorRGB(b.Color))

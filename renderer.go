@@ -130,17 +130,11 @@ func (p *Presentation) SlideToImage(slideIndex int, opts *RenderOptions) (image.
 		r.fillRectFast(img.Bounds(), bgColor)
 	}
 
+	// Render shapes in their original XML order (z-order).
+	// Shapes that appear earlier in the spTree are behind shapes that appear later,
+	// matching PowerPoint's rendering behavior.
 	for _, shape := range slide.shapes {
-		if _, isLine := shape.(*LineShape); !isLine {
-			r.renderShape(shape)
-		}
-	}
-	// Render connectors (LineShape) last so they appear on top,
-	// matching PowerPoint's connector rendering order.
-	for _, shape := range slide.shapes {
-		if _, isLine := shape.(*LineShape); isLine {
-			r.renderShape(shape)
-		}
+		r.renderShape(shape)
 	}
 
 	return img, nil
@@ -438,48 +432,47 @@ func (r *renderer) renderRotatedExpanded(x, y, w, h, bufH, rotation int, flipH, 
 	tmpR := &renderer{img: tmp, scaleX: r.scaleX, scaleY: r.scaleY, fontCache: r.fontCache, dpi: r.dpi, fontScale: r.fontScale}
 	drawFn(tmpR)
 
-	// Apply flips using direct Pix access
-	if flipH || flipV {
-		flipped := image.NewRGBA(tmp.Bounds())
-		stride := tmp.Stride
+	if rotation == 0 && !flipH && !flipV {
+		draw.Draw(r.img, image.Rect(x, y, x+w, y+bufH), tmp, image.Point{}, draw.Over)
+		return
+	}
+
+	// Handle flip-only case (no rotation)
+	if rotation == 0 {
 		for py := 0; py < bufH; py++ {
 			sy := py
 			if flipV {
 				sy = bufH - 1 - py
 			}
-			srcRow := sy * stride
-			dstRow := py * flipped.Stride
-			if flipH {
-				for px := 0; px < w; px++ {
-					sx := w - 1 - px
-					sOff := srcRow + sx*4
-					dOff := dstRow + px*4
-					copy(flipped.Pix[dOff:dOff+4], tmp.Pix[sOff:sOff+4])
+			for px := 0; px < w; px++ {
+				sx := px
+				if flipH {
+					sx = w - 1 - px
 				}
-			} else {
-				copy(flipped.Pix[dstRow:dstRow+w*4], tmp.Pix[srcRow:srcRow+w*4])
+				sOff := sy*tmp.Stride + sx*4
+				if tmp.Pix[sOff+3] > 0 {
+					r.blendPixel(x+px, y+py, color.RGBA{
+						R: tmp.Pix[sOff], G: tmp.Pix[sOff+1],
+						B: tmp.Pix[sOff+2], A: tmp.Pix[sOff+3],
+					})
+				}
 			}
 		}
-		tmp = flipped
-	}
-
-	if rotation == 0 {
-		draw.Draw(r.img, image.Rect(x, y, x+w, y+bufH), tmp, image.Point{}, draw.Over)
 		return
 	}
 
-	// OOXML rotation is clockwise; negate for standard math CCW rotation matrix.
+	// OOXML transform order: rotate first, then flip.
+	// We combine both into a single inverse mapping from destination to source.
 	rad := -float64(rotation) * math.Pi / 180.0
 	cosA := math.Cos(rad)
 	sinA := math.Sin(rad)
 	cx := float64(w) / 2
-	cy := float64(h) / 2 // rotation center at original shape center
+	cy := float64(h) / 2
 	destCX := float64(x) + cx
 	destCY := float64(y) + cy
 
 	bounds := rotatedBounds(destCX, destCY, w, bufH, rotation)
 	imgBounds := r.img.Bounds()
-	// Clamp to image bounds
 	minDY := maxInt(bounds.Min.Y, imgBounds.Min.Y)
 	maxDY := minInt(bounds.Max.Y, imgBounds.Max.Y)
 	minDX := maxInt(bounds.Min.X, imgBounds.Min.X)
@@ -489,8 +482,17 @@ func (r *renderer) renderRotatedExpanded(x, y, w, h, bufH, rotation int, flipH, 
 		ry := float64(dy) - destCY
 		for dx := minDX; dx < maxDX; dx++ {
 			rx := float64(dx) - destCX
-			sx := rx*cosA + ry*sinA + cx
-			sy := -rx*sinA + ry*cosA + cy
+			// Step 1: un-flip (flip is self-inverse, applied in rotated space)
+			fx, fy := rx, ry
+			if flipH {
+				fx = -fx
+			}
+			if flipV {
+				fy = -fy
+			}
+			// Step 2: un-rotate (inverse rotation)
+			sx := fx*cosA + fy*sinA + cx
+			sy := -fx*sinA + fy*cosA + cy
 			ix, iy := int(sx), int(sy)
 			if ix >= 0 && ix < w && iy >= 0 && iy < bufH {
 				sOff := iy*tmp.Stride + ix*4
@@ -504,6 +506,7 @@ func (r *renderer) renderRotatedExpanded(x, y, w, h, bufH, rotation int, flipH, 
 		}
 	}
 }
+
 
 func (r *renderer) renderGroup(g *GroupShape) {
 	// Transform child coordinates from child space (chOff/chExt) to group space (off/ext)
@@ -542,6 +545,20 @@ func (r *renderer) renderGroup(g *GroupShape) {
 	w := r.emuToPixelX(g.width)
 	h := r.emuToPixelY(g.height)
 	r.renderRotated(x, y, w, h, rotation, flipH, flipV, func(tmp *renderer) {
+		// Shift children to render relative to (0,0) in the temp buffer.
+		// Children have absolute slide coordinates; subtract group origin.
+		for _, gs := range g.shapes {
+			bs := gs.base()
+			bs.offsetX -= g.offsetX
+			bs.offsetY -= g.offsetY
+		}
+		defer func() {
+			for _, gs := range g.shapes {
+				bs := gs.base()
+				bs.offsetX += g.offsetX
+				bs.offsetY += g.offsetY
+			}
+		}()
 		for _, gs := range g.shapes {
 			tmp.renderShape(gs)
 		}
@@ -614,17 +631,64 @@ func (r *renderer) renderRichText(s *RichTextShape) {
 		th = h
 	}
 
+	// spAutoFit: shape resizes to fit text. When the shape has word-wrap
+	// enabled, PowerPoint expands the shape vertically while keeping the
+	// width fixed. We cannot resize the shape at render time, but we
+	// should still honour word-wrap so text wraps within the available
+	// width instead of overflowing horizontally and overlapping adjacent
+	// shapes. Only disable word-wrap when the original shape had it off
+	// (rare case where the box expands horizontally).
+	wordWrap := s.wordWrap
+
+	// When default insets are used and text overflows, progressively reduce
+	// insets to make room. Font metric differences between systems can cause
+	// text to be slightly larger than the original authoring environment
+	// expected, so shrinking insets first avoids unnecessary text overflow.
+	if !s.insetsSet {
+		textH := r.measureParagraphsHeight(s.paragraphs, tw, th, s.textAnchor, wordWrap)
+		if textH > th && th > 0 && (pxT+pxB) > 0 {
+			needed := textH - th
+			avail := pxT + pxB
+			if needed >= avail {
+				pxT = 0
+				pxB = 0
+			} else {
+				scale := float64(avail-needed) / float64(avail)
+				pxT = int(float64(pxT) * scale)
+				pxB = int(float64(pxB) * scale)
+			}
+			th = h - pxT - pxB
+			if th < 1 {
+				th = h
+			}
+		}
+	}
+
 	// Auto-shrink text when normAutofit is set without an explicit fontScale.
 	// PowerPoint dynamically calculates the scale to fit text within the box.
+	// Also apply auto-shrink for AutoFitNone when text still overflows after
+	// inset reduction — Go's CJK font metrics often produce larger line heights
+	// than PowerPoint, causing text to overflow shapes that fit perfectly in
+	// the original authoring environment.
+	shouldAutoShrink := false
 	if s.autoFit == AutoFitNormal && (s.fontScale == 0 || s.fontScale == 100000) {
-		textH := r.measureParagraphsHeight(s.paragraphs, tw, th, s.textAnchor, s.wordWrap)
+		shouldAutoShrink = true
+	} else if s.autoFit == AutoFitNone && (s.fontScale == 0 || s.fontScale == 100000) {
+		textH := r.measureParagraphsHeight(s.paragraphs, tw, th, s.textAnchor, wordWrap)
+		if textH > h && h > 0 {
+			// Text exceeds the full shape height — font metrics are too large
+			shouldAutoShrink = true
+		}
+	}
+	if shouldAutoShrink {
+		textH := r.measureParagraphsHeight(s.paragraphs, tw, th, s.textAnchor, wordWrap)
 		if textH > th && th > 0 {
 			// Binary search for the right scale factor
 			lo, hi := 0.1, 1.0
 			for i := 0; i < 10; i++ {
 				mid := (lo + hi) / 2
 				r.fontScale = mid
-				mh := r.measureParagraphsHeight(s.paragraphs, tw, th, s.textAnchor, s.wordWrap)
+				mh := r.measureParagraphsHeight(s.paragraphs, tw, th, s.textAnchor, wordWrap)
 				if mh > th {
 					hi = mid
 				} else {
@@ -635,7 +699,7 @@ func (r *renderer) renderRichText(s *RichTextShape) {
 		}
 	}
 
-	textH := r.measureParagraphsHeight(s.paragraphs, tw, th, s.textAnchor, s.wordWrap)
+	textH := r.measureParagraphsHeight(s.paragraphs, tw, th, s.textAnchor, wordWrap)
 	// Extra height needed beyond the shape box
 	overflowH := 0
 	if textH+pxT+pxB > h {
@@ -643,6 +707,10 @@ func (r *renderer) renderRichText(s *RichTextShape) {
 	}
 	// Use expanded height for the temp buffer when rotated
 	bufH := h + overflowH
+
+	// skipText is used to split geometry and text rendering when flip is set.
+	// PowerPoint flips shape geometry but keeps text readable (un-flipped).
+	skipText := false
 
 	drawContent := func(tr *renderer) {
 		ox, oy := x, y
@@ -721,22 +789,61 @@ func (r *renderer) renderRichText(s *RichTextShape) {
 			drawTH = th
 		}
 
-		if vertRotation != 0 {
-			// For vertical text, draw into a rotated buffer with swapped dimensions.
-			vtw, vth := drawTH, tw // text area: width=drawTH, height=tw (before rotation)
-			if vtw > 0 && vth > 0 {
-				tmp := image.NewRGBA(image.Rect(0, 0, vtw, vth))
-				tmpR := &renderer{img: tmp, scaleX: tr.scaleX, scaleY: tr.scaleY, fontCache: tr.fontCache, dpi: tr.dpi, fontScale: tr.fontScale}
-				tmpR.drawParagraphs(s.paragraphs, 0, 0, vtw, vth, s.textAnchor, s.wordWrap)
-				rotateAndComposite(tr.img, tmp, tx, ty, tw, drawTH, vertRotation)
+		if !skipText {
+			if vertRotation != 0 {
+				// For vertical text, draw into a rotated buffer with swapped dimensions.
+				vtw, vth := drawTH, tw // text area: width=drawTH, height=tw (before rotation)
+				if vtw > 0 && vth > 0 {
+					tmp := image.NewRGBA(image.Rect(0, 0, vtw, vth))
+					tmpR := &renderer{img: tmp, scaleX: tr.scaleX, scaleY: tr.scaleY, fontCache: tr.fontCache, dpi: tr.dpi, fontScale: tr.fontScale}
+					tmpR.drawParagraphs(s.paragraphs, 0, 0, vtw, vth, s.textAnchor, wordWrap)
+					rotateAndComposite(tr.img, tmp, tx, ty, tw, drawTH, vertRotation)
+				}
+			} else {
+				tr.drawParagraphs(s.paragraphs, tx, ty, tw, drawTH, s.textAnchor, wordWrap)
 			}
-		} else {
-			tr.drawParagraphs(s.paragraphs, tx, ty, tw, drawTH, s.textAnchor, s.wordWrap)
 		}
 	}
 
-	if rotation != 0 || flipH || flipV {
+	// When flip is set, PowerPoint flips the shape geometry (fill/border)
+	// but keeps text readable (un-flipped). We achieve this by rendering
+	// geometry with flip, then compositing text separately without flip.
+	if (flipH || flipV) && len(s.paragraphs) > 0 {
+		// Phase 1: render geometry only (with flip)
+		skipText = true
 		r.renderRotatedExpanded(x, y, w, h, bufH, rotation, flipH, flipV, drawContent)
+		// Phase 2: render text only (rotation only, no flip)
+		skipText = false
+		textOnly := func(tr *renderer) {
+			ox, oy := x, y
+			if tr != r {
+				ox, oy = 0, 0
+			}
+			tx := ox + pxL
+			ty := oy + pxT
+			drawTH := bufH - pxT - pxB
+			if drawTH < th {
+				drawTH = th
+			}
+			if vertRotation != 0 {
+				vtw, vth := drawTH, tw
+				if vtw > 0 && vth > 0 {
+					tmp := image.NewRGBA(image.Rect(0, 0, vtw, vth))
+					tmpR := &renderer{img: tmp, scaleX: tr.scaleX, scaleY: tr.scaleY, fontCache: tr.fontCache, dpi: tr.dpi, fontScale: tr.fontScale}
+					tmpR.drawParagraphs(s.paragraphs, 0, 0, vtw, vth, s.textAnchor, wordWrap)
+					rotateAndComposite(tr.img, tmp, tx, ty, tw, drawTH, vertRotation)
+				}
+			} else {
+				tr.drawParagraphs(s.paragraphs, tx, ty, tw, drawTH, s.textAnchor, wordWrap)
+			}
+		}
+		if rotation != 0 {
+			r.renderRotatedExpanded(x, y, w, h, bufH, rotation, false, false, textOnly)
+		} else {
+			textOnly(r)
+		}
+	} else if rotation != 0 {
+		r.renderRotatedExpanded(x, y, w, h, bufH, rotation, false, false, drawContent)
 	} else {
 		drawContent(r)
 	}
@@ -822,7 +929,8 @@ func (r *renderer) renderAutoShape(s *AutoShape) {
 		}
 		rect := image.Rect(ox, oy, ox+w, oy+h)
 		if s.shadow != nil && s.shadow.Visible {
-			if s.shapeType == AutoShapeRoundedRect {
+			switch s.shapeType {
+			case AutoShapeRoundedRect:
 				sRadius := minInt(w, h) * 16667 / 100000
 				if s.adjustValues != nil {
 					if adj, ok := s.adjustValues["adj"]; ok {
@@ -830,12 +938,23 @@ func (r *renderer) renderAutoShape(s *AutoShape) {
 					}
 				}
 				tr.renderShadowRounded(s.shadow, rect, sRadius)
-			} else {
+			case AutoShapeRectangle, "":
 				tr.renderShadow(s.shadow, rect)
+			default:
+				// For non-rectangular shapes (arrows, triangles, ellipses, etc.),
+				// skip the rectangular shadow — it would fill the entire
+				// bounding box and look like a gray background.
 			}
 		}
 		tr.renderAutoShapeFill(s, ox, oy, w, h)
 		tr.renderAutoShapeBorder(s, ox, oy, w, h)
+		// Arc shapes are stroke-only; if no explicit border was set, draw
+		// the arc with a default black stroke so it remains visible.
+		if s.shapeType == AutoShapeArc && (s.border == nil || s.border.Style == BorderNone) {
+			defPw := maxInt(int(tr.scaleX*12700.0), 1)
+			defC := color.RGBA{A: 255}
+			tr.renderArcBorder(s, ox, oy, w, h, defC, defPw)
+		}
 		if len(s.paragraphs) > 0 {
 			// Compute text area with insets
 			lIns, rIns, tIns, bIns := int64(91440), int64(91440), int64(45720), int64(45720)
@@ -896,6 +1015,50 @@ func (r *renderer) renderAutoShape(s *AutoShape) {
 				th = h
 			}
 
+			// When default insets are used and text overflows, reduce insets
+			// to make room. This handles font metric differences between systems.
+			if !s.insetsSet {
+				textH := r.measureParagraphsHeight(s.paragraphs, tw, th, s.textAnchor, true)
+				if textH > th && th > 0 && (pxT+pxB) > 0 {
+					needed := textH - th
+					avail := pxT + pxB
+					if needed >= avail {
+						pxT = 0
+						pxB = 0
+					} else {
+						sc := float64(avail-needed) / float64(avail)
+						pxT = int(float64(pxT) * sc)
+						pxB = int(float64(pxB) * sc)
+					}
+					tx = ox + pxL
+					ty = oy + pxT
+					th = h - pxT - pxB
+					if th < 1 {
+						th = h
+					}
+				}
+			}
+
+			// Auto-shrink when text overflows the full shape height —
+			// CJK font metrics in Go are often larger than PowerPoint's.
+			if (s.fontScale == 0 || s.fontScale == 100000) {
+				atextH := r.measureParagraphsHeight(s.paragraphs, tw, th, s.textAnchor, true)
+				if atextH > h && h > 0 && atextH > th && th > 0 {
+					lo, hi := 0.1, 1.0
+					for i := 0; i < 10; i++ {
+						mid := (lo + hi) / 2
+						r.fontScale = mid
+						mh := r.measureParagraphsHeight(s.paragraphs, tw, th, s.textAnchor, true)
+						if mh > th {
+							hi = mid
+						} else {
+							lo = mid
+						}
+					}
+					r.fontScale = lo
+				}
+			}
+
 			if vertRotation != 0 {
 				vtw, vth := th, tw
 				if vtw > 0 && vth > 0 {
@@ -912,18 +1075,31 @@ func (r *renderer) renderAutoShape(s *AutoShape) {
 		}
 	}
 
-	// For uturnArrow with 90°/270° rotation, swap geometry dimensions.
-	// OOXML preset geometry formulas use w/h as the shape dimensions.
-	// For 90°/270° rotations, PowerPoint computes the geometry with
-	// swapped dimensions so the arrow spans the full visual extent.
+	// For uturnArrow with 90/270 rotation, swap geometry dimensions.
 	needsGeomSwap := s.shapeType == AutoShapeUturnArrow &&
 		(rotation == 90 || rotation == 270)
 
-	if needsGeomSwap {
-		// For 90°/270° rotated uturnArrow, OOXML specifies the bounding box
-		// as the ROTATED visual size. The unrotated shape dimensions are
-		// swapped (w↔h). We draw the geometry transposed in the w×h buffer
-		// so that after rotation it maps correctly.
+	// For rtTriangle with 90/270 rotation, OOXML ext gives the rotated
+	// bounding box size. Draw the mirror-image triangle in the buffer so
+	// that after rotation the filled area covers the correct half.
+	needsRtTriSwap := s.shapeType == AutoShapeRtTriangle &&
+		(rotation == 90 || rotation == 270)
+
+	if needsRtTriSwap {
+		drawSwapped := func(tr *renderer) {
+			if s.fill != nil && s.fill.Type != FillNone {
+				fc := argbToRGBA(s.fill.Color)
+				fc = tr.scaleAlpha(fc)
+				pts := []fpoint{
+					{0, 0},
+					{float64(w), 0},
+					{float64(w), float64(h)},
+				}
+				tr.fillPolygon(pts, fc)
+			}
+		}
+		r.renderRotated(x, y, w, h, rotation, flipH, flipV, drawSwapped)
+	} else if needsGeomSwap {
 		drawSwapped := func(tr *renderer) {
 			if s.fill != nil && s.fill.Type != FillNone {
 				fc := argbToRGBA(s.fill.Color)
@@ -1002,10 +1178,15 @@ func (r *renderer) renderAutoShapeFill(s *AutoShape, x, y, w, h int) {
 		r.fillRtTriangle(x, y, w, h, fc)
 	case AutoShapeHomePlate:
 		r.fillHomePlate(x, y, w, h, fc)
+	case AutoShapeSnip2SameRect:
+		r.fillSnip2SameRect(x, y, w, h, fc, s.adjustValues)
 	case AutoShapeUturnArrow:
 		r.fillUturnArrow(x, y, w, h, fc, s.adjustValues)
 	case AutoShapeBentArrow:
 		r.fillBentArrow(x, y, w, h, fc, s.adjustValues)
+	case AutoShapeArc:
+		// Arc preset geometry has no fill by default (it's just a stroke).
+		// Skip fill for arc shapes.
 	default:
 		r.renderFill(s.fill, rect)
 	}
@@ -1133,8 +1314,79 @@ func (r *renderer) renderAutoShapeBorder(s *AutoShape, x, y, w, h int) {
 			{float64(x + w), float64(y + h)},
 		}
 		r.drawPolygon(pts, bc, pw)
+	case AutoShapeSnip2SameRect:
+		pts := r.snip2SameRectPoints(x, y, w, h, s.adjustValues)
+		r.drawPolygon(pts, bc, pw)
+	case AutoShapeArc:
+		r.renderArcBorder(s, x, y, w, h, bc, pw)
 	default:
 		r.drawRectBorder(image.Rect(x, y, x+w, y+h), bc, pw, s.border.Style)
+	}
+}
+
+// renderArcBorder draws an arc shape's stroke and arrowheads.
+// OOXML arc preset: adj1 = start angle, adj2 = end angle (in 60000ths of a degree).
+// Default: adj1=16200000 (270°), adj2=0 (0°) — a quarter-circle arc from bottom to right.
+func (r *renderer) renderArcBorder(s *AutoShape, x, y, w, h int, bc color.RGBA, pw int) {
+	// Get adjustment values (angles in 60000ths of a degree)
+	stAng := 16200000 // default start: 270°
+	endAng := 0       // default end: 0°
+	if s.adjustValues != nil {
+		if v, ok := s.adjustValues["adj1"]; ok {
+			stAng = v
+		}
+		if v, ok := s.adjustValues["adj2"]; ok {
+			endAng = v
+		}
+	}
+
+	stRad := float64(stAng) / 60000.0 * math.Pi / 180.0
+	endRad := float64(endAng) / 60000.0 * math.Pi / 180.0
+
+	// Ensure we sweep in the positive direction
+	if endRad <= stRad {
+		endRad += 2 * math.Pi
+	}
+
+	rx := float64(w) / 2.0
+	ry := float64(h) / 2.0
+	cx := float64(x) + rx
+	cy := float64(y) + ry
+
+	// Generate arc points
+	sweep := endRad - stRad
+	steps := maxInt(int(math.Abs(sweep)*(rx+ry)*0.5), 60)
+	pts := make([]fpoint, steps+1)
+	for i := 0; i <= steps; i++ {
+		t := float64(i) / float64(steps)
+		a := stRad + sweep*t
+		pts[i] = fpoint{cx + rx*math.Cos(a), cy + ry*math.Sin(a)}
+	}
+
+	// Draw the arc stroke
+	ls := BorderSolid
+	if s.border != nil {
+		ls = s.border.Style
+	}
+	if ls == BorderDash || ls == BorderDot {
+		r.drawDashedPolylineAA(pts, bc, pw, ls)
+	} else {
+		for i := 1; i < len(pts); i++ {
+			r.drawLineAA(int(pts[i-1].x), int(pts[i-1].y), int(pts[i].x), int(pts[i].y), bc, pw)
+		}
+	}
+
+	// Draw arrowheads
+	intPts := make([][2]int, len(pts))
+	for i, p := range pts {
+		intPts[i] = [2]int{int(p.x), int(p.y)}
+	}
+	if s.headEnd != nil && s.headEnd.Type != ArrowNone && s.headEnd.Type != "" {
+		r.drawArrowOnPath(intPts[0][0], intPts[0][1], intPts, bc, pw, s.headEnd)
+	}
+	if s.tailEnd != nil && s.tailEnd.Type != ArrowNone && s.tailEnd.Type != "" {
+		last := intPts[len(intPts)-1]
+		r.drawArrowOnPath(last[0], last[1], intPts, bc, pw, s.tailEnd)
 	}
 }
 
@@ -1161,6 +1413,53 @@ func (r *renderer) renderLineRotated(s *LineShape) {
 	oxEmu := float64(s.offsetX)
 	oyEmu := float64(s.offsetY)
 	rotation := s.GetRotation()
+
+	// Custom geometry path with rotation — convert path to pixel coords,
+	// then rotate around the bounding box center.
+	if s.customPath != nil && len(s.customPath.Commands) > 0 {
+		ox := r.emuToPixelX(s.offsetX)
+		oy := r.emuToPixelY(s.offsetY)
+		w := r.emuToPixelX(s.width)
+		h := r.emuToPixelY(s.height)
+		pts := r.customPathToPixelPoints(s.customPath, ox, oy, w, h)
+		if len(pts) >= 2 {
+			// Rotate around bounding box center
+			cxPx := float64(ox) + float64(w)/2.0
+			cyPx := float64(oy) + float64(h)/2.0
+			rad := float64(rotation) * math.Pi / 180.0
+			cosA := math.Cos(rad)
+			sinA := math.Sin(rad)
+			for i := range pts {
+				dx := pts[i].x - cxPx
+				dy := pts[i].y - cyPx
+				pts[i].x = dx*cosA - dy*sinA + cxPx
+				pts[i].y = dx*sinA + dy*cosA + cyPx
+			}
+
+			pw := maxInt(int(float64(s.GetLineWidthEMU())*r.scaleX), 1)
+			c := argbToRGBA(s.lineColor)
+			ls := s.lineStyle
+			if ls == BorderDash || ls == BorderDot {
+				r.drawDashedPolylineAA(pts, c, pw, ls)
+			} else {
+				for i := 1; i < len(pts); i++ {
+					r.drawLineAA(int(pts[i-1].x), int(pts[i-1].y), int(pts[i].x), int(pts[i].y), c, pw)
+				}
+			}
+			intPts := make([][2]int, len(pts))
+			for i, p := range pts {
+				intPts[i] = [2]int{int(p.x), int(p.y)}
+			}
+			if s.headEnd != nil && s.headEnd.Type != ArrowNone && s.headEnd.Type != "" {
+				r.drawArrowOnPath(intPts[0][0], intPts[0][1], intPts, c, pw, s.headEnd)
+			}
+			if s.tailEnd != nil && s.tailEnd.Type != ArrowNone && s.tailEnd.Type != "" {
+				last := intPts[len(intPts)-1]
+				r.drawArrowOnPath(last[0], last[1], intPts, c, pw, s.tailEnd)
+			}
+		}
+		return
+	}
 
 	// Build path in local EMU coordinates (0,0)-(wEmu,hEmu)
 	type fpt [2]float64
@@ -1238,7 +1537,7 @@ func (r *renderer) renderLineRotated(s *LineShape) {
 		px2 := int(math.Round(rex * r.scaleX))
 		py2 := int(math.Round(rey * r.scaleY))
 
-		pw := maxInt(int(float64(maxInt(s.lineWidth, 1))*12700.0*r.scaleX), 1)
+		pw := maxInt(int(float64(s.GetLineWidthEMU())*r.scaleX), 1)
 		c := argbToRGBA(s.lineColor)
 		r.renderCurvedConnector(s.connectorType, px1, py1, px2, py2, s.adjustValues, c, pw, s.lineStyle, s.headEnd, s.tailEnd)
 		return
@@ -1281,7 +1580,7 @@ func (r *renderer) renderLineRotated(s *LineShape) {
 		}
 	}
 
-	pw := maxInt(int(float64(maxInt(s.lineWidth, 1))*12700.0*r.scaleX), 1)
+	pw := maxInt(int(float64(s.GetLineWidthEMU())*r.scaleX), 1)
 	c := argbToRGBA(s.lineColor)
 	ls := s.lineStyle
 
@@ -1328,12 +1627,38 @@ func (r *renderer) renderLineAt(s *LineShape, ox, oy int) {
 	if s.flipVertical {
 		y1, y2 = y2, y1
 	}
-	// lineWidth is in points (EMU / 12700), convert back to EMU then to pixels
-	pw := maxInt(int(float64(maxInt(s.lineWidth, 1))*12700.0*r.scaleX), 1)
+	// lineWidth in EMU, convert to pixels
+	pw := maxInt(int(float64(s.GetLineWidthEMU())*r.scaleX), 1)
 	c := argbToRGBA(s.lineColor)
+	ls := s.lineStyle
+
+	// Custom geometry path (freeform curved arrows, etc.)
+	if s.customPath != nil && len(s.customPath.Commands) > 0 {
+		pts := r.customPathToPixelPoints(s.customPath, ox, oy, w, h)
+		if len(pts) >= 2 {
+			if ls == BorderDash || ls == BorderDot {
+				r.drawDashedPolylineAA(pts, c, pw, ls)
+			} else {
+				for i := 1; i < len(pts); i++ {
+					r.drawLineAA(int(pts[i-1].x), int(pts[i-1].y), int(pts[i].x), int(pts[i].y), c, pw)
+				}
+			}
+			intPts := make([][2]int, len(pts))
+			for i, p := range pts {
+				intPts[i] = [2]int{int(p.x), int(p.y)}
+			}
+			if s.headEnd != nil && s.headEnd.Type != ArrowNone && s.headEnd.Type != "" {
+				r.drawArrowOnPath(intPts[0][0], intPts[0][1], intPts, c, pw, s.headEnd)
+			}
+			if s.tailEnd != nil && s.tailEnd.Type != ArrowNone && s.tailEnd.Type != "" {
+				last := intPts[len(intPts)-1]
+				r.drawArrowOnPath(last[0], last[1], intPts, c, pw, s.tailEnd)
+			}
+		}
+		return
+	}
 
 	// drawSeg draws a line segment respecting the connector's dash style.
-	ls := s.lineStyle
 	drawSeg := func(ax, ay, bx, by int) {
 		if ls == BorderDash || ls == BorderDot {
 			r.drawDashedLineAA(ax, ay, bx, by, c, pw, ls)
@@ -1890,6 +2215,36 @@ func (r *renderer) customPathToPixelPoints(cp *CustomGeomPath, ox, oy, w, h int)
 			}
 		case "close":
 			// close is implicit in fillPolygon
+		case "arcTo":
+			// OOXML arcTo: wR/hR are ellipse radii in path coords,
+			// stAng/swAng are in 60000ths of a degree.
+			// The arc is drawn on an ellipse whose center is computed so
+			// that the arc starts at lastPt.
+			wR := float64(cmd.WR) * scX
+			hR := float64(cmd.HR) * scY
+			stAngDeg := float64(cmd.StAng) / 60000.0
+			swAngDeg := float64(cmd.SwAng) / 60000.0
+			stRad := stAngDeg * math.Pi / 180.0
+			swRad := swAngDeg * math.Pi / 180.0
+
+			if wR < 0.5 || hR < 0.5 {
+				// Degenerate arc — skip
+				break
+			}
+
+			// Center of the ellipse: lastPt is on the ellipse at stAng
+			cx := lastPt.x - wR*math.Cos(stRad)
+			cy := lastPt.y - hR*math.Sin(stRad)
+
+			// Number of steps proportional to arc length
+			steps := maxInt(int(math.Abs(swRad)*(wR+hR)*0.5), 8)
+			angleStep := swRad / float64(steps)
+			for i := 1; i <= steps; i++ {
+				a := stRad + angleStep*float64(i)
+				p := fpoint{cx + wR*math.Cos(a), cy + hR*math.Sin(a)}
+				pts = append(pts, p)
+				lastPt = p
+			}
 		}
 	}
 	return pts
@@ -3041,6 +3396,44 @@ func (r *renderer) fillHomePlate(x, y, w, h int, c color.RGBA) {
 	r.fillPolygon(pts, c)
 }
 
+// snip2SameRectPoints computes the polygon points for a snip2SameRect shape.
+// In OOXML snip2SameRect, adj1 controls the bottom-left and bottom-right snip,
+// adj2 controls the top-left and top-right snip.
+func (r *renderer) snip2SameRectPoints(x, y, w, h int, adj map[string]int) []fpoint {
+	adj1v := 16667 // default snip for bottom corners
+	adj2v := 0     // default snip for top corners
+	if adj != nil {
+		if v, ok := adj["adj1"]; ok {
+			adj1v = v
+		}
+		if v, ok := adj["adj2"]; ok {
+			adj2v = v
+		}
+	}
+	ss := minInt(w, h)
+	snipBot := float64(ss) * float64(adj1v) / 100000.0
+	snipTop := float64(ss) * float64(adj2v) / 100000.0
+	fx, fy := float64(x), float64(y)
+	fw, fh := float64(w), float64(h)
+
+	return []fpoint{
+		{fx + snipTop, fy},           // top-left snip end
+		{fx + fw - snipTop, fy},      // top-right snip start
+		{fx + fw, fy + snipTop},      // top-right snip end
+		{fx + fw, fy + fh - snipBot}, // bottom-right snip start
+		{fx + fw - snipBot, fy + fh}, // bottom-right snip end
+		{fx + snipBot, fy + fh},      // bottom-left snip start
+		{fx, fy + fh - snipBot},      // bottom-left snip end
+		{fx, fy + snipTop},           // top-left snip start
+	}
+}
+
+func (r *renderer) fillSnip2SameRect(x, y, w, h int, c color.RGBA, adj map[string]int) {
+	pts := r.snip2SameRectPoints(x, y, w, h, adj)
+	r.fillPolygon(pts, c)
+}
+
+
 func (r *renderer) fillBentArrow(x, y, w, h int, c color.RGBA, adj map[string]int) {
 	// OOXML bentArrow preset geometry.
 	// L-shaped arrow: vertical shaft going up, then turns right with arrowhead.
@@ -3550,7 +3943,7 @@ func (r *renderer) splitRunByCJK(text string, f *Font, latinFace, cjkFace font.F
 			text:  text,
 			font:  f,
 			face:  face,
-			width: font.MeasureString(face, text).Ceil(),
+			width: measureStringWithKern(face, text).Ceil(),
 		}}
 	}
 
@@ -3572,7 +3965,7 @@ func (r *renderer) splitRunByCJK(text string, f *Font, latinFace, cjkFace font.F
 				text:  seg,
 				font:  f,
 				face:  face,
-				width: font.MeasureString(face, seg).Ceil(),
+				width: measureStringWithKern(face, seg).Ceil(),
 			})
 			buf.Reset()
 		}
@@ -3590,7 +3983,7 @@ func (r *renderer) splitRunByCJK(text string, f *Font, latinFace, cjkFace font.F
 			text:  seg,
 			font:  f,
 			face:  face,
-			width: font.MeasureString(face, seg).Ceil(),
+			width: measureStringWithKern(face, seg).Ceil(),
 		})
 	}
 	return runs
@@ -3715,7 +4108,7 @@ func (r *renderer) measureParagraphsHeight(paragraphs []*Paragraph, w, h int, an
 						text:  e.text,
 						font:  f,
 						face:  face,
-						width: font.MeasureString(face, e.text).Ceil(),
+						width: measureStringWithKern(face, e.text).Ceil(),
 					})
 				}
 			case *BreakElement:
@@ -3841,7 +4234,7 @@ func (r *renderer) drawParagraphs(paragraphs []*Paragraph, x, y, w, h int, ancho
 						text:  e.text,
 						font:  f,
 						face:  face,
-						width: font.MeasureString(face, e.text).Ceil(),
+						width: measureStringWithKern(face, e.text).Ceil(),
 					})
 				}
 			case *BreakElement:
@@ -3907,8 +4300,16 @@ func (r *renderer) drawParagraphs(paragraphs []*Paragraph, x, y, w, h int, ancho
 	switch anchor {
 	case TextAnchorMiddle:
 		startY = y + (h-totalH)/2
+		// When text overflows the available area, clamp to top so that
+		// text only overflows at the bottom (matching PowerPoint behaviour).
+		if startY < y {
+			startY = y
+		}
 	case TextAnchorBottom:
 		startY = y + h - totalH
+		if startY < y {
+			startY = y
+		}
 	}
 
 	curY := startY
@@ -4282,6 +4683,42 @@ func isCJK(r rune) bool {
 		(r >= 0x3000 && r <= 0x303F) || // CJK Symbols and Punctuation
 		(r >= 0xFF00 && r <= 0xFFEF) // Fullwidth Forms
 }
+// isCJKClosingPunct returns true for CJK closing punctuation that must not
+// start a new line (禁则処理 — line-start prohibited characters).
+func isCJKClosingPunct(r rune) bool {
+	switch r {
+	case '）', '】', '》', '」', '』', '〉', '〕', '｝', '］',
+		'。', '，', '、', '；', '：', '！', '？', '…',
+		')', ']', '}', '>', '.', ',', ';', ':', '!', '?':
+		return true
+	}
+	return false
+}
+
+// isCJKOpeningPunct returns true for CJK opening punctuation that must not
+// end a line (line-end prohibited characters).
+func isCJKOpeningPunct(r rune) bool {
+	switch r {
+	case '（', '【', '《', '「', '『', '〈', '〔', '｛', '［',
+		'(', '[', '{', '<':
+		return true
+	}
+	return false
+}
+
+// isClosingPunctRun returns true if the run text consists entirely of
+// closing punctuation characters that should not start a new line.
+func isClosingPunctRun(text string) bool {
+	if text == "" {
+		return false
+	}
+	for _, r := range text {
+		if !isCJKClosingPunct(r) {
+			return false
+		}
+	}
+	return true
+}
 
 // splitCJKAware splits text into wrappable segments.
 // CJK characters become individual segments; Latin words stay grouped.
@@ -4323,6 +4760,20 @@ func splitCJKAware(text string) []string {
 	if start < len(runes) {
 		segments = append(segments, string(runes[start:]))
 	}
+	// Apply kinsoku (禁則処理): merge closing punctuation into the preceding
+	// segment so it cannot start a new line.
+	if len(segments) > 1 {
+		merged := make([]string, 0, len(segments))
+		for i, seg := range segments {
+			rs := []rune(seg)
+			if i > 0 && len(rs) == 1 && isCJKClosingPunct(rs[0]) && len(merged) > 0 {
+				merged[len(merged)-1] += seg
+			} else {
+				merged = append(merged, seg)
+			}
+		}
+		segments = merged
+	}
 	return segments
 }
 
@@ -4345,6 +4796,26 @@ func splitASCIIWords(text string) []string {
 	return segments
 }
 
+// measureStringWithKern measures the advance width of a string using the face's
+// GlyphAdvance and Kern methods. Unlike font.MeasureString, this accounts for
+// kerning pairs, producing measurements closer to what PowerPoint's DirectWrite
+// renderer computes.
+func measureStringWithKern(face font.Face, s string) fixed.Int26_6 {
+	var advance fixed.Int26_6
+	prevR := rune(-1)
+	for _, r := range s {
+		if prevR >= 0 {
+			advance += face.Kern(prevR, r)
+		}
+		a, ok := face.GlyphAdvance(r)
+		if ok {
+			advance += a
+		}
+		prevR = r
+	}
+	return advance
+}
+
 // wrapRunLine wraps text runs into multiple lines that fit within maxWidth.
 func (r *renderer) wrapRunLine(runs []textRun, maxWidth int) []textLine {
 	if len(runs) == 0 {
@@ -4355,6 +4826,11 @@ func (r *renderer) wrapRunLine(runs []textRun, maxWidth int) []textLine {
 	}
 
 	maxW26_6 := fixed.I(maxWidth)
+	// Add a small tolerance (~1%) to account for differences between Go's
+	// text measurement and PowerPoint's DirectWrite renderer. Go's opentype
+	// package doesn't apply the same GPOS/GSUB shaping as DirectWrite,
+	// causing Latin text segments to measure slightly wider.
+	maxW26_6 += maxW26_6 / 100
 
 	var lines []textLine
 	var currentRuns []textRun
@@ -4371,10 +4847,19 @@ func (r *renderer) wrapRunLine(runs []textRun, maxWidth int) []textLine {
 			continue
 		}
 
-		runW := font.MeasureString(run.face, run.text)
+		runW := measureStringWithKern(run.face, run.text)
 
 		// If the run fits, add it whole
 		if currentWidth+runW <= maxW26_6 {
+			currentRuns = append(currentRuns, run)
+			currentWidth += runW
+			continue
+		}
+
+		// Closing punctuation (e.g. ）】》) must not start a new line
+		// (kinsoku / 禁則処理). Keep it on the current line even if it
+		// slightly overflows.
+		if isClosingPunctRun(run.text) {
 			currentRuns = append(currentRuns, run)
 			currentWidth += runW
 			continue
@@ -4399,7 +4884,7 @@ func (r *renderer) wrapRunLine(runs []textRun, maxWidth int) []textLine {
 		var partial strings.Builder
 		for _, seg := range segments {
 			test := partial.String() + seg
-			tw := font.MeasureString(run.face, test)
+			tw := measureStringWithKern(run.face, test)
 			if currentWidth+tw > maxW26_6 && (len(currentRuns) > 0 || partial.Len() > 0) {
 				if partial.Len() > 0 {
 					pText := partial.String()
@@ -4407,7 +4892,7 @@ func (r *renderer) wrapRunLine(runs []textRun, maxWidth int) []textLine {
 						text:  pText,
 						font:  run.font,
 						face:  run.face,
-						width: font.MeasureString(run.face, pText).Ceil(),
+						width: measureStringWithKern(run.face, pText).Ceil(),
 					})
 				}
 				lines = append(lines, r.buildTextLine(currentRuns))
@@ -4421,7 +4906,7 @@ func (r *renderer) wrapRunLine(runs []textRun, maxWidth int) []textLine {
 		}
 		if partial.Len() > 0 {
 			pText := partial.String()
-			pw := font.MeasureString(run.face, pText)
+			pw := measureStringWithKern(run.face, pText)
 			wr := textRun{
 				text:  pText,
 				font:  run.font,

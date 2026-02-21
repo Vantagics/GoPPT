@@ -48,20 +48,20 @@ type BaseShape struct {
 	hyperlink      *Hyperlink
 }
 
-func (b *BaseShape) GetOffsetX() int64   { return b.offsetX }
-func (b *BaseShape) GetOffsetY() int64   { return b.offsetY }
-func (b *BaseShape) GetWidth() int64     { return b.width }
-func (b *BaseShape) GetHeight() int64    { return b.height }
-func (b *BaseShape) GetName() string     { return b.name }
-func (b *BaseShape) GetRotation() int    { return b.rotation }
-func (b *BaseShape) base() *BaseShape    { return b }
+func (b *BaseShape) GetOffsetX() int64 { return b.offsetX }
+func (b *BaseShape) GetOffsetY() int64 { return b.offsetY }
+func (b *BaseShape) GetWidth() int64   { return b.width }
+func (b *BaseShape) GetHeight() int64  { return b.height }
+func (b *BaseShape) GetName() string   { return b.name }
+func (b *BaseShape) GetRotation() int  { return b.rotation }
+func (b *BaseShape) base() *BaseShape  { return b }
 
-func (b *BaseShape) SetOffsetX(x int64) *BaseShape  { b.offsetX = x; return b }
-func (b *BaseShape) SetOffsetY(y int64) *BaseShape  { b.offsetY = y; return b }
-func (b *BaseShape) SetWidth(w int64) *BaseShape     { b.width = w; return b }
-func (b *BaseShape) SetHeight(h int64) *BaseShape    { b.height = h; return b }
-func (b *BaseShape) SetName(n string) *BaseShape     { b.name = n; return b }
-func (b *BaseShape) SetRotation(r int) *BaseShape    { b.rotation = ((r % 360) + 360) % 360; return b }
+func (b *BaseShape) SetOffsetX(x int64) *BaseShape { b.offsetX = x; return b }
+func (b *BaseShape) SetOffsetY(y int64) *BaseShape { b.offsetY = y; return b }
+func (b *BaseShape) SetWidth(w int64) *BaseShape   { b.width = w; return b }
+func (b *BaseShape) SetHeight(h int64) *BaseShape  { b.height = h; return b }
+func (b *BaseShape) SetName(n string) *BaseShape   { b.name = n; return b }
+func (b *BaseShape) SetRotation(r int) *BaseShape  { b.rotation = ((r % 360) + 360) % 360; return b }
 
 // SetPosition sets both offset X and Y in EMU.
 func (b *BaseShape) SetPosition(x, y int64) *BaseShape {
@@ -95,8 +95,8 @@ func (b *BaseShape) SetFlipVertical(flip bool) *BaseShape {
 // GetFlipVertical returns whether the shape is flipped vertically.
 func (b *BaseShape) GetFlipVertical() bool { return b.flipVertical }
 
-func (b *BaseShape) GetDescription() string          { return b.description }
-func (b *BaseShape) SetDescription(d string)         { b.description = d }
+func (b *BaseShape) GetDescription() string  { return b.description }
+func (b *BaseShape) SetDescription(d string) { b.description = d }
 
 func (b *BaseShape) GetFill() *Fill {
 	if b.fill == nil {
@@ -125,20 +125,23 @@ func (b *BaseShape) GetShadow() *Shadow {
 
 func (b *BaseShape) SetShadow(s *Shadow) { b.shadow = s }
 
-func (b *BaseShape) GetHyperlink() *Hyperlink { return b.hyperlink }
+func (b *BaseShape) GetHyperlink() *Hyperlink  { return b.hyperlink }
 func (b *BaseShape) SetHyperlink(h *Hyperlink) { b.hyperlink = h }
 
 // CustomGeomPath represents a custom geometry path for freeform shapes.
 type CustomGeomPath struct {
-	Width    int64          // path coordinate space width
-	Height   int64          // path coordinate space height
-	Commands []PathCommand  // path commands (moveTo, lineTo, close, etc.)
+	Width    int64         // path coordinate space width
+	Height   int64         // path coordinate space height
+	Commands []PathCommand // path commands (moveTo, lineTo, close, etc.)
 }
 
 // PathCommand represents a single path command.
 type PathCommand struct {
-	Type string  // "moveTo", "lnTo", "close", "cubicBezTo", "quadBezTo", "arcTo"
+	Type string // "moveTo", "lnTo", "close", "cubicBezTo", "quadBezTo", "arcTo"
 	Pts  []PathPoint
+	// Arc parameters (only for arcTo): radii and angles in OOXML 60000ths of a degree
+	WR, HR         int64 // ellipse radii in path coordinate units
+	StAng, SwAng   int64 // start angle and sweep angle (60000ths of a degree)
 }
 
 // PathPoint represents a point in path coordinates.
@@ -164,7 +167,7 @@ type RichTextShape struct {
 	insetRight  int64
 	insetTop    int64
 	insetBottom int64
-	insetsSet   bool // true if insets were explicitly parsed from XML
+	insetsSet   bool            // true if insets were explicitly parsed from XML
 	customPath  *CustomGeomPath // non-nil for freeform/custGeom shapes
 	headEnd     *LineEnd        // arrow at start of custom path (from <a:ln><a:headEnd>)
 	tailEnd     *LineEnd        // arrow at end of custom path (from <a:ln><a:tailEnd>)
@@ -423,9 +426,9 @@ func (br *BreakElement) GetElementType() string { return "break" }
 // DrawingShape represents an image/drawing shape.
 type DrawingShape struct {
 	BaseShape
-	path        string // file path
-	data        []byte // raw image data
-	mimeType    string
+	path               string // file path
+	data               []byte // raw image data
+	mimeType           string
 	resizeProportional bool
 }
 
@@ -529,80 +532,82 @@ func (d *DrawingShape) SetOffsetY(y int64) *DrawingShape {
 // AutoShape represents a predefined shape (rectangle, ellipse, etc.).
 type AutoShape struct {
 	BaseShape
-	shapeType    AutoShapeType
-	text         string
-	paragraphs   []*Paragraph
-	textAnchor   TextAnchorType
+	shapeType     AutoShapeType
+	text          string
+	paragraphs    []*Paragraph
+	textAnchor    TextAnchorType
 	textDirection string
-	adjustValues map[string]int // avLst adjustment values (e.g. "adj1" -> 10690)
-	fontScale    int            // normAutofit fontScale in thousandths of a percent (e.g. 62500 = 62.5%), 0 means 100%
+	adjustValues  map[string]int // avLst adjustment values (e.g. "adj1" -> 10690)
+	fontScale     int            // normAutofit fontScale in thousandths of a percent (e.g. 62500 = 62.5%), 0 means 100%
 	// Text insets (padding) in EMU.
 	insetLeft   int64
 	insetRight  int64
 	insetTop    int64
 	insetBottom int64
 	insetsSet   bool
+	headEnd     *LineEnd // arrow at start of arc
+	tailEnd     *LineEnd // arrow at end of arc
 }
 
 // AutoShapeType represents the type of auto shape.
 type AutoShapeType string
 
 const (
-	AutoShapeRectangle       AutoShapeType = "rect"
-	AutoShapeRoundedRect     AutoShapeType = "roundRect"
-	AutoShapeEllipse         AutoShapeType = "ellipse"
-	AutoShapeTriangle        AutoShapeType = "triangle"
-	AutoShapeDiamond         AutoShapeType = "diamond"
-	AutoShapeParallelogram   AutoShapeType = "parallelogram"
-	AutoShapeTrapezoid       AutoShapeType = "trapezoid"
-	AutoShapePentagon        AutoShapeType = "pentagon"
-	AutoShapeHexagon         AutoShapeType = "hexagon"
-	AutoShapeArrowRight      AutoShapeType = "rightArrow"
-	AutoShapeArrowLeft       AutoShapeType = "leftArrow"
-	AutoShapeArrowUp         AutoShapeType = "upArrow"
-	AutoShapeArrowDown       AutoShapeType = "downArrow"
-	AutoShapeStar4           AutoShapeType = "star4"
-	AutoShapeStar5           AutoShapeType = "star5"
-	AutoShapeStar10          AutoShapeType = "star10"
-	AutoShapeStar12          AutoShapeType = "star12"
-	AutoShapeStar16          AutoShapeType = "star16"
-	AutoShapeStar24          AutoShapeType = "star24"
-	AutoShapeStar32          AutoShapeType = "star32"
-	AutoShapeHeart           AutoShapeType = "heart"
-	AutoShapeLightningBolt   AutoShapeType = "lightningBolt"
-	AutoShapeChevron         AutoShapeType = "chevron"
-	AutoShapeCloud           AutoShapeType = "cloud"
-	AutoShapePlus            AutoShapeType = "mathPlus"
-	AutoShapeMinus           AutoShapeType = "mathMinus"
-	AutoShapeFlowchartProcess    AutoShapeType = "flowChartProcess"
-	AutoShapeFlowchartDecision   AutoShapeType = "flowChartDecision"
+	AutoShapeRectangle            AutoShapeType = "rect"
+	AutoShapeRoundedRect          AutoShapeType = "roundRect"
+	AutoShapeEllipse              AutoShapeType = "ellipse"
+	AutoShapeTriangle             AutoShapeType = "triangle"
+	AutoShapeDiamond              AutoShapeType = "diamond"
+	AutoShapeParallelogram        AutoShapeType = "parallelogram"
+	AutoShapeTrapezoid            AutoShapeType = "trapezoid"
+	AutoShapePentagon             AutoShapeType = "pentagon"
+	AutoShapeHexagon              AutoShapeType = "hexagon"
+	AutoShapeArrowRight           AutoShapeType = "rightArrow"
+	AutoShapeArrowLeft            AutoShapeType = "leftArrow"
+	AutoShapeArrowUp              AutoShapeType = "upArrow"
+	AutoShapeArrowDown            AutoShapeType = "downArrow"
+	AutoShapeStar4                AutoShapeType = "star4"
+	AutoShapeStar5                AutoShapeType = "star5"
+	AutoShapeStar10               AutoShapeType = "star10"
+	AutoShapeStar12               AutoShapeType = "star12"
+	AutoShapeStar16               AutoShapeType = "star16"
+	AutoShapeStar24               AutoShapeType = "star24"
+	AutoShapeStar32               AutoShapeType = "star32"
+	AutoShapeHeart                AutoShapeType = "heart"
+	AutoShapeLightningBolt        AutoShapeType = "lightningBolt"
+	AutoShapeChevron              AutoShapeType = "chevron"
+	AutoShapeCloud                AutoShapeType = "cloud"
+	AutoShapePlus                 AutoShapeType = "mathPlus"
+	AutoShapeMinus                AutoShapeType = "mathMinus"
+	AutoShapeFlowchartProcess     AutoShapeType = "flowChartProcess"
+	AutoShapeFlowchartDecision    AutoShapeType = "flowChartDecision"
 	AutoShapeFlowchartPreparation AutoShapeType = "flowChartPreparation"
-	AutoShapeCallout1        AutoShapeType = "wedgeRoundRectCallout"
-	AutoShapeCallout2        AutoShapeType = "wedgeEllipseCallout"
-	AutoShapeRibbon          AutoShapeType = "ribbon2"
-	AutoShapeSmileyFace      AutoShapeType = "smileyFace"
-	AutoShapeDonut           AutoShapeType = "donut"
-	AutoShapeNoSmoking       AutoShapeType = "noSmoking"
-	AutoShapeBlockArc        AutoShapeType = "blockArc"
-	AutoShapeCube            AutoShapeType = "cube"
-	AutoShapeCan             AutoShapeType = "can"
-	AutoShapeBevel           AutoShapeType = "bevel"
-	AutoShapeFoldedCorner    AutoShapeType = "foldedCorner"
-	AutoShapeFrame           AutoShapeType = "frame"
-	AutoShapePlaque          AutoShapeType = "plaque"
-	AutoShapeLeftRightArrow  AutoShapeType = "leftRightArrow"
-	AutoShapeRtTriangle      AutoShapeType = "rtTriangle"
-	AutoShapeHomePlate       AutoShapeType = "homePlate"
-	AutoShapeSnip2SameRect   AutoShapeType = "snip2SameRect"
-	AutoShapePie             AutoShapeType = "pie"
-	AutoShapeArc             AutoShapeType = "arc"
-	AutoShapeBentArrow       AutoShapeType = "bentArrow"
-	AutoShapeUturnArrow      AutoShapeType = "uturnArrow"
-	AutoShapeMathEqual       AutoShapeType = "mathEqual"
-	AutoShapeCurvedRightArrow AutoShapeType = "curvedRightArrow"
-	AutoShapeCurvedLeftArrow  AutoShapeType = "curvedLeftArrow"
-	AutoShapeCurvedUpArrow    AutoShapeType = "curvedUpArrow"
-	AutoShapeCurvedDownArrow  AutoShapeType = "curvedDownArrow"
+	AutoShapeCallout1             AutoShapeType = "wedgeRoundRectCallout"
+	AutoShapeCallout2             AutoShapeType = "wedgeEllipseCallout"
+	AutoShapeRibbon               AutoShapeType = "ribbon2"
+	AutoShapeSmileyFace           AutoShapeType = "smileyFace"
+	AutoShapeDonut                AutoShapeType = "donut"
+	AutoShapeNoSmoking            AutoShapeType = "noSmoking"
+	AutoShapeBlockArc             AutoShapeType = "blockArc"
+	AutoShapeCube                 AutoShapeType = "cube"
+	AutoShapeCan                  AutoShapeType = "can"
+	AutoShapeBevel                AutoShapeType = "bevel"
+	AutoShapeFoldedCorner         AutoShapeType = "foldedCorner"
+	AutoShapeFrame                AutoShapeType = "frame"
+	AutoShapePlaque               AutoShapeType = "plaque"
+	AutoShapeLeftRightArrow       AutoShapeType = "leftRightArrow"
+	AutoShapeRtTriangle           AutoShapeType = "rtTriangle"
+	AutoShapeHomePlate            AutoShapeType = "homePlate"
+	AutoShapeSnip2SameRect        AutoShapeType = "snip2SameRect"
+	AutoShapePie                  AutoShapeType = "pie"
+	AutoShapeArc                  AutoShapeType = "arc"
+	AutoShapeBentArrow            AutoShapeType = "bentArrow"
+	AutoShapeUturnArrow           AutoShapeType = "uturnArrow"
+	AutoShapeMathEqual            AutoShapeType = "mathEqual"
+	AutoShapeCurvedRightArrow     AutoShapeType = "curvedRightArrow"
+	AutoShapeCurvedLeftArrow      AutoShapeType = "curvedLeftArrow"
+	AutoShapeCurvedUpArrow        AutoShapeType = "curvedUpArrow"
+	AutoShapeCurvedDownArrow      AutoShapeType = "curvedDownArrow"
 )
 
 func (a *AutoShape) GetType() ShapeType { return ShapeTypeAutoShape }
@@ -655,6 +660,11 @@ func (a *AutoShape) GetParagraphs() []*Paragraph {
 }
 
 // GetAdjustValues returns the adjustment values map.
+// GetHeadEnd returns the head end arrow.
+func (a *AutoShape) GetHeadEnd() *LineEnd { return a.headEnd }
+
+// GetTailEnd returns the tail end arrow.
+func (a *AutoShape) GetTailEnd() *LineEnd { return a.tailEnd }
 func (a *AutoShape) GetAdjustValues() map[string]int {
 	return a.adjustValues
 }
@@ -664,12 +674,13 @@ type LineShape struct {
 	BaseShape
 	lineStyle     BorderStyle
 	lineWidth     int
+	lineWidthEMU  int             // raw line width in EMU for precision; 0 means use lineWidth*12700
 	lineColor     Color
 	headEnd       *LineEnd
 	tailEnd       *LineEnd
-	connectorType string           // prstGeom value: "line", "straightConnector1", "bentConnector3", etc.
-	adjustValues  map[string]int   // adjustment values for connector geometry
-	customPath    *CustomGeomPath  // non-nil for custGeom connectors (freeform curved arrows)
+	connectorType string          // prstGeom value: "line", "straightConnector1", "bentConnector3", etc.
+	adjustValues  map[string]int  // adjustment values for connector geometry
+	customPath    *CustomGeomPath // non-nil for custGeom connectors (freeform curved arrows)
 }
 
 func (l *LineShape) GetType() ShapeType { return ShapeTypeLine }
@@ -700,6 +711,15 @@ func (l *LineShape) SetLineWidth(w int) *LineShape {
 
 // GetLineWidth returns the line width.
 func (l *LineShape) GetLineWidth() int { return l.lineWidth }
+
+// GetLineWidthEMU returns the line width in EMU for precise rendering.
+// If the raw EMU value was not set, it falls back to lineWidth * 12700.
+func (l *LineShape) GetLineWidthEMU() int {
+	if l.lineWidthEMU > 0 {
+		return l.lineWidthEMU
+	}
+	return l.lineWidth * 12700
+}
 
 // SetLineColor sets the line color.
 func (l *LineShape) SetLineColor(c Color) *LineShape {
@@ -737,10 +757,10 @@ func (l *LineShape) GetAdjustValues() map[string]int { return l.adjustValues }
 // TableShape represents a table shape.
 type TableShape struct {
 	BaseShape
-	rows      [][]*TableCell
-	numRows   int
-	numCols   int
-	colWidths []int64 // individual column widths in EMU (from gridCol)
+	rows       [][]*TableCell
+	numRows    int
+	numCols    int
+	colWidths  []int64 // individual column widths in EMU (from gridCol)
 	rowHeights []int64 // individual row heights in EMU (from tr)
 }
 

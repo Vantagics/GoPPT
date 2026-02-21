@@ -7,6 +7,7 @@ import (
 	"sort"
 )
 
+// renderEMFVector renders an EMF containing vector drawing commands to an image.
 func renderEMFVector(data []byte) image.Image {
 	if len(data) < 88 {
 		return nil
@@ -17,17 +18,19 @@ func renderEMFVector(data []byte) image.Image {
 	i32 := func(d []byte) int32 { return int32(u32(d)) }
 	i16 := func(d []byte) int16 { return int16(uint16(d[0]) | uint16(d[1])<<8) }
 
-	// EMF header bounds (device coordinates)
 	boundsL := int(i32(data[8:12]))
 	boundsT := int(i32(data[12:16]))
 	boundsR := int(i32(data[16:20]))
 	boundsB := int(i32(data[20:24]))
 
-	// First pass: find window/viewport transform
+	// First pass: read transforms and identify "clip" fills to skip.
+	// Pattern: FILLPATH → CLOSEFIGURE → ABORTPATH means the fill is a clip op.
 	winOrgX, winOrgY := 0, 0
 	winExtX, winExtY := 1, 1
 	vpOrgX, vpOrgY := 0, 0
 	vpExtX, vpExtY := 1, 1
+	skipFills := map[int]bool{} // file offsets of FILLPATH records to skip
+
 	pos := 0
 	for pos+8 <= len(data) {
 		rt := u32(data[pos : pos+4])
@@ -37,25 +40,41 @@ func renderEMFVector(data []byte) image.Image {
 		}
 		rec := data[pos : pos+int(rs)]
 		switch rt {
-		case 0x09: // SETWINDOWEXTEX
+		case 0x09:
 			if len(rec) >= 16 {
 				winExtX = int(i32(rec[8:12]))
 				winExtY = int(i32(rec[12:16]))
 			}
-		case 0x0A: // SETWINDOWORGEX
+		case 0x0A:
 			if len(rec) >= 16 {
 				winOrgX = int(i32(rec[8:12]))
 				winOrgY = int(i32(rec[12:16]))
 			}
-		case 0x0B: // SETVIEWPORTEXTEX
+		case 0x0B:
 			if len(rec) >= 16 {
 				vpExtX = int(i32(rec[8:12]))
 				vpExtY = int(i32(rec[12:16]))
 			}
-		case 0x0C: // SETVIEWPORTORGEX
+		case 0x0C:
 			if len(rec) >= 16 {
 				vpOrgX = int(i32(rec[8:12]))
 				vpOrgY = int(i32(rec[12:16]))
+			}
+		case 0x3D: // FILLPATH - check if followed by CLOSEFIGURE + ABORTPATH
+			fillPos := pos
+			np := pos + int(rs)
+			if np+8 <= len(data) {
+				nt := u32(data[np : np+4])
+				ns := u32(data[np+4 : np+8])
+				if nt == 0x3C && ns >= 8 { // CLOSEFIGURE
+					np2 := np + int(ns)
+					if np2+8 <= len(data) {
+						nt2 := u32(data[np2 : np2+4])
+						if nt2 == 0x40 { // ABORTPATH
+							skipFills[fillPos] = true
+						}
+					}
+				}
 			}
 		}
 		if rt == 0x0E {
@@ -64,14 +83,12 @@ func renderEMFVector(data []byte) image.Image {
 		pos += int(rs)
 	}
 
-	// Compute device-space bounds
 	devW := boundsR - boundsL
 	devH := boundsB - boundsT
 	if devW <= 0 || devH <= 0 {
 		return nil
 	}
 
-	// Scale up for quality
 	scale := 1.0
 	target := 300.0
 	if float64(devW) < target || float64(devH) < target {
@@ -96,9 +113,7 @@ func renderEMFVector(data []byte) image.Image {
 	offX := float64(-boundsL)*scale + 1
 	offY := float64(-boundsT)*scale + 1
 
-	// Transform logical (window) coordinates to image pixels
 	toImg := func(lx, ly int) (float64, float64) {
-		// Logical -> Device: d = (l - winOrg) * vpExt / winExt + vpOrg
 		var dx, dy float64
 		if winExtX != 0 {
 			dx = float64(lx-winOrgX) * float64(vpExtX) / float64(winExtX)
@@ -108,7 +123,6 @@ func renderEMFVector(data []byte) image.Image {
 		}
 		dx += float64(vpOrgX)
 		dy += float64(vpOrgY)
-		// Device -> Image pixels
 		return dx*scale + offX, dy*scale + offY
 	}
 
@@ -116,13 +130,31 @@ func renderEMFVector(data []byte) image.Image {
 		style   uint32
 		r, g, b uint8
 	}
+	type emfPen struct {
+		style   uint32
+		r, g, b uint8
+	}
 	brushes := map[uint32]emfBrush{}
+	pens := map[uint32]emfPen{}
 	var curBrush emfBrush
+	var curPen emfPen
 	nullBrush := false
 	nullPen := true
 	type pp struct{ x, y float64 }
 	var path []pp
+	var lastPath []pp
 	var curX, curY float64
+	hasDrawing := false
+
+	setPixel := func(x, y int, c color.RGBA) {
+		if x >= 0 && x < imgW && y >= 0 && y < imgH {
+			off := y*img.Stride + x*4
+			img.Pix[off] = c.R
+			img.Pix[off+1] = c.G
+			img.Pix[off+2] = c.B
+			img.Pix[off+3] = c.A
+		}
+	}
 
 	emfFill := func(pts []pp, c color.RGBA) {
 		if len(pts) < 3 || c.A == 0 {
@@ -172,13 +204,7 @@ func renderEMFVector(data []byte) image.Image {
 					x2 = imgW - 1
 				}
 				for px := x1; px <= x2; px++ {
-					off := y*img.Stride + px*4
-					if off+3 < len(img.Pix) {
-						img.Pix[off] = c.R
-						img.Pix[off+1] = c.G
-						img.Pix[off+2] = c.B
-						img.Pix[off+3] = c.A
-					}
+					setPixel(px, y, c)
 				}
 			}
 		}
@@ -201,13 +227,7 @@ func renderEMFVector(data []byte) image.Image {
 		}
 		e := dx - dy
 		for {
-			if x0 >= 0 && x0 < imgW && y0 >= 0 && y0 < imgH {
-				off := y0*img.Stride + x0*4
-				img.Pix[off] = c.R
-				img.Pix[off+1] = c.G
-				img.Pix[off+2] = c.B
-				img.Pix[off+3] = c.A
-			}
+			setPixel(x0, y0, c)
 			if x0 == x1 && y0 == y1 {
 				break
 			}
@@ -245,24 +265,6 @@ func renderEMFVector(data []byte) image.Image {
 		return r
 	}
 
-	readPts16 := func(rec []byte) []pp {
-		if len(rec) < 28 {
-			return nil
-		}
-		cnt := u32(rec[24:28])
-		if 28+cnt*4 > uint32(len(rec)) {
-			return nil
-		}
-		pts := make([]pp, cnt)
-		for i := uint32(0); i < cnt; i++ {
-			pts[i].x, pts[i].y = toImg(int(i16(rec[28+i*4:])), int(i16(rec[28+i*4+2:])))
-		}
-		return pts
-	}
-
-	// addBez handles both POLYBEZIER16 and POLYBEZIERTO16.
-	// Many EMFs use POLYBEZIER16 with 3n points (no explicit start),
-	// treating it like POLYBEZIERTO16. We detect this via cnt%3==0.
 	addBez := func(rec []byte, useCur bool) {
 		if len(rec) < 28 {
 			return
@@ -292,23 +294,69 @@ func renderEMFVector(data []byte) image.Image {
 		}
 	}
 
-	doFill := func() {
-		if len(path) >= 3 && !nullBrush {
-			emfFill(path, color.RGBA{curBrush.r, curBrush.g, curBrush.b, 255})
+	penColor := func() color.RGBA {
+		if nullPen {
+			return color.RGBA{}
 		}
+		return color.RGBA{curPen.r, curPen.g, curPen.b, 255}
 	}
-	doStrokeFill := func() {
-		if len(path) >= 3 {
-			if !nullBrush {
-				emfFill(path, color.RGBA{curBrush.r, curBrush.g, curBrush.b, 255})
-			}
-			if !nullPen {
-				emfStroke(path, color.RGBA{0, 0, 0, 255})
-			}
+	brushColor := func() color.RGBA {
+		if nullBrush {
+			return color.RGBA{}
 		}
+		return color.RGBA{curBrush.r, curBrush.g, curBrush.b, 255}
 	}
 
-	hasDrawing := false
+	doFill := func(skip bool) {
+		if !skip && len(path) >= 3 {
+			bc := brushColor()
+			if bc.A > 0 {
+				emfFill(path, bc)
+				hasDrawing = true
+			}
+		}
+		lastPath = make([]pp, len(path))
+		copy(lastPath, path)
+		path = path[:0]
+	}
+
+	doStrokeFill := func() {
+		pts := path
+		if len(pts) < 3 {
+			pts = lastPath
+		}
+		if len(pts) >= 3 {
+			bc := brushColor()
+			if bc.A > 0 {
+				emfFill(pts, bc)
+				hasDrawing = true
+			}
+			pc := penColor()
+			if pc.A > 0 {
+				emfStroke(pts, pc)
+				hasDrawing = true
+			}
+		}
+		path = path[:0]
+		lastPath = nil
+	}
+
+	readPts16 := func(rec []byte) []pp {
+		if len(rec) < 28 {
+			return nil
+		}
+		cnt := u32(rec[24:28])
+		if 28+cnt*4 > uint32(len(rec)) {
+			return nil
+		}
+		pts := make([]pp, cnt)
+		for i := uint32(0); i < cnt; i++ {
+			pts[i].x, pts[i].y = toImg(int(i16(rec[28+i*4:])), int(i16(rec[28+i*4+2:])))
+		}
+		return pts
+	}
+
+	// Second pass: render
 	pos = 0
 	for pos+8 <= len(data) {
 		rt := u32(data[pos : pos+4])
@@ -318,10 +366,21 @@ func renderEMFVector(data []byte) image.Image {
 		}
 		rec := data[pos : pos+int(rs)]
 		switch rt {
+		case 0x26: // CREATEPEN
+			if len(rec) >= 28 {
+				ih := u32(rec[8:12])
+				pens[ih] = emfPen{u32(rec[12:16]), rec[24], rec[25], rec[26]}
+			}
 		case 0x27: // CREATEBRUSHINDIRECT
 			if len(rec) >= 20 {
 				ih := u32(rec[8:12])
 				brushes[ih] = emfBrush{u32(rec[12:16]), rec[16], rec[17], rec[18]}
+			}
+		case 0x28: // DELETEOBJECT
+			if len(rec) >= 12 {
+				ih := u32(rec[8:12])
+				delete(brushes, ih)
+				delete(pens, ih)
 			}
 		case 0x25: // SELECTOBJECT
 			if len(rec) >= 12 {
@@ -332,18 +391,28 @@ func renderEMFVector(data []byte) image.Image {
 						curBrush = emfBrush{0, 255, 255, 255}
 						nullBrush = false
 					case 0x80000004:
-						curBrush = emfBrush{}
+						curBrush = emfBrush{0, 0, 0, 0}
 						nullBrush = false
 					case 0x80000005:
 						nullBrush = true
+					case 0x80000006:
+						curPen = emfPen{0, 255, 255, 255}
+						nullPen = false
 					case 0x80000007:
+						curPen = emfPen{0, 0, 0, 0}
 						nullPen = false
 					case 0x80000008:
 						nullPen = true
 					}
-				} else if b, ok := brushes[ih]; ok {
-					curBrush = b
-					nullBrush = b.style == 1
+				} else {
+					if b, ok := brushes[ih]; ok {
+						curBrush = b
+						nullBrush = b.style == 1
+					}
+					if p, ok := pens[ih]; ok {
+						curPen = p
+						nullPen = p.style == 5
+					}
 				}
 			}
 		case 0x1B: // MOVETOEX
@@ -351,28 +420,38 @@ func renderEMFVector(data []byte) image.Image {
 				curX, curY = toImg(int(i32(rec[8:12])), int(i32(rec[12:16])))
 				path = append(path, pp{curX, curY})
 			}
+		case 0x36: // LINETO
+			if len(rec) >= 16 {
+				x, y := toImg(int(i32(rec[8:12])), int(i32(rec[12:16])))
+				path = append(path, pp{x, y})
+				curX, curY = x, y
+			}
 		case 0x3A: // BEGINPATH
 			path = path[:0]
-		case 0x3B: // ENDPATH - keep path for FILLPATH
+		case 0x3B: // ENDPATH
 		case 0x3C: // CLOSEFIGURE
 		case 0x3D: // FILLPATH
-			doFill()
-			path = path[:0]
-			hasDrawing = true
+			doFill(skipFills[pos])
 		case 0x3E: // STROKEANDFILLPATH
 			doStrokeFill()
-			path = path[:0]
-			hasDrawing = true
 		case 0x3F: // STROKEPATH
-			if len(path) >= 2 && !nullPen {
-				emfStroke(path, color.RGBA{0, 0, 0, 255})
+			if len(path) >= 2 {
+				pc := penColor()
+				if pc.A > 0 {
+					emfStroke(path, pc)
+					hasDrawing = true
+				}
 			}
 			path = path[:0]
-			hasDrawing = true
+		case 0x40: // ABORTPATH
+			path = path[:0]
+		case 0x43: // SELECTCLIPPATH
+			path = path[:0]
 		case 0x59: // POLYGON16
 			pts := readPts16(rec)
 			if len(pts) > 0 {
 				path = append(path, pts...)
+				curX, curY = pts[len(pts)-1].x, pts[len(pts)-1].y
 			}
 		case 0x58: // POLYBEZIER16
 			addBez(rec, false)
@@ -388,18 +467,24 @@ func renderEMFVector(data []byte) image.Image {
 			if len(rec) >= 28 {
 				cnt := u32(rec[24:28])
 				if cnt > 0 && 28+cnt*4+cnt <= uint32(len(rec)) {
+					ptsOff := 28
+					typesOff := 28 + int(cnt)*4
 					for i := uint32(0); i < cnt; i++ {
-						ix, iy := toImg(int(i16(rec[28+i*4:])), int(i16(rec[28+i*4+2:])))
-						path = append(path, pp{ix, iy})
-						curX, curY = ix, iy
+						ix, iy := toImg(int(i16(rec[ptsOff+int(i)*4:])), int(i16(rec[ptsOff+int(i)*4+2:])))
+						typ := rec[typesOff+int(i)]
+						switch typ & 0x06 {
+						case 0x02:
+							path = append(path, pp{ix, iy})
+							curX, curY = ix, iy
+						case 0x04:
+							path = append(path, pp{ix, iy})
+							curX, curY = ix, iy
+						default:
+							curX, curY = ix, iy
+							path = append(path, pp{ix, iy})
+						}
 					}
 				}
-			}
-		case 0x36: // LINETO
-			if len(rec) >= 16 {
-				x, y := toImg(int(i32(rec[8:12])), int(i32(rec[12:16])))
-				path = append(path, pp{x, y})
-				curX, curY = x, y
 			}
 		case 0x2A: // ELLIPSE
 			if len(rec) >= 24 {
@@ -412,8 +497,9 @@ func renderEMFVector(data []byte) image.Image {
 					ix, iy := toImg(int(cx+rx*math.Cos(a)), int(cy+ry*math.Sin(a)))
 					pts[i] = pp{ix, iy}
 				}
-				if !nullBrush {
-					emfFill(pts, color.RGBA{curBrush.r, curBrush.g, curBrush.b, 255})
+				bc := brushColor()
+				if bc.A > 0 {
+					emfFill(pts, bc)
 					hasDrawing = true
 				}
 			}
@@ -422,8 +508,9 @@ func renderEMFVector(data []byte) image.Image {
 				x0, y0 := toImg(int(i32(rec[8:12])), int(i32(rec[12:16])))
 				x1, y1 := toImg(int(i32(rec[16:20])), int(i32(rec[20:24])))
 				pts := []pp{{x0, y0}, {x1, y0}, {x1, y1}, {x0, y1}}
-				if !nullBrush {
-					emfFill(pts, color.RGBA{curBrush.r, curBrush.g, curBrush.b, 255})
+				bc := brushColor()
+				if bc.A > 0 {
+					emfFill(pts, bc)
 					hasDrawing = true
 				}
 			}

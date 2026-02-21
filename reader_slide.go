@@ -715,7 +715,18 @@ func (r *PPTXReader) parseSlideXML(decoder *xml.Decoder, slide *Slide, rels []xm
 							}
 						}
 					}
-					if !state.isPlaceholder && currentRichText != nil {
+					if state.isPlaceholder && currentPlaceholder != nil {
+						for _, attr := range t.Attr {
+							switch attr.Name.Local {
+							case "wrap":
+								currentPlaceholder.wordWrap = attr.Value == "square"
+							case "numCol":
+								if v, err := strconv.Atoi(attr.Value); err == nil {
+									currentPlaceholder.columns = v
+								}
+							}
+						}
+					} else if currentRichText != nil {
 						for _, attr := range t.Attr {
 							switch attr.Name.Local {
 							case "wrap":
@@ -1837,6 +1848,7 @@ func (r *PPTXReader) parseSlideXML(decoder *xml.Decoder, slide *Slide, rels []xm
 					for _, attr := range t.Attr {
 						if attr.Name.Local == "w" {
 							if v, err := strconv.Atoi(attr.Value); err == nil {
+								currentLine.lineWidthEMU = v
 								currentLine.lineWidth = v / 12700
 							}
 						}
@@ -2030,6 +2042,37 @@ func (r *PPTXReader) parseSlideXML(decoder *xml.Decoder, slide *Slide, rels []xm
 				if state.inCustPath {
 					pendingPathCmds = append(pendingPathCmds, PathCommand{Type: "quadBezTo"})
 				}
+			case "arcTo":
+				if state.inCustPath {
+					var wR, hR, stAng, swAng int64
+					for _, attr := range t.Attr {
+						switch attr.Name.Local {
+						case "wR":
+							if v, err := strconv.ParseInt(attr.Value, 10, 64); err == nil {
+								wR = v
+							}
+						case "hR":
+							if v, err := strconv.ParseInt(attr.Value, 10, 64); err == nil {
+								hR = v
+							}
+						case "stAng":
+							if v, err := strconv.ParseInt(attr.Value, 10, 64); err == nil {
+								stAng = v
+							}
+						case "swAng":
+							if v, err := strconv.ParseInt(attr.Value, 10, 64); err == nil {
+								swAng = v
+							}
+						}
+					}
+					pendingPathCmds = append(pendingPathCmds, PathCommand{
+						Type:  "arcTo",
+						WR:    wR,
+						HR:    hR,
+						StAng: stAng,
+						SwAng: swAng,
+					})
+				}
 			case "close":
 				if state.inCustPath {
 					pendingPathCmds = append(pendingPathCmds, PathCommand{Type: "close"})
@@ -2208,7 +2251,16 @@ func (r *PPTXReader) parseSlideXML(decoder *xml.Decoder, slide *Slide, rels []xm
 							autoShape.shadow = pendingShadow
 							pendingShadow = nil
 						}
-						// Copy paragraphs from richtext if any (preserves font info)
+																// Apply deferred arrow ends
+										if pendingHeadEnd != nil {
+											autoShape.headEnd = pendingHeadEnd
+											pendingHeadEnd = nil
+										}
+										if pendingTailEnd != nil {
+											autoShape.tailEnd = pendingTailEnd
+											pendingTailEnd = nil
+										}
+// Copy paragraphs from richtext if any (preserves font info)
 						if currentRichText != nil && len(currentRichText.paragraphs) > 0 {
 							autoShape.paragraphs = currentRichText.paragraphs
 							autoShape.textAnchor = textAnchor
@@ -2377,7 +2429,16 @@ func (r *PPTXReader) parseSlideXML(decoder *xml.Decoder, slide *Slide, rels []xm
 							autoShape.shadow = pendingShadow
 							pendingShadow = nil
 						}
-						if state.inGrpSp && currentGroup != nil {
+																// Apply deferred arrow ends
+										if pendingHeadEnd != nil {
+											autoShape.headEnd = pendingHeadEnd
+											pendingHeadEnd = nil
+										}
+										if pendingTailEnd != nil {
+											autoShape.tailEnd = pendingTailEnd
+											pendingTailEnd = nil
+										}
+if state.inGrpSp && currentGroup != nil {
 							currentGroup.AddShape(autoShape)
 						} else {
 							slide.shapes = append(slide.shapes, autoShape)
@@ -3388,6 +3449,7 @@ func (r *PPTXReader) parseLayoutImages(data []byte, rels []xmlRelForRead, zr *zi
 						if attr.Name.Local == "w" {
 							if v, err := strconv.Atoi(attr.Value); err == nil {
 								if currentLine != nil {
+									currentLine.lineWidthEMU = v
 									currentLine.lineWidth = v / 12700
 								}
 							}

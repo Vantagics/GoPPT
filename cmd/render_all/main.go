@@ -32,11 +32,21 @@ func main() {
 	opts := gopresentation.DefaultRenderOptions()
 	opts.Width = 1920
 
-	pattern := filepath.Join(dst, "slide%02d.png")
-	if err := pres.SaveSlidesAsImages(pattern, opts); err != nil {
-		fmt.Fprintf(os.Stderr, "render: %v\n", err)
-		os.Exit(1)
+	n := pres.GetSlideCount()
+	fmt.Printf("Slide count: %d\n", n)
+	for i := 0; i < n; i++ {
+		outPath := filepath.Join(dst, fmt.Sprintf("slide%02d.png", i+1))
+		fmt.Printf("Rendering slide %d -> %s\n", i+1, outPath)
+		if err := pres.SaveSlideAsImage(i, outPath, opts); err != nil {
+			fmt.Fprintf(os.Stderr, "slide %d: %v\n", i+1, err)
+			continue
+		}
+		if info, err := os.Stat(outPath); err == nil {
+			fmt.Printf("  OK: %d bytes\n", info.Size())
+		} else {
+			fmt.Printf("  MISSING: %v\n", err)
+		}
 	}
 
-	fmt.Printf("Rendered %d slides to %s\n", pres.GetSlideCount(), dst)
+	fmt.Printf("Done. Rendered %d slides to %s\n", n, dst)
 }
