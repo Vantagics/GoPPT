@@ -430,6 +430,12 @@ type DrawingShape struct {
 	data               []byte // raw image data
 	mimeType           string
 	resizeProportional bool
+	alpha              int // alphaModFix amount (0-100000); 0 means fully opaque (default)
+	// srcRect crop percentages in 1/1000 of a percent (e.g. 56333 = 56.333%)
+	cropLeft   int
+	cropTop    int
+	cropRight  int
+	cropBottom int
 }
 
 func (d *DrawingShape) GetType() ShapeType { return ShapeTypeDrawing }
@@ -528,6 +534,21 @@ func (d *DrawingShape) SetOffsetY(y int64) *DrawingShape {
 	d.offsetY = y
 	return d
 }
+
+// GetCropLeft returns the left crop percentage (in 1/1000 of a percent).
+func (d *DrawingShape) GetCropLeft() int { return d.cropLeft }
+
+// GetCropTop returns the top crop percentage (in 1/1000 of a percent).
+func (d *DrawingShape) GetCropTop() int { return d.cropTop }
+
+// GetCropRight returns the right crop percentage (in 1/1000 of a percent).
+func (d *DrawingShape) GetCropRight() int { return d.cropRight }
+
+// GetCropBottom returns the bottom crop percentage (in 1/1000 of a percent).
+func (d *DrawingShape) GetCropBottom() int { return d.cropBottom }
+
+// GetAlphaValue returns the alphaModFix amount (0-100000).
+func (d *DrawingShape) GetAlphaValue() int { return d.alpha }
 
 // AutoShape represents a predefined shape (rectangle, ellipse, etc.).
 type AutoShape struct {

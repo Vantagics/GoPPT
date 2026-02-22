@@ -1840,6 +1840,39 @@ func (r *PPTXReader) parseSlideXML(decoder *xml.Decoder, slide *Slide, rels []xm
 						}
 					}
 				}
+			case "alphaModFix":
+				if state.inPic && currentDrawing != nil {
+					for _, attr := range t.Attr {
+						if attr.Name.Local == "amt" {
+							if v, err := strconv.Atoi(attr.Value); err == nil {
+								currentDrawing.alpha = v
+							}
+						}
+					}
+				}
+			case "srcRect":
+				if state.inPic && currentDrawing != nil {
+					for _, attr := range t.Attr {
+						switch attr.Name.Local {
+						case "l":
+							if v, err := strconv.Atoi(attr.Value); err == nil {
+								currentDrawing.cropLeft = v
+							}
+						case "t":
+							if v, err := strconv.Atoi(attr.Value); err == nil {
+								currentDrawing.cropTop = v
+							}
+						case "r":
+							if v, err := strconv.Atoi(attr.Value); err == nil {
+								currentDrawing.cropRight = v
+							}
+						case "b":
+							if v, err := strconv.Atoi(attr.Value); err == nil {
+								currentDrawing.cropBottom = v
+							}
+						}
+					}
+				}
 			case "ln":
 				if state.inSpPr {
 					state.inLn = true
@@ -3322,6 +3355,8 @@ func (r *PPTXReader) parseLayoutImages(data []byte, rels []xmlRelForRead, zr *zi
 	var offX, offY, extCX, extCY int64
 	var embedID string
 	var flipH, flipV bool
+	var picAlpha int // alphaModFix amount for pic blip
+	var cropL, cropT, cropR, cropB int // srcRect crop percentages
 
 	// For cxnSp (line connector) shapes
 	var currentLine *LineShape
@@ -3356,6 +3391,8 @@ func (r *PPTXReader) parseLayoutImages(data []byte, rels []xmlRelForRead, zr *zi
 				inPic = true
 				offX, offY, extCX, extCY = 0, 0, 0, 0
 				embedID = ""
+				picAlpha = 0
+				cropL, cropT, cropR, cropB = 0, 0, 0, 0
 			case "sp":
 				inSp = true
 				isPH = false
@@ -3426,6 +3463,39 @@ func (r *PPTXReader) parseLayoutImages(data []byte, rels []xmlRelForRead, zr *zi
 					for _, attr := range t.Attr {
 						if attr.Name.Local == "embed" {
 							embedID = attr.Value
+						}
+					}
+				}
+			case "alphaModFix":
+				if inPic {
+					for _, attr := range t.Attr {
+						if attr.Name.Local == "amt" {
+							if v, err := strconv.Atoi(attr.Value); err == nil {
+								picAlpha = v
+							}
+						}
+					}
+				}
+			case "srcRect":
+				if inPic {
+					for _, attr := range t.Attr {
+						switch attr.Name.Local {
+						case "l":
+							if v, err := strconv.Atoi(attr.Value); err == nil {
+								cropL = v
+							}
+						case "t":
+							if v, err := strconv.Atoi(attr.Value); err == nil {
+								cropT = v
+							}
+						case "r":
+							if v, err := strconv.Atoi(attr.Value); err == nil {
+								cropR = v
+							}
+						case "b":
+							if v, err := strconv.Atoi(attr.Value); err == nil {
+								cropB = v
+							}
 						}
 					}
 				}
@@ -3892,6 +3962,11 @@ func (r *PPTXReader) parseLayoutImages(data []byte, rels []xmlRelForRead, zr *zi
 								ds.height = extCY
 								ds.data = imgData
 								ds.mimeType = guessMimeType(imgPath)
+								ds.alpha = picAlpha
+								ds.cropLeft = cropL
+								ds.cropTop = cropT
+								ds.cropRight = cropR
+								ds.cropBottom = cropB
 								shapes = append(shapes, ds)
 							}
 							break

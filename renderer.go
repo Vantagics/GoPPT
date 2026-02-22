@@ -974,6 +974,22 @@ func (r *renderer) renderDrawing(s *DrawingShape) {
 		return
 	}
 
+	// Apply srcRect crop if set (values are in 1/1000 of a percent)
+	if s.cropLeft > 0 || s.cropTop > 0 || s.cropRight > 0 || s.cropBottom > 0 {
+		bounds := srcImg.Bounds()
+		imgW := bounds.Dx()
+		imgH := bounds.Dy()
+		cx0 := int(float64(imgW) * float64(s.cropLeft) / 100000.0)
+		cy0 := int(float64(imgH) * float64(s.cropTop) / 100000.0)
+		cx1 := imgW - int(float64(imgW)*float64(s.cropRight)/100000.0)
+		cy1 := imgH - int(float64(imgH)*float64(s.cropBottom)/100000.0)
+		if cx1 > cx0 && cy1 > cy0 {
+			cropped := image.NewRGBA(image.Rect(0, 0, cx1-cx0, cy1-cy0))
+			draw.Draw(cropped, cropped.Bounds(), srcImg, image.Pt(bounds.Min.X+cx0, bounds.Min.Y+cy0), draw.Src)
+			srcImg = cropped
+		}
+	}
+
 	rotation := s.GetRotation()
 	flipH := s.GetFlipHorizontal()
 	flipV := s.GetFlipVertical()
@@ -984,6 +1000,22 @@ func (r *renderer) renderDrawing(s *DrawingShape) {
 			ox, oy = 0, 0
 		}
 		scaledImg := scaleImageBilinear(srcImg, w, h)
+		// Apply alphaModFix opacity if set (value is in 1/1000 of a percent, e.g. 5000 = 5%)
+		if s.alpha > 0 && s.alpha < 100000 {
+			alphaScale := float64(s.alpha) / 100000.0
+			bounds := scaledImg.Bounds()
+			for py := bounds.Min.Y; py < bounds.Max.Y; py++ {
+				for px := bounds.Min.X; px < bounds.Max.X; px++ {
+					c := scaledImg.RGBAAt(px, py)
+					// Scale all channels (premultiplied alpha format)
+					c.R = uint8(float64(c.R) * alphaScale)
+					c.G = uint8(float64(c.G) * alphaScale)
+					c.B = uint8(float64(c.B) * alphaScale)
+					c.A = uint8(float64(c.A) * alphaScale)
+					scaledImg.SetRGBA(px, py, c)
+				}
+			}
+		}
 		draw.Draw(tr.img, image.Rect(ox, oy, ox+w, oy+h), scaledImg, image.Point{}, draw.Over)
 	}
 
