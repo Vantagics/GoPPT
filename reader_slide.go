@@ -280,13 +280,54 @@ func (r *PPTXReader) readSlideNotes(zr *zip.Reader, slide *Slide, rels []xmlRelF
 	}
 }
 
+// setCellBorderStyle applies a line style to one side of a cell's border.
+//
+// A side of a cell border is not addressed by anything the caller reads out of
+// the file: it is named by the <a:lnL>/<a:lnR>/<a:lnT>/<a:lnB> element the
+// value sits inside, which the scanner records as a side marker. Nothing
+// outside the scanner can reach a single side, so the mapping lives here.
+func setCellBorderStyle(cell *TableCell, side string, style BorderStyle) {
+	if cell == nil || cell.border == nil {
+		return
+	}
+	var b *Border
+	switch side {
+	case "L":
+		b = cell.border.Left
+	case "R":
+		b = cell.border.Right
+	case "T":
+		b = cell.border.Top
+	case "B":
+		b = cell.border.Bottom
+	}
+	if b != nil {
+		b.Style = style
+	}
+}
+
+// parseNotesXML reads the notes text out of a notes slide part.
+//
+// The text of a note is a text body like any other: one <a:p> per paragraph,
+// each holding runs. Joining the runs and dropping the paragraph boundaries
+// loses the line breaks, which is most of what a note is — PowerPoint writes a
+// note the user typed across three lines as three paragraphs, and reading it
+// back as one run of text cannot be undone on the next save. The comments
+// parser alongside this one has always joined its paragraphs with "\n".
+//
+// <a:br/> is a line break inside a paragraph. The model holds notes as a single
+// string, so a newline is the only way to carry one.
 func (r *PPTXReader) parseNotesXML(data []byte) string {
 	decoder := xml.NewDecoder(bytes.NewReader(data))
-	var inBody bool
-	var inParagraph bool
-	var inRun bool
-	var inText bool
-	var texts []string
+	var inBody, inParagraph, inRun, inText bool
+	var runs []string  // runs of the paragraph being read
+	var paras []string // completed paragraphs
+	// bodyStart and bodyHasRun scope the paragraphs to one text body. A notes
+	// slide can carry a placeholder for the slide number, the date or the
+	// footer, each with a body of its own whose "text" is a field, and none of
+	// that is what the speaker typed.
+	var bodyStart int
+	var bodyHasRun bool
 
 	for {
 		token, err := decoder.Token()
@@ -298,13 +339,20 @@ func (r *PPTXReader) parseNotesXML(data []byte) string {
 			switch t.Name.Local {
 			case "txBody":
 				inBody = true
+				bodyStart = len(paras)
+				bodyHasRun = false
 			case "p":
 				if inBody {
+					runs = runs[:0]
 					inParagraph = true
 				}
 			case "r":
+				// Gated on the paragraph so a slide number or date field, which
+				// holds its <a:t> directly without a run, is not read as notes.
+				inRun = inParagraph
+			case "br":
 				if inParagraph {
-					inRun = true
+					runs = append(runs, "\n")
 				}
 			case "t":
 				if inRun {
@@ -313,14 +361,22 @@ func (r *PPTXReader) parseNotesXML(data []byte) string {
 			}
 		case xml.CharData:
 			if inText {
-				texts = append(texts, string(t))
+				runs = append(runs, string(t))
+				bodyHasRun = true
 			}
 		case xml.EndElement:
 			switch t.Name.Local {
 			case "txBody":
 				inBody = false
+				if !bodyHasRun {
+					paras = paras[:bodyStart]
+				}
 			case "p":
-				inParagraph = false
+				if inBody && inParagraph {
+					paras = append(paras, strings.Join(runs, ""))
+					runs = runs[:0]
+					inParagraph = false
+				}
 			case "r":
 				inRun = false
 			case "t":
@@ -328,7 +384,7 @@ func (r *PPTXReader) parseNotesXML(data []byte) string {
 			}
 		}
 	}
-	return strings.Join(texts, "")
+	return strings.Join(paras, "\n")
 }
 
 // maxGroupDepth caps how deeply the reader will nest groups inside a slide.
@@ -442,6 +498,9 @@ func (r *PPTXReader) parseSlideXML(decoder *xml.Decoder, slide *Slide, rels []xm
 	var currentPlaceholder *PlaceholderShape
 	var currentParagraph *Paragraph
 	var currentFont *Font
+	// currentHyperlink is the <a:hlinkClick> of the run being read. It belongs
+	// to the run whose <a:rPr> carries it, and is cleared when that run starts.
+	var currentHyperlink *Hyperlink
 	var currentTableRow int
 	var currentTableCol int
 
@@ -1122,6 +1181,10 @@ func (r *PPTXReader) parseSlideXML(decoder *xml.Decoder, slide *Slide, rels []xm
 					}
 				}
 			case "r":
+				// A hyperlink belongs to a single run. Clearing it here keeps the
+				// previous run's link from following this one, and leaves a run
+				// whose <a:rPr> has no hlinkClick linkless rather than inheriting.
+				currentHyperlink = nil
 				if state.inTcParagraph {
 					state.inTcRun = true
 					currentFont = NewFont()
@@ -1179,6 +1242,14 @@ func (r *PPTXReader) parseSlideXML(decoder *xml.Decoder, slide *Slide, rels []xm
 							currentFont.Color = defFont.Color
 						}
 					}
+				}
+			case "hlinkClick":
+				// The hyperlink of the run whose properties these are. Guarded on
+				// inRunProps because <p:cNvPr> carries an hlinkClick too — a
+				// shape-level link, which is a different element the model does
+				// not place here.
+				if state.inRunProps {
+					currentHyperlink = parseHyperlinkClick(t, rels)
 				}
 			case "rPr":
 				if state.inRun || state.inTcRun {
@@ -2171,6 +2242,23 @@ func (r *PPTXReader) parseSlideXML(decoder *xml.Decoder, slide *Slide, rels []xm
 							}
 						}
 					}
+				} else if state.inTcPr && state.inTcPrLn {
+					// The dash style of one side of a cell border. The side is
+					// named by the <a:lnX> element this sits inside, so it is
+					// read from the scanner's side marker rather than here.
+					for _, attr := range t.Attr {
+						if attr.Name.Local != "val" {
+							continue
+						}
+						style := BorderSolid
+						switch attr.Value {
+						case "dash", "lgDash", "sysDash":
+							style = BorderDash
+						case "dot", "sysDot":
+							style = BorderDot
+						}
+						setCellBorderStyle(tableCellAt(currentTable, currentTableRow, currentTableCol), state.tcPrLnSide, style)
+					}
 				}
 			case "effectLst":
 				if state.inSpPr && !state.inLn {
@@ -2346,15 +2434,13 @@ func (r *PPTXReader) parseSlideXML(decoder *xml.Decoder, slide *Slide, rels []xm
 
 		case xml.CharData:
 			text := string(t)
-			if state.inTcText && currentParagraph != nil {
+			if (state.inTcText || state.inText) && currentParagraph != nil {
 				tr := currentParagraph.CreateTextRun(text)
 				if currentFont != nil {
 					tr.font = currentFont
 				}
-			} else if state.inText && currentParagraph != nil {
-				tr := currentParagraph.CreateTextRun(text)
-				if currentFont != nil {
-					tr.font = currentFont
+				if currentHyperlink != nil {
+					tr.SetHyperlink(currentHyperlink)
 				}
 			}
 
@@ -3034,6 +3120,69 @@ func embedRelID(t xml.StartElement) string {
 // imageRelData resolves an image relationship to the bytes of the part it
 // names, along with the MIME type implied by that part's extension.
 //
+// parseHyperlinkClick resolves an <a:hlinkClick> to a hyperlink.
+//
+// The element names its target through a relationship, so the slide's own
+// relationship list is what gives the link a meaning, and the action attribute
+// says which kind of link it is. PowerPoint writes a jump to another slide as
+// action="ppaction://hlinksldjump" plus a slide-type relationship whose target
+// is slideN.xml, and an external link as a hyperlink-type relationship with no
+// action.
+//
+// Anything else — the show-navigation actions, or an id this slide's
+// relationships do not define — yields no hyperlink at all. That is deliberate:
+// the alternative is a link the model cannot act on, which the writer would then
+// re-emit as an external relationship pointing somewhere that does not exist.
+//
+// An external target is kept exactly as it was written. Scheme validation
+// belongs to NewHyperlink, which guards URLs a caller supplies; a reader that
+// dropped the links whose scheme it disliked would lose content from the very
+// document it was asked to preserve.
+func parseHyperlinkClick(se xml.StartElement, rels []xmlRelForRead) *Hyperlink {
+	var relID, action string
+	for _, attr := range se.Attr {
+		switch {
+		case attr.Name.Space == nsOfficeDocRels && attr.Name.Local == "id":
+			relID = attr.Value
+		case attr.Name.Space == "" && attr.Name.Local == "action":
+			action = attr.Value
+		}
+	}
+	if relID == "" {
+		return nil
+	}
+	for _, rel := range rels {
+		if rel.ID != relID {
+			continue
+		}
+		switch {
+		case action == actionSlideJump:
+			if n := slideNumberFromRelTarget(rel.Target); n > 0 {
+				return NewInternalHyperlink(n)
+			}
+		case action == "" && strings.HasSuffix(rel.Type, "/hyperlink") && rel.Target != "":
+			return &Hyperlink{URL: rel.Target}
+		}
+		return nil
+	}
+	return nil
+}
+
+// slideNumberFromRelTarget extracts N from a relationship target such as
+// "slide3.xml" or "../slides/slide3.xml". It returns 0 when the target does not
+// name a slide, which is what makes it usable as a validity check.
+func slideNumberFromRelTarget(target string) int {
+	base := lastPathComponent(target)
+	if !strings.HasPrefix(base, "slide") || !strings.HasSuffix(base, ".xml") {
+		return 0
+	}
+	n, err := strconv.Atoi(strings.TrimSuffix(strings.TrimPrefix(base, "slide"), ".xml"))
+	if err != nil || n < 1 {
+		return 0
+	}
+	return n
+}
+
 // A nil result means the picture cannot be drawn: the id is unknown, the part
 // is missing, or the package cannot be read. Callers record that as "no image",
 // which the renderer turns into a labelled placeholder — a blank rectangle

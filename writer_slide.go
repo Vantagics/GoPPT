@@ -9,6 +9,12 @@ import (
 
 // buildHyperlinkRelMap pre-computes the relationship IDs for all hyperlinks in a slide.
 // This ensures the XML shape content and the .rels file use the same IDs.
+//
+// The walk has to stay identical to the one in writeSlideRels: both visit
+// flattenShapes in order, add the image/chart relationships each shape consumes,
+// then the hyperlinks of the paragraphs shapeParagraphs hands back. Only a link
+// hyperlinkRel accepts is given an id, so the map, the r:id placeholder in the
+// slide XML and the .rels file agree on which links exist.
 func (w *PPTXWriter) buildHyperlinkRelMap(slide *Slide) map[*TextRun]string {
 	m := make(map[*TextRun]string)
 	relIdx := 2 // rId1 is slideLayout
@@ -16,14 +22,45 @@ func (w *PPTXWriter) buildHyperlinkRelMap(slide *Slide) map[*TextRun]string {
 		relIdx += countShapeRels(shape)
 		for _, para := range shapeParagraphs(shape) {
 			for _, elem := range para.elements {
-				if tr, ok := elem.(*TextRun); ok && tr.hyperlink != nil && !tr.hyperlink.IsInternal {
-					m[tr] = fmt.Sprintf("rId%d", relIdx)
-					relIdx++
+				tr, ok := elem.(*TextRun)
+				if !ok || tr.hyperlink == nil {
+					continue
 				}
+				if _, _, ok := w.hyperlinkRel(tr.hyperlink); !ok {
+					continue
+				}
+				m[tr] = fmt.Sprintf("rId%d", relIdx)
+				relIdx++
 			}
 		}
 	}
 	return m
+}
+
+// hyperlinkRel maps a hyperlink to the relationship it needs: the relationship
+// type, its target, and whether the link can be written at all.
+//
+// An internal link names a slide by number, so a number no slide backs is not
+// writable — and it has to be rejected here, in one place, because three parts
+// have to agree about which links count: the r:id placeholder in the slide XML,
+// the id map, and the .rels file. Emitting a relationship for a link the other
+// two skipped shifts every later id, which is how a package ends up with a
+// reference nothing defines.
+func (w *PPTXWriter) hyperlinkRel(h *Hyperlink) (relType, target string, ok bool) {
+	if h == nil {
+		return "", "", false
+	}
+	if h.IsInternal {
+		n := h.SlideNumber
+		if n < 1 || n > len(w.presentation.slides) {
+			return "", "", false
+		}
+		return relTypeSlide, fmt.Sprintf("slide%d.xml", n), true
+	}
+	if h.URL == "" {
+		return "", "", false
+	}
+	return relTypeHyperlink, h.URL, true
 }
 
 // countShapeRels returns the number of non-hyperlink relationship IDs consumed by a shape
@@ -41,12 +78,25 @@ func countShapeRels(shape Shape) int {
 }
 
 // shapeParagraphs returns the paragraphs for shapes that can contain hyperlinks.
+//
+// A table cell's runs carry hyperlinks through the same run emitter as a text
+// box's, so they have to be enumerated here as well: this function is what keeps
+// the id map, the slide XML and the .rels file in step, and a shape missing from
+// it gets a placeholder no relationship ever resolves.
 func shapeParagraphs(shape Shape) []*Paragraph {
 	switch s := shape.(type) {
 	case *RichTextShape:
 		return s.paragraphs
 	case *PlaceholderShape:
 		return s.paragraphs
+	case *TableShape:
+		var out []*Paragraph
+		for _, row := range s.rows {
+			for _, cell := range row {
+				out = append(out, cell.paragraphs...)
+			}
+		}
+		return out
 	}
 	return nil
 }
@@ -54,7 +104,13 @@ func shapeParagraphs(shape Shape) []*Paragraph {
 // countRelIdxBefore computes the relIdx for a target shape within a slide,
 // counting all rels (images, charts, hyperlinks) for shapes before it in
 // document order, which is the order flattenShapes defines.
-func countRelIdxBefore(shapes []Shape, target Shape) int {
+//
+// It is a fourth consumer of the hyperlink rule, after buildHyperlinkRelMap,
+// writeSlideRels and the r:id placeholder itself, so it asks hyperlinkRel rather
+// than deciding for itself: a predicate duplicated here drifts, and a picture
+// numbered from the wrong count refers to a relationship that belongs to a
+// hyperlink.
+func (w *PPTXWriter) countRelIdxBefore(shapes []Shape, target Shape) int {
 	relIdx := 2 // rId1 is slideLayout
 	for _, shape := range flattenShapes(shapes) {
 		if shape == target {
@@ -63,8 +119,10 @@ func countRelIdxBefore(shapes []Shape, target Shape) int {
 		relIdx += countShapeRels(shape)
 		for _, para := range shapeParagraphs(shape) {
 			for _, elem := range para.elements {
-				if tr, ok := elem.(*TextRun); ok && tr.hyperlink != nil && !tr.hyperlink.IsInternal {
-					relIdx++
+				if tr, ok := elem.(*TextRun); ok && tr.hyperlink != nil {
+					if _, _, ok := w.hyperlinkRel(tr.hyperlink); ok {
+						relIdx++
+					}
 				}
 			}
 		}
@@ -165,25 +223,30 @@ func (w *PPTXWriter) writeSlideRels(zw *zip.Writer, slide *Slide, slideNum int, 
 				relIdx, relTypeChart, chartIdx)
 			relIdx++
 		}
-		// Handle hyperlinks in shapes with paragraphs
-		var paras []*Paragraph
-		switch s := shape.(type) {
-		case *RichTextShape:
-			paras = s.paragraphs
-		case *PlaceholderShape:
-			paras = s.paragraphs
-		}
-		for _, para := range paras {
+		// Hyperlinks in the shape's paragraphs — a table cell's included, which
+		// is what shapeParagraphs exists to guarantee.
+		for _, para := range shapeParagraphs(shape) {
 			for _, elem := range para.elements {
-				if tr, ok := elem.(*TextRun); ok && tr.hyperlink != nil {
-					if !tr.hyperlink.IsInternal {
-						rid := hlinkRelMap[tr]
-						fmt.Fprintf(&rels, `
-  <Relationship Id="%s" Type="%s" Target="%s" TargetMode="External"/>`,
-							rid, relTypeHyperlink, xmlEscape(tr.hyperlink.URL))
-						relIdx++
-					}
+				tr, ok := elem.(*TextRun)
+				if !ok || tr.hyperlink == nil {
+					continue
 				}
+				rid := hlinkRelMap[tr]
+				if rid == "" {
+					continue // hyperlinkRel refused it, so it was never given an id
+				}
+				relType, target, _ := w.hyperlinkRel(tr.hyperlink)
+				if tr.hyperlink.IsInternal {
+					// A jump to another slide is an internal relationship of
+					// slide type; the action on the hlinkClick says to jump.
+					fmt.Fprintf(&rels, `
+  <Relationship Id="%s" Type="%s" Target="%s"/>`, rid, relType, target)
+				} else {
+					fmt.Fprintf(&rels, `
+  <Relationship Id="%s" Type="%s" Target="%s" TargetMode="External"/>`,
+						rid, relType, xmlEscape(target))
+				}
+				relIdx++
 			}
 		}
 	}
@@ -409,7 +472,20 @@ func (w *PPTXWriter) writeParagraphXML(para *Paragraph) string {
 `, algn, spacing, bulletXML, elementsXML.String())
 }
 
+// writeTextRunXML renders a text run inside a shape's <p:txBody>.
 func (w *PPTXWriter) writeTextRunXML(tr *TextRun) string {
+	return w.writeTextRunXMLAt(tr, "            ")
+}
+
+// writeTextRunXMLAt renders a text run with a caller-chosen indentation, so one
+// emitter serves both a shape's <p:txBody> and a table cell's <a:txBody>.
+//
+// A table cell used to build its own <a:r> by hand, which dropped everything the
+// run's font carried except the size: name, East Asian name, bold, italic,
+// underline, strikethrough, colour, and the hyperlink. The reader reads all of
+// them back, so every load-and-save quietly lost them.
+func (w *PPTXWriter) writeTextRunXMLAt(tr *TextRun, indent string) string {
+	inner := indent + "  "
 	font := tr.font
 	attrs := fmt.Sprintf(` lang="en-US" sz="%d" dirty="0"`, font.Size*100)
 
@@ -429,34 +505,45 @@ func (w *PPTXWriter) writeTextRunXML(tr *TextRun) string {
 	solidFill := ""
 	if font.Color.ARGB != "" {
 		solidFill = fmt.Sprintf(`
-              <a:solidFill><a:srgbClr val="%s"/></a:solidFill>`, colorRGB(font.Color))
+%s<a:solidFill><a:srgbClr val="%s"/></a:solidFill>`, inner, colorRGB(font.Color))
 	}
 
 	latin := ""
 	if font.Name != "" {
 		latin = fmt.Sprintf(`
-              <a:latin typeface="%s"/>`, xmlEscape(font.Name))
+%s<a:latin typeface="%s"/>`, inner, xmlEscape(font.Name))
 	}
 
 	ea := ""
 	if font.NameEA != "" {
 		ea = fmt.Sprintf(`
-              <a:ea typeface="%s"/>`, xmlEscape(font.NameEA))
+%s<a:ea typeface="%s"/>`, inner, xmlEscape(font.NameEA))
 	}
 
-	hlinkStart := ""
-	hlinkEnd := ""
-	if tr.hyperlink != nil && !tr.hyperlink.IsInternal {
-		hlinkStart = fmt.Sprintf(`
-              <a:hlinkClick r:id="rId_hlink_%p"/>`, tr)
+	// The relationship id is a placeholder the slide writer replaces once every
+	// relationship has been numbered. Only a hyperlink hyperlinkRel accepts is
+	// given a number, so a refused one is left out entirely rather than emitted
+	// with an id nothing defines.
+	hlink := ""
+	if tr.hyperlink != nil {
+		if _, _, ok := w.hyperlinkRel(tr.hyperlink); ok {
+			action := ""
+			if tr.hyperlink.IsInternal {
+				// PowerPoint marks a jump to another slide with an action; the
+				// r:id names the slide relationship it jumps to.
+				action = ` action="` + actionSlideJump + `"`
+			}
+			hlink = fmt.Sprintf(`
+%s<a:hlinkClick r:id="%s"%s/>`, inner, fmt.Sprintf("rId_hlink_%p", tr), action)
+		}
 	}
 
-	return fmt.Sprintf(`            <a:r>
-              <a:rPr%s>%s%s%s%s%s
-              </a:rPr>
-              <a:t>%s</a:t>
-            </a:r>
-`, attrs, solidFill, latin, ea, hlinkStart, hlinkEnd, xmlEscape(tr.text))
+	return fmt.Sprintf(`%s<a:r>
+%s<a:rPr%s>%s%s%s%s
+%s</a:rPr>
+%s<a:t>%s</a:t>
+%s</a:r>
+`, indent, inner, attrs, solidFill, latin, ea, hlink, inner, inner, xmlEscape(tr.text), indent)
 }
 
 // --- Drawing Shape XML ---
@@ -473,7 +560,7 @@ func (w *PPTXWriter) writeDrawingShapeXML(s *DrawingShape, shapeID *int, slideNu
 	// Find the relationship ID for this image within the current slide.
 	// Must match the ordering in writeSlideRels exactly.
 	currentSlide := w.presentation.slides[slideNum-1]
-	relIdx := countRelIdxBefore(currentSlide.shapes, s)
+	relIdx := w.countRelIdxBefore(currentSlide.shapes, s)
 
 	shadowXML := ""
 	if s.shadow != nil && s.shadow.Visible {
@@ -648,6 +735,124 @@ func (w *PPTXWriter) writeLineShapeXML(s *LineShape, shapeID *int) string {
 
 // --- Table Shape XML ---
 
+// tableCellAt returns the cell at (row, col), or nil when the row is shorter
+// than the table's column count.
+//
+// A row can be short. The reader builds one row per <a:tr> and one cell per
+// <a:tc> inside it without checking the count against <a:tblGrid>, and the
+// renderer walks only the cells that are there. Indexing the row blindly made
+// Save panic — recovered into an error, but the presentation could not be
+// written at all — on a package Open had accepted.
+func tableCellAt(t *TableShape, row, col int) *TableCell {
+	if row < 0 || row >= len(t.rows) || col < 0 || col >= len(t.rows[row]) {
+		return nil
+	}
+	return t.rows[row][col]
+}
+
+// tableColumnWidth returns the width of column i in EMU: the value read from
+// the package when the table came from a file, an even share otherwise.
+//
+// The reader records the real <a:gridCol w> values, so recomputing an even
+// split would resize every column of a presentation that was opened and saved.
+func tableColumnWidth(t *TableShape, i int) int64 {
+	if len(t.colWidths) == t.numCols && t.colWidths[i] > 0 {
+		return t.colWidths[i]
+	}
+	if t.numCols > 0 {
+		return t.width / int64(t.numCols)
+	}
+	return 0
+}
+
+// tableRowHeight is tableColumnWidth's counterpart for <a:tr h>.
+func tableRowHeight(t *TableShape, i int) int64 {
+	if len(t.rowHeights) == t.numRows && t.rowHeights[i] > 0 {
+		return t.rowHeights[i]
+	}
+	if t.numRows > 0 {
+		return t.height / int64(t.numRows)
+	}
+	return 0
+}
+
+// tableContinuationAttrs renders the attributes of a merge continuation cell.
+// A position to the right of the anchor continues the column merge (hMerge),
+// one below it continues the row merge (vMerge); a position that is both
+// carries both.
+func tableContinuationAttrs(right, below bool) string {
+	attrs := ""
+	if right {
+		attrs += ` hMerge="1"`
+	}
+	if below {
+		attrs += ` vMerge="1"`
+	}
+	return attrs
+}
+
+// tableMergeContinuationXML renders the empty cell PowerPoint writes for every
+// position a merge covers other than its top-left anchor. The row still holds
+// one <a:tc> per column, because that is how the grid is counted.
+func tableMergeContinuationXML(attrs string) string {
+	return fmt.Sprintf(`              <a:tc%s>
+                <a:txBody>
+                  <a:bodyPr/>
+                  <a:lstStyle/>
+                  <a:p/>
+                </a:txBody>
+                <a:tcPr/>
+              </a:tc>
+`, attrs)
+}
+
+// tableCellBorderXML renders one side of a cell's border. tag is the qualified
+// element name — a:lnL, a:lnR, a:lnT, a:lnB — because the element has to be in
+// the drawingml namespace to mean anything. Our own reader matches on the local
+// name and would accept an unqualified one, which is exactly why this is worth
+// getting right and testing for.
+//
+// A side that is not drawn is left out rather than written as <a:noFill/>: the
+// reader maps a missing side and an explicit noFill to the same BorderNone, and
+// the writer emits no table style that a missing side could inherit one from.
+func tableCellBorderXML(tag string, b *Border) string {
+	if b == nil || b.Style == BorderNone {
+		return ""
+	}
+	dash := `<a:prstDash val="solid"/>`
+	switch b.Style {
+	case BorderDash:
+		dash = `<a:prstDash val="dash"/>`
+	case BorderDot:
+		dash = `<a:prstDash val="dot"/>`
+	}
+	width := ""
+	if b.Width > 0 {
+		// Border.Width is in points; the file wants EMU.
+		width = fmt.Sprintf(` w="%d"`, b.Width*12700)
+	}
+	return fmt.Sprintf(`
+                  <%s%s><a:solidFill><a:srgbClr val="%s"/></a:solidFill>%s</%s>`,
+		tag, width, colorRGB(b.Color), dash, tag)
+}
+
+// tableCellPrXML renders <a:tcPr>. Borders come before the fill, which is the
+// order CT_TableCellProperties defines.
+func tableCellPrXML(cell *TableCell) string {
+	pr := ""
+	if cell.border != nil {
+		pr += tableCellBorderXML("a:lnL", cell.border.Left)
+		pr += tableCellBorderXML("a:lnR", cell.border.Right)
+		pr += tableCellBorderXML("a:lnT", cell.border.Top)
+		pr += tableCellBorderXML("a:lnB", cell.border.Bottom)
+	}
+	if cell.fill != nil && cell.fill.Type == FillSolid {
+		pr += fmt.Sprintf(`
+                  <a:solidFill><a:srgbClr val="%s"/></a:solidFill>`, colorRGB(cell.fill.Color))
+	}
+	return pr
+}
+
 func (w *PPTXWriter) writeTableShapeXML(s *TableShape, shapeID *int) string {
 	id := *shapeID
 	*shapeID++
@@ -657,32 +862,73 @@ func (w *PPTXWriter) writeTableShapeXML(s *TableShape, shapeID *int) string {
 		name = fmt.Sprintf("Table %d", id)
 	}
 
-	colWidth := int64(0)
-	if s.numCols > 0 {
-		colWidth = s.width / int64(s.numCols)
-	}
-
 	var gridCols strings.Builder
 	for i := 0; i < s.numCols; i++ {
 		gridCols.WriteString(fmt.Sprintf(`            <a:gridCol w="%d"/>
-`, colWidth))
+`, tableColumnWidth(s, i)))
 	}
+
+	// A merge is written as the spanned cell plus an empty continuation cell
+	// for every other position it covers, and the number of <a:tc> elements in
+	// a row has to stay equal to the number of columns.
+	//
+	// The continuations are derived from the anchor's spans rather than only
+	// from a cell's own hMerge/vMerge flags: SetColSpan and SetRowSpan are the
+	// public API and API.md documents SetColSpan(2) alone, with nothing saying
+	// the cell to its right has to be marked by hand. A table read back from a
+	// file carries both, and deriving them again gives the same answer.
+	claimed := make(map[[2]int]string, len(s.rows))
 
 	var rowsXML strings.Builder
-	rowHeight := int64(0)
-	if s.numRows > 0 {
-		rowHeight = s.height / int64(s.numRows)
-	}
-
 	for i := 0; i < s.numRows; i++ {
 		rowsXML.WriteString(fmt.Sprintf(`            <a:tr h="%d">
-`, rowHeight))
+`, tableRowHeight(s, i)))
 		for j := 0; j < s.numCols; j++ {
-			cell := s.rows[i][j]
-			cellFill := ""
-			if cell.fill != nil && cell.fill.Type == FillSolid {
-				cellFill = fmt.Sprintf(`
-                  <a:solidFill><a:srgbClr val="%s"/></a:solidFill>`, colorRGB(cell.fill.Color))
+			cell := tableCellAt(s, i, j)
+			if cell == nil {
+				// A short row is still a row: keep one cell per column.
+				rowsXML.WriteString(tableMergeContinuationXML(""))
+				continue
+			}
+			if attrs, ok := claimed[[2]int{i, j}]; ok {
+				rowsXML.WriteString(tableMergeContinuationXML(attrs))
+				continue
+			}
+			if cell.hMerge || cell.vMerge {
+				// A continuation as it was read from the file, with nothing to
+				// anchor it — whatever wrote it left the anchor out.
+				rowsXML.WriteString(tableMergeContinuationXML(tableContinuationAttrs(cell.hMerge, cell.vMerge)))
+				continue
+			}
+
+			colSpan, rowSpan := cell.colSpan, cell.rowSpan
+			if colSpan < 1 {
+				colSpan = 1
+			}
+			if rowSpan < 1 {
+				rowSpan = 1
+			}
+			if j+colSpan > s.numCols {
+				colSpan = s.numCols - j
+			}
+			if i+rowSpan > s.numRows {
+				rowSpan = s.numRows - i
+			}
+			for r := i; r < i+rowSpan; r++ {
+				for c := j; c < j+colSpan; c++ {
+					if r == i && c == j {
+						continue
+					}
+					claimed[[2]int{r, c}] = tableContinuationAttrs(c > j, r > i)
+				}
+			}
+
+			spanAttrs := ""
+			if colSpan > 1 {
+				spanAttrs += fmt.Sprintf(` gridSpan="%d"`, colSpan)
+			}
+			if rowSpan > 1 {
+				spanAttrs += fmt.Sprintf(` rowSpan="%d"`, rowSpan)
 			}
 
 			var cellText strings.Builder
@@ -690,17 +936,20 @@ func (w *PPTXWriter) writeTableShapeXML(s *TableShape, shapeID *int) string {
 				cellText.WriteString("                <a:p>\n")
 				for _, elem := range para.elements {
 					if tr, ok := elem.(*TextRun); ok {
-						cellText.WriteString(fmt.Sprintf(`                  <a:r>
-                    <a:rPr lang="en-US" sz="%d" dirty="0"/>
-                    <a:t>%s</a:t>
-                  </a:r>
-`, tr.font.Size*100, xmlEscape(tr.text)))
+						// The same emitter a shape's text body uses, so a cell
+						// run keeps its font, weight, colour and hyperlink.
+						cellText.WriteString(w.writeTextRunXMLAt(tr, "                  "))
 					}
 				}
 				cellText.WriteString("                </a:p>\n")
 			}
+			if cellText.Len() == 0 {
+				// <a:txBody> requires at least one paragraph. A cell the reader
+				// found no <a:p> in has none.
+				cellText.WriteString("                <a:p/>\n")
+			}
 
-			rowsXML.WriteString(fmt.Sprintf(`              <a:tc>
+			rowsXML.WriteString(fmt.Sprintf(`              <a:tc%s>
                 <a:txBody>
                   <a:bodyPr/>
                   <a:lstStyle/>
@@ -708,7 +957,7 @@ func (w *PPTXWriter) writeTableShapeXML(s *TableShape, shapeID *int) string {
                 <a:tcPr>%s
                 </a:tcPr>
               </a:tc>
-`, cellText.String(), cellFill))
+`, spanAttrs, cellText.String(), tableCellPrXML(cell)))
 		}
 		rowsXML.WriteString("            </a:tr>\n")
 	}
@@ -862,7 +1111,7 @@ func (w *PPTXWriter) writeChartShapeXML(s *ChartShape, shapeID *int, slideNum in
 	}
 
 	// Find chart rel ID — must match ordering in writeSlideRels exactly.
-	relIdx := countRelIdxBefore(w.presentation.slides[slideNum-1].shapes, s)
+	relIdx := w.countRelIdxBefore(w.presentation.slides[slideNum-1].shapes, s)
 
 	return fmt.Sprintf(`      <p:graphicFrame>
         <p:nvGraphicFramePr>
@@ -1023,17 +1272,11 @@ func (w *PPTXWriter) writeNotesSlide(zw *zip.Writer, slide *Slide, slideNum int)
         <p:txBody>
           <a:bodyPr/>
           <a:lstStyle/>
-          <a:p>
-            <a:r>
-              <a:rPr lang="en-US" dirty="0"/>
-              <a:t>%s</a:t>
-            </a:r>
-          </a:p>
-        </p:txBody>
+%s        </p:txBody>
       </p:sp>
     </p:spTree>
   </p:cSld>
-</p:notes>`, nsDrawingML, nsOfficeDocRels, nsPresentationML, xmlEscape(slide.notes))
+</p:notes>`, nsDrawingML, nsOfficeDocRels, nsPresentationML, notesBodyXML(slide.notes))
 
 	if err := writeRawXMLToZip(zw, fmt.Sprintf("ppt/notesSlides/notesSlide%d.xml", slideNum), content); err != nil {
 		return err
@@ -1045,6 +1288,37 @@ func (w *PPTXWriter) writeNotesSlide(zw *zip.Writer, slide *Slide, slideNum int)
   <Relationship Id="rId1" Type="%s" Target="../slides/slide%d.xml"/>
 </Relationships>`, nsRelationships, relTypeSlide, slideNum)
 	return writeRawXMLToZip(zw, fmt.Sprintf("ppt/notesSlides/_rels/notesSlide%d.xml.rels", slideNum), rels)
+}
+
+// notesBodyXML renders the notes text as the paragraphs of a text body.
+//
+// A note is stored as one paragraph per line, which is what PowerPoint writes
+// and what the reader reads back: putting the whole note in a single run made
+// every note a single paragraph, and left the line structure to survive only as
+// escaped newlines a consumer has to notice. A blank line is a paragraph of its
+// own; a line that ends in a space keeps it, which is what xml:space says.
+func notesBodyXML(notes string) string {
+	lines := strings.Split(strings.NewReplacer("\r\n", "\n", "\r", "\n").Replace(notes), "\n")
+
+	var body strings.Builder
+	for _, line := range lines {
+		if line == "" {
+			body.WriteString("          <a:p/>\n")
+			continue
+		}
+		preserve := ""
+		if strings.TrimSpace(line) != line {
+			preserve = ` xml:space="preserve"`
+		}
+		fmt.Fprintf(&body, `          <a:p>
+            <a:r>
+              <a:rPr lang="en-US" dirty="0"/>
+              <a:t%s>%s</a:t>
+            </a:r>
+          </a:p>
+`, preserve, xmlEscape(line))
+	}
+	return body.String()
 }
 
 // --- Bullet XML ---
@@ -1062,7 +1336,7 @@ func (w *PPTXWriter) writeBulletXML(b *Bullet) string {
 	}
 
 	// Bullet size
-	if b.Size != 100 {
+	if b.Size > 0 && b.Size != 100 {
 		sb.WriteString(fmt.Sprintf("\n              <a:buSzPct val=\"%d000\"/>", b.Size))
 	}
 
@@ -1073,9 +1347,28 @@ func (w *PPTXWriter) writeBulletXML(b *Bullet) string {
 			fontAttr = fmt.Sprintf("\n              <a:buFont typeface=\"%s\"/>", xmlEscape(b.Font))
 		}
 		sb.WriteString(fontAttr)
-		sb.WriteString(fmt.Sprintf("\n              <a:buChar char=\"%s\"/>", xmlEscape(b.Style)))
-	case BulletTypeNumeric:
-		sb.WriteString(fmt.Sprintf("\n              <a:buAutoNum type=\"%s\" startAt=\"%d\"/>", b.NumFormat, b.StartAt))
+		// <a:buChar> without a character is not a bullet, and an empty
+		// char="" is what makes PowerPoint offer to repair the file.
+		char := b.Style
+		if char == "" {
+			char = "•"
+		}
+		sb.WriteString(fmt.Sprintf("\n              <a:buChar char=\"%s\"/>", xmlEscape(char)))
+	case BulletTypeNumeric, BulletTypeAutoNum:
+		// The two constants describe the same thing to PowerPoint — there is
+		// one element for a numbered bullet and no automatic/manual split — so
+		// both write <a:buAutoNum>. AutoNum used to fall through the switch and
+		// write nothing at all, while the renderer numbered the paragraph: the
+		// preview showed "1." and the file had no bullet.
+		format := b.NumFormat
+		if format == "" {
+			format = NumFormatArabicPeriod
+		}
+		startAt := b.StartAt
+		if startAt < 1 {
+			startAt = 1
+		}
+		sb.WriteString(fmt.Sprintf("\n              <a:buAutoNum type=\"%s\" startAt=\"%d\"/>", xmlEscape(format), startAt))
 	}
 
 	return sb.String()
