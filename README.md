@@ -58,6 +58,26 @@ if bad := pres.UnsupportedShapes(); len(bad) > 0 {
 
 Note that the original XML of an unsupported shape is not retained, so writing the deck back out drops it — the alternative would be failing the whole read because of one construct. Everything else on the slide round-trips normally. The caption is shrunk to fit the box, and a box too small for a legible caption keeps only its dashed frame: the label is library-generated text, so it is never allowed to spill over neighbouring content.
 
+#### What survives a round trip
+
+The table above says what is read and rendered. Where a construct is read and
+rendered but *not* written, a preview looks right and the saved file is wrong,
+so the write side of the same constructs is stated separately:
+
+| Attribute | Read | Write | Notes |
+| --- | --- | --- | --- |
+| picture crop (`a:srcRect`) | yes | yes | on a `p:pic`, and on a `p:bg` background picture of a slide or a layout |
+| picture opacity (`a:alphaModFix`) | yes | yes | |
+| preset-geometry adjustments (`a:avLst`) | yes | yes | rounded rectangle radius, arrow proportions, connector knees, callout tails |
+| custom geometry (`a:custGeom`) | yes | yes | freeform shapes and freeform connectors, with their arrow ends |
+| arrow ends (`a:headEnd` / `a:tailEnd`) | yes | yes | on the shape's own `a:ln` |
+| placeholder `type` and `idx` | yes | yes | `type` is omitted when the placeholder has none, since `ST_PlaceholderType` has no empty value |
+
+The known gaps, so they are not mistaken for support: an unsupported construct
+keeps its frame but not its original XML, the SVG extension (`asvg:svgBlip`) is
+not written, a shape's text insets (`lIns`/`tIns`/`rIns`/`bIns`) are not
+written, and neither is text direction.
+
 #### SVG pictures
 
 PowerPoint stores SVG graphics alongside a raster fallback, and the same `a:blip` that carries a bitmap can carry an SVG instead. Both forms are read, and both are rasterised by the renderer.
@@ -129,7 +149,8 @@ When rendering unattended, pass a `FontDiagnostics` to `RenderOptions` to get th
 - Public read/render entry points recover panics caused by malformed input and return them as `*PanicError` instead of crashing the process
 - Group shapes and Placeholder shapes
 - Unsupported OOXML constructs (SmartArt, OLE objects, unreadable chart parts) are kept as visible placeholders and are enumerable via `UnsupportedShapes()`, instead of being silently dropped
-- Bullets (character and numeric)
+- Bullets (character and numeric). A numbered list counts itself: consecutive paragraphs carrying the same numeric format render 1, 2, 3 …, and the start number belongs to the list's first item — the same semantics as `<a:buAutoNum startAt>`. Bullet colour and `<a:buSzPct>` size (a percentage of the text size) reach the preview as well as the file
+- Embedded WMF and EMF metafiles: an embedded PNG/JPEG is preferred, then a WMF bitmap or text record, then the EMF vector records. The rasterised canvas is capped at 2000 px on its longer side, since its size comes from the file
 - Comments with authors — name, initials, timestamp and position survive a write → read round trip
 - Speaker notes, one paragraph per line, in both directions
 - Slide backgrounds (solid and gradient)
@@ -281,6 +302,21 @@ if bad := pres.UnsupportedShapes(); len(bad) > 0 {
 
 需要注意：不支持形状的原始 XML 不会被保留，因此再次写出该文件时会丢失该形状——否则一个无关的构造会导致整份文件读取失败。幻灯片上的其余内容仍可正常往返。标注文字会自动缩小以适配框体；框体小到放不下可读的标注时只保留虚线框——标注是本库自己生成的文字，绝不允许溢出到相邻内容上。
 
+#### 哪些属性真的会写进文件
+
+上表说的是「能读、能画」。有一类缺陷不会体现在预览里：某个属性**读得对、画得对，却没写出去** —— 预览看着一切正常，存盘后的文件已经不对了。因此同一批构造的「写出」一侧单独列在这里：
+
+| 属性 | 读取 | 写出 | 说明 |
+| --- | --- | --- | --- |
+| 图片裁剪（`a:srcRect`） | 支持 | 支持 | `p:pic`，以及幻灯片或版式的 `p:bg` 背景图片 |
+| 图片不透明度（`a:alphaModFix`） | 支持 | 支持 | |
+| 预置几何调整值（`a:avLst`） | 支持 | 支持 | 圆角矩形半径、箭头比例、连接线折角、标注尾巴 |
+| 自定义几何（`a:custGeom`） | 支持 | 支持 | 任意多边形与自由曲线连接线，含其箭头端 |
+| 箭头端（`a:headEnd` / `a:tailEnd`） | 支持 | 支持 | 写在形状自己的 `a:ln` 上 |
+| 占位符 `type` 与 `idx` | 支持 | 支持 | 占位符没有类型时**省略** `type` 属性，因为 `ST_PlaceholderType` 没有空值成员 |
+
+已知的写出缺口（列出来是为了不被误当成已支持）：不支持形状只保留框体、不保留原 XML；微软的 SVG 扩展（`asvg:svgBlip`）不写出；形状的文字内边距（`lIns`/`tIns`/`rIns`/`bIns`）不写出；文字方向也不写出。
+
 #### SVG 图片
 
 PowerPoint 存放 SVG 图形时通常会带一份位图回退；承载位图的同一处 `a:blip` 也可以直接承载 SVG。两种形式都能读取，也都由 renderer 栅格化。
@@ -351,7 +387,10 @@ Draft 是画质取舍，而不是另一个渲染器：输出尺寸与内容都�
 - 公共读取／渲染入口在遇到畸形输入时会 recover panic 并以 `*PanicError` 返回，不会让进程崩溃
 - 组合形状和占位符形状
 - 不支持的 OOXML 结构（SmartArt、OLE 对象、无法读取的图表部件）会保留为可见占位框，并可通过 `UnsupportedShapes()` 枚举，而不是被静默丢弃
-- 项目符号（字符和数字编号）
+- 项目符号（字符和数字编号）。编号列表自己会数数：**连续**的、编号格式相同的段落渲染成 1、2、3……，起始号属于列表的第一项 —— 与
+  `<a:buAutoNum startAt>` 同一语义。符号颜色与 `<a:buSzPct>` 尺寸（正文大小的百分比）在文件与预览里都生效
+- 内嵌的 WMF / EMF 图元文件：优先取内嵌的 PNG / JPEG，其次取 WMF 的位图或文字记录，再其次走 EMF 的矢量记录。
+  光栅化画布长边**上限 2000 px** —— 尺寸来自文件本身
 - 批注（含作者信息）——作者姓名、缩写、时间戳与位置均可完整走通「写入 → 读取」往返
 - 演讲者备注
 - 幻灯片背景（纯色和渐变）

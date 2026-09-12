@@ -125,7 +125,28 @@ para2.GetAlignment().SetHorizontal(ppt.HorizontalCenter)
 para2.SetLineSpacing(200)
 para2.SetSpaceBefore(100)
 para2.SetSpaceAfter(50)
+
+// A freeform shape: a custom geometry path replaces the rectangle. The path's
+// Width and Height are its coordinate space, scaled onto the shape's frame.
+path := &ppt.CustomGeomPath{
+    Width: 1000, Height: 1000,
+    Commands: []ppt.PathCommand{
+        {Type: "moveTo", Pts: []ppt.PathPoint{{X: 0, Y: 0}}},
+        {Type: "lnTo", Pts: []ppt.PathPoint{{X: 1000, Y: 0}}},
+        {Type: "cubicBezTo", Pts: []ppt.PathPoint{{X: 800, Y: 200}, {X: 600, Y: 800}, {X: 0, Y: 1000}}},
+        {Type: "close"},
+    },
+}
+rt.SetCustomPath(path)
+// Arrow ends belong to the shape's outline, and are drawn along a custom path.
+rt.SetTailEnd(&ppt.LineEnd{Type: ppt.ArrowArrow, Width: "med", Length: "med"})
 ```
+
+`<a:path>` command types are `moveTo`, `lnTo`, `cubicBezTo` (3 points),
+`quadBezTo` (2 points), `arcTo` (radii and angles, in 60000ths of a degree) and
+`close`. A command with fewer points than it needs is skipped rather than
+written half-formed. If the path carries no coordinate space of its own, the
+smallest box around its points is used.
 
 #### DrawingShape (Images)
 
@@ -140,6 +161,13 @@ img2 := ppt.NewDrawingShape()
 img2.SetPath("/path/to/image.jpg")
 img2.SetWidth(2000000).SetHeight(1500000)
 slide.AddShape(img2)
+
+// Crop and opacity. Crop values are percentages in 1/1000 of a percent
+// (56333 = 56.333%), matching the getters; negative values crop outwards, which
+// is how a picture in "fill" mode is expressed. The opacity is 0-100000, where
+// 0 means fully opaque.
+img.SetCrop(10000, 0, 10000, 0) // left, top, right, bottom
+img.SetAlphaValue(50000)         // 50%
 ```
 
 Supported formats: PNG, JPEG, GIF, BMP, SVG.
@@ -206,12 +234,41 @@ shape.BaseShape.SetFill(ppt.NewFill().SetSolid(ppt.ColorYellow))
 | Heart | `AutoShapeHeart` |
 | Lightning Bolt | `AutoShapeLightningBolt` |
 
+Preset geometries are steered by adjustment values, which are written as
+`<a:avLst>` and are what a rounded rectangle's radius, an arrow's proportions,
+a chevron's point and a callout's tail actually are. The value is in the units
+the preset defines — the same number the file carries — and `GetAdjustValues()`
+is nil until one is set, so use the setter:
+
+```go
+round := slide.CreateAutoShape()
+round.SetAutoShapeType(ppt.AutoShapeRoundedRect)
+round.SetAdjustValue("adj", 25000) // 25% of the preset's range
+
+callout := slide.CreateAutoShape()
+callout.SetAutoShapeType(ppt.AutoShapeCallout1)
+callout.SetAdjustValue("adj1", 60000).SetAdjustValue("adj2", 40000)
+```
+
 #### LineShape
 
 ```go
 line := slide.CreateLineShape()
 line.BaseShape.SetOffsetX(0).SetOffsetY(0).SetWidth(5000000).SetHeight(0)
 line.SetLineWidth(2).SetLineColor(ppt.ColorRed).SetLineStyle(ppt.BorderSolid)
+
+// A connector writes its own prstGeom ("straightConnector1", "bentConnector3",
+// ...) instead of a plain line, and its knee is an adjustment value.
+bent := slide.CreateLineShape()
+bent.SetConnectorType("bentConnector3")
+bent.SetAdjustValue("adj1", 50000)
+
+// Arrow ends live on the shape's outline.
+bent.SetHeadEnd(&ppt.LineEnd{Type: ppt.ArrowTriangle, Width: "med", Length: "med"})
+bent.SetTailEnd(&ppt.LineEnd{Type: ppt.ArrowArrow, Width: "lg", Length: "lg"})
+
+// A freeform connector: see RichTextShape above for the path model.
+bent.SetCustomPath(path)
 ```
 
 #### GroupShape
@@ -274,9 +331,10 @@ chart.BaseShape.SetWidth(7000000).SetHeight(4500000)
 chart.GetTitle().SetText("My Chart").SetVisible(true)
 chart.GetTitle().Font.SetBold(true).SetSize(14)
 
-// Legend
+// Legend, and the font its entries are drawn with
 chart.GetLegend().Visible = true
 chart.GetLegend().Position = ppt.LegendBottom // b, t, l, r, tr
+chart.GetLegend().Font.SetName("Microsoft YaHei").SetSize(10)
 
 // Display blank values
 chart.SetDisplayBlankAs(ppt.ChartBlankAsZero) // "gap", "zero", "span"
@@ -285,6 +343,15 @@ chart.SetDisplayBlankAs(ppt.ChartBlankAsZero) // "gap", "zero", "span"
 chart.GetView3D().RotX = 15
 chart.GetView3D().RotY = 20
 ```
+
+Chart text carries the same font model as slide text, and it is written where PowerPoint reads it: a
+title — the chart's or an axis' — states its font on the run inside `<c:title>`, while every label
+(axis tick labels, legend entries, data labels) states it in that element's own `<c:txPr>`. Set
+`GetTitle().Font`, `GetAxisX().Font`, `GetAxisY().Font`, `GetLegend().Font` or `ChartSeries.Font`, and
+the part and the preview use the same face; `Font.NameEA` is the East Asian face, so a chart mixing
+scripts should set both. When the named face cannot draw a string the renderer additionally falls back
+by glyph coverage, but a part that never states a font leaves PowerPoint on its theme font — so state
+one if the chart's font matters.
 
 #### Chart Types
 
@@ -518,6 +585,23 @@ para.SetBullet(bullet)
 | i. ii. iii. | `NumFormatRomanLcPeriod` |
 | A. B. C. | `NumFormatAlphaUcPeriod` |
 | a. b. c. | `NumFormatAlphaLcPeriod` |
+
+A numbered list counts itself. Consecutive paragraphs carrying a numeric bullet
+of the same format render 1, 2, 3 …; a paragraph with no bullet, a character
+bullet, or a **different** numeric format starts a new count. `SetNumericBullet`'s
+start number belongs to the *first* item of the list, which is how PowerPoint's
+`<a:buAutoNum startAt>` works too: the number is stored per paragraph but the
+counting is implicit. Outline levels are not modelled, so a sub-list nested under
+a numbered list continues the same count rather than starting its own.
+
+`SetSize` is `<a:buSzPct>` — a percentage of the text size, so `SetSize(200)`
+draws the bullet twice as large as the paragraph's text. `SetColor` and `SetSize`
+both live on the bullet itself and are applied when the bullet run is drawn.
+
+An empty character (`SetCharBullet("")`) is not a bullet and an empty numeric
+format is not a number format; both would make PowerPoint offer to repair the
+file, so they fall back to `•` and `arabicPeriod` in the file **and** in the
+preview.
 
 ---
 
@@ -811,7 +895,27 @@ para.CreateTextRun("第二行")
 para2 := rt.CreateParagraph()
 para2.GetAlignment().SetHorizontal(ppt.HorizontalCenter)
 para2.SetLineSpacing(200)
+
+// 自由曲线形状：自定义几何会取代矩形。路径的 Width/Height 是它自己的
+// 坐标系，渲染时按形状框体缩放。
+path := &ppt.CustomGeomPath{
+    Width: 1000, Height: 1000,
+    Commands: []ppt.PathCommand{
+        {Type: "moveTo", Pts: []ppt.PathPoint{{X: 0, Y: 0}}},
+        {Type: "lnTo", Pts: []ppt.PathPoint{{X: 1000, Y: 0}}},
+        {Type: "cubicBezTo", Pts: []ppt.PathPoint{{X: 800, Y: 200}, {X: 600, Y: 800}, {X: 0, Y: 1000}}},
+        {Type: "close"},
+    },
+}
+rt.SetCustomPath(path)
+// 箭头端属于形状自己的轮廓，沿自定义路径绘制。
+rt.SetTailEnd(&ppt.LineEnd{Type: ppt.ArrowArrow, Width: "med", Length: "med"})
 ```
+
+`<a:path>` 的命令类型有 `moveTo`、`lnTo`、`cubicBezTo`（3 个点）、
+`quadBezTo`（2 个点）、`arcTo`（半径与角度，单位为 1/60000 度）与 `close`。
+点数不足的命令会被跳过，而不是写出半条命令。路径自身没有坐标空间时，
+取包围其所有点的最小框。
 
 #### 图片形状 (DrawingShape)
 
@@ -825,6 +929,12 @@ img.SetWidth(2000000).SetHeight(1500000)
 img2 := ppt.NewDrawingShape()
 img2.SetPath("/path/to/image.jpg")
 slide.AddShape(img2)
+
+// 裁剪与不透明度。裁剪值是与 getter 一致的「千分之一百分比」
+// （56333 = 56.333%）；负值表示向外裁剪，也就是「填充」式图片的写法。
+// 不透明度 0-100000，0 表示完全不透明。
+img.SetCrop(10000, 0, 10000, 0) // 左、上、右、下
+img.SetAlphaValue(50000)        // 50%
 ```
 
 支持格式：PNG、JPEG、GIF、BMP、SVG。
@@ -886,12 +996,40 @@ shape.BaseShape.SetFill(ppt.NewFill().SetSolid(ppt.ColorYellow))
 | 心形 | `AutoShapeHeart` |
 | 闪电 | `AutoShapeLightningBolt` |
 
+预置几何由调整值（adjustment value）控制，它们写成 `<a:avLst>`，圆角矩形的半径、
+箭头的比例、chevron 的尖角、标注的尾巴本质上都是这个值。数值单位由该预置几何
+自身定义——与文件里承载的同一个数——`GetAdjustValues()` 在未设置前是 nil，
+因此请使用 setter：
+
+```go
+round := slide.CreateAutoShape()
+round.SetAutoShapeType(ppt.AutoShapeRoundedRect)
+round.SetAdjustValue("adj", 25000) // 该预置几何取值范围的 25%
+
+callout := slide.CreateAutoShape()
+callout.SetAutoShapeType(ppt.AutoShapeCallout1)
+callout.SetAdjustValue("adj1", 60000).SetAdjustValue("adj2", 40000)
+```
+
 #### 线条形状 (LineShape)
 
 ```go
 line := slide.CreateLineShape()
 line.BaseShape.SetOffsetX(0).SetOffsetY(0).SetWidth(5000000).SetHeight(0)
 line.SetLineWidth(2).SetLineColor(ppt.ColorRed)
+
+// 连接线写自己的 prstGeom（"straightConnector1"、"bentConnector3" …）
+// 而不是普通直线，它的折角也是调整值。
+bent := slide.CreateLineShape()
+bent.SetConnectorType("bentConnector3")
+bent.SetAdjustValue("adj1", 50000)
+
+// 箭头端就在形状自己的轮廓上。
+bent.SetHeadEnd(&ppt.LineEnd{Type: ppt.ArrowTriangle, Width: "med", Length: "med"})
+bent.SetTailEnd(&ppt.LineEnd{Type: ppt.ArrowArrow, Width: "lg", Length: "lg"})
+
+// 自由曲线连接线：路径模型见上文 RichTextShape。
+bent.SetCustomPath(path)
 ```
 
 #### 组合形状 (GroupShape)
@@ -947,11 +1085,19 @@ chart.BaseShape.SetWidth(7000000).SetHeight(4500000)
 
 // 标题
 chart.GetTitle().SetText("我的图表").SetVisible(true)
+chart.GetTitle().Font.SetName("微软雅黑").SetSize(14)
 
-// 图例
+// 图例，以及图例文字的字体
 chart.GetLegend().Visible = true
 chart.GetLegend().Position = ppt.LegendBottom
+chart.GetLegend().Font.SetName("微软雅黑").SetSize(10)
 ```
+
+图表文字与正文使用同一套字体模型，并写进 PowerPoint 真正读取的位置：标题（图表标题与轴标题）把字体写在
+`<c:title>` 内的 run 上，其余文字（轴刻度标签、图例文字、数据标签）写在该元素自己的 `<c:txPr>` 里。设置
+`GetTitle().Font`、`GetAxisX().Font`、`GetAxisY().Font`、`GetLegend().Font` 或 `ChartSeries.Font`，部件与预览
+就会用同一个字体；`Font.NameEA` 是东亚字体，中英混排的图表建议两个都设。当指定字体画不出某个字符串时，渲染器
+还会按字形覆盖回退，但**部件里没写字体就等于把 PowerPoint 留给主题字体** —— 在意图表观感就显式设置。
 
 #### 图表类型
 
@@ -1162,6 +1308,17 @@ para.SetBullet(bullet)
 | i. ii. iii. | `NumFormatRomanLcPeriod` |
 | A. B. C. | `NumFormatAlphaUcPeriod` |
 | a. b. c. | `NumFormatAlphaLcPeriod` |
+
+编号列表自己会数数：**连续**的、编号格式相同的数字符号段落渲染成 1、2、3……；遇到无符号段落、字符符号段落，或
+**换了一种编号格式**，就重新从起始号开数。`SetNumericBullet` 的起始号属于列表的**第一项** —— PowerPoint 的
+`<a:buAutoNum startAt>` 也是这个语义：数字存在每个段落上，而递增是隐式的。模型没有大纲级别，所以嵌在编号列表下的
+子列表会接着同一个计数往下走，而不会另起一串。
+
+`SetSize` 对应 `<a:buSzPct>`，是**相对正文文字的百分比**，`SetSize(200)` 画出来的符号是正文的两倍大。`SetColor`
+与 `SetSize` 都存在符号本身上，绘制符号时生效。
+
+空的字符符号（`SetCharBullet("")`）不是符号，空的编号格式也不是格式，两者都会让 PowerPoint 要求修复文件，因此
+**文件里和预览里**都回退到 `•` 与 `arabicPeriod`。
 
 ---
 
