@@ -88,6 +88,10 @@ func (r *PPTXReader) ReadFromReader(reader io.ReaderAt, size int64) (pres *Prese
 	// Read core properties (non-fatal: missing properties are acceptable)
 	_ = r.readCoreProperties(zr, pres)
 
+	// Read the extended properties and any custom properties (non-fatal)
+	_ = r.readAppProperties(zr, pres)
+	_ = r.readCustomProperties(zr, pres)
+
 	// Read theme colors (non-fatal)
 	r.readThemeColors(zr, pres)
 

@@ -232,7 +232,13 @@ func NewDocumentProperties() *DocumentProperties {
 }
 
 // SetCustomProperty sets a custom property.
+//
+// A zero-valued DocumentProperties — one a caller built rather than got from
+// NewDocumentProperties — has a nil map, and assigning into a nil map panics.
 func (dp *DocumentProperties) SetCustomProperty(name string, value interface{}, propType PropertyType) {
+	if dp.customProps == nil {
+		dp.customProps = make(map[string]*CustomProperty)
+	}
 	dp.customProps[name] = &CustomProperty{
 		Name:  name,
 		Value: value,

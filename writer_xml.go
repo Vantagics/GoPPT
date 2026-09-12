@@ -5,7 +5,10 @@ import (
 	"encoding/xml"
 	"fmt"
 	"path/filepath"
+	"sort"
+	"strconv"
 	"strings"
+	"time"
 )
 
 // XML namespace constants
@@ -39,6 +42,24 @@ const (
 	relTypeCommentAuth = "http://schemas.openxmlformats.org/officeDocument/2006/relationships/commentAuthors"
 	relTypeNotesSlide  = "http://schemas.openxmlformats.org/officeDocument/2006/relationships/notesSlide"
 	relTypeNotesMaster = "http://schemas.openxmlformats.org/officeDocument/2006/relationships/notesMaster"
+	relTypeCustomProps = "http://schemas.openxmlformats.org/officeDocument/2006/relationships/custom-properties"
+
+	// nsCustomProperties is the part-level namespace of docProps/custom.xml, and
+	// nsDocPropsVT the namespace its values are typed in.
+	nsCustomProperties = "http://schemas.openxmlformats.org/officeDocument/2006/custom-properties"
+	nsDocPropsVT       = "http://schemas.openxmlformats.org/officeDocument/2006/docPropsVTypes"
+
+	// customPropsFmtid is the format id every custom property carries. It is a
+	// fixed GUID chosen by the spec for "user defined property" — not something
+	// this library invents — and PowerPoint rejects a part that omits it.
+	customPropsFmtid = "{D5CDD505-2E9C-101B-9397-08002B2CF9AE}"
+
+	// actionSlideJump is the action PowerPoint puts on an <a:hlinkClick> that
+	// jumps to another slide of the same presentation. The slide itself is
+	// named by the relationship the id points at, so the action and the
+	// relationship only mean anything together. Written and read in one place
+	// each: writer_slide.go and parseHyperlinkClick.
+	actionSlideJump = "ppaction://hlinksldjump"
 
 	ctPresentation   = "application/vnd.openxmlformats-officedocument.presentationml.presentation.main+xml"
 	ctSlide          = "application/vnd.openxmlformats-officedocument.presentationml.slide+xml"
@@ -55,6 +76,7 @@ const (
 	ctComments       = "application/vnd.openxmlformats-officedocument.presentationml.comments+xml"
 	ctCommentAuthors = "application/vnd.openxmlformats-officedocument.presentationml.commentAuthors+xml"
 	ctNotesSlide     = "application/vnd.openxmlformats-officedocument.presentationml.notesSlide+xml"
+	ctCustomProps    = "application/vnd.openxmlformats-officedocument.custom-properties+xml"
 )
 
 func writeXMLToZip(zw *zip.Writer, path string, v interface{}) error {
@@ -119,6 +141,16 @@ func (w *PPTXWriter) writeContentTypes(zw *zip.Writer) error {
 			{PartName: "/docProps/core.xml", ContentType: ctCoreProps},
 			{PartName: "/docProps/app.xml", ContentType: ctExtProps},
 		},
+	}
+
+	// docProps/custom.xml only exists when the presentation defines custom
+	// properties: a declared part the package does not contain is what makes
+	// PowerPoint ask to repair the file.
+	if w.hasCustomProperties() {
+		ct.Overrides = append(ct.Overrides, xmlOverride{
+			PartName:    "/docProps/custom.xml",
+			ContentType: ctCustomProps,
+		})
 	}
 
 	// Add slide content types
@@ -262,6 +294,13 @@ func (w *PPTXWriter) writeRootRels(zw *zip.Writer) error {
 			{ID: "rId3", Type: relTypeExtProps, Target: "docProps/app.xml"},
 		},
 	}
+	if w.hasCustomProperties() {
+		rels.Relationships = append(rels.Relationships, xmlRelationship{
+			ID:     "rId4",
+			Type:   relTypeCustomProps,
+			Target: "docProps/custom.xml",
+		})
+	}
 	return writeXMLToZip(zw, "_rels/.rels", rels)
 }
 
@@ -377,6 +416,92 @@ func (w *PPTXWriter) writeCoreProperties(zw *zip.Writer) error {
 		props.Modified.UTC().Format("2006-01-02T15:04:05Z"),
 	)
 	return writeRawXMLToZip(zw, "docProps/core.xml", content)
+}
+
+// --- Custom Properties ---
+
+// hasCustomProperties reports whether the presentation defines any custom
+// document property. It decides whether docProps/custom.xml is written and
+// declared at all: a declared part the package does not contain, or a part the
+// package contains but does not declare, is what makes PowerPoint offer to
+// repair the file.
+func (w *PPTXWriter) hasCustomProperties() bool {
+	props := w.presentation.properties
+	return props != nil && len(props.customProps) > 0
+}
+
+// writeCustomProperties writes docProps/custom.xml.
+//
+// API.md documents SetCustomProperty beside GetCustomPropertyValue as one pair,
+// and neither half reached the file: no code wrote the part at all. A custom
+// property was readable back through the in-memory API and gone the moment the
+// presentation was saved.
+//
+// The names are sorted because the model holds them in a map. Walking a map
+// emits the properties in a different order on every save, which makes a
+// package differ from itself for reasons that have nothing to do with what the
+// caller changed.
+func (w *PPTXWriter) writeCustomProperties(zw *zip.Writer) error {
+	if !w.hasCustomProperties() {
+		return nil
+	}
+	props := w.presentation.properties
+
+	names := make([]string, 0, len(props.customProps))
+	for name := range props.customProps {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+
+	var b strings.Builder
+	for i, name := range names {
+		// pid 1 is reserved by the spec; the first user property is 2.
+		b.WriteString(fmt.Sprintf("\n  <property fmtid=\"%s\" pid=\"%d\" name=\"%s\">%s</property>",
+			customPropsFmtid, i+2, xmlEscape(name), customPropertyValueXML(props.customProps[name])))
+	}
+
+	content := fmt.Sprintf(`<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<Properties xmlns="%s" xmlns:vt="%s">%s
+</Properties>`, nsCustomProperties, nsDocPropsVT, b.String())
+	return writeRawXMLToZip(zw, "docProps/custom.xml", content)
+}
+
+// customPropertyValueXML types a custom property value the way its declared
+// PropertyType says.
+//
+// A value whose Go type does not match its declared one is written through its
+// string form rather than dropped: a custom property is the caller's data, and
+// losing it silently is worse than writing it in the least specific type.
+func customPropertyValueXML(prop *CustomProperty) string {
+	if prop == nil {
+		return "<vt:lpwstr></vt:lpwstr>"
+	}
+	text := xmlEscape(fmt.Sprintf("%v", prop.Value))
+
+	switch prop.Type {
+	case PropertyTypeBoolean:
+		v := false
+		switch value := prop.Value.(type) {
+		case bool:
+			v = value
+		case string:
+			v, _ = strconv.ParseBool(value)
+		}
+		return fmt.Sprintf("<vt:bool>%t</vt:bool>", v)
+	case PropertyTypeInteger:
+		if v, err := strconv.ParseInt(fmt.Sprintf("%v", prop.Value), 10, 64); err == nil {
+			return fmt.Sprintf("<vt:i4>%d</vt:i4>", v)
+		}
+	case PropertyTypeFloat:
+		if v, err := strconv.ParseFloat(fmt.Sprintf("%v", prop.Value), 64); err == nil {
+			return fmt.Sprintf("<vt:r8>%g</vt:r8>", v)
+		}
+	case PropertyTypeDate:
+		if v, ok := prop.Value.(time.Time); ok {
+			return fmt.Sprintf("<vt:filetime>%s</vt:filetime>", v.UTC().Format("2006-01-02T15:04:05Z"))
+		}
+	}
+	return fmt.Sprintf("<vt:lpwstr>%s</vt:lpwstr>", text)
 }
 
 // xmlEscape escapes special XML characters using the standard library.

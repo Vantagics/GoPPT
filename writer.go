@@ -96,6 +96,11 @@ func (w *PPTXWriter) WriteTo(writer io.Writer) error {
 		return err
 	}
 
+	// Write docProps/custom.xml when the presentation defines any
+	if err := w.writeCustomProperties(zw); err != nil {
+		return err
+	}
+
 	// Write ppt/presentation.xml
 	if err := w.writePresentation(zw); err != nil {
 		return err
