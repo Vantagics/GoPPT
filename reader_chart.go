@@ -187,6 +187,14 @@ func parseChartXML(data []byte, themeColors map[string]string) *ChartShape {
 
 	var (
 		chartTitleText string
+
+		// Typefaces declared by the title run currently being scanned. Chart
+		// text declares them on <a:rPr><a:latin>/<a:ea>, exactly as slide text
+		// does, so they are collected while the title is open and applied when
+		// it closes. Without this the part's font was dropped on read and every
+		// chart string came back as the model default.
+		runLatin string
+		runEA    string
 	)
 
 	resetSeries := func() {
@@ -610,12 +618,34 @@ func parseChartXML(data []byte, themeColors map[string]string) *ChartShape {
 				}
 
 			case "title":
+				runLatin, runEA = "", ""
 				if inAxis {
 					titleTarget = "axis"
 					axisTitle.Reset()
 				} else {
 					titleTarget = "chart"
 					chartTitle.Reset()
+				}
+
+			case "latin", "ea":
+				// <a:rPr><a:latin>/<a:ea> name the faces a run uses, and the
+				// chart writer emits them on the title runs. A <c:txPr>
+				// default is a document-wide fallback rather than a run's own
+				// font, so only the title runs are read.
+				if titleTarget == "" {
+					break
+				}
+				typeface := attrValue(t, "typeface")
+				// "+mn-lt" and friends are theme references, not font names.
+				if typeface == "" || strings.HasPrefix(typeface, "+") {
+					break
+				}
+				if name == "latin" {
+					if runLatin == "" {
+						runLatin = typeface
+					}
+				} else if runEA == "" {
+					runEA = typeface
 				}
 
 			case "legend":
@@ -759,8 +789,12 @@ func parseChartXML(data []byte, themeColors map[string]string) *ChartShape {
 				inAxis = false
 
 			case "title":
-				if titleTarget == "chart" {
+				switch {
+				case titleTarget == "chart":
 					chartTitleText = strings.TrimSpace(chartTitle.String())
+					applyChartTextFont(chart.title.Font, runLatin, runEA)
+				case titleTarget == "axis" && curAxis != nil:
+					applyChartTextFont(curAxis.Font, runLatin, runEA)
 				}
 				titleTarget = ""
 
@@ -891,6 +925,21 @@ func attrValue(se xml.StartElement, local string) string {
 		}
 	}
 	return ""
+}
+
+// applyChartTextFont copies the typefaces a chart text run declared into the
+// model. Empty names leave the existing face alone, so a run that declares only
+// <a:latin> does not wipe an East Asian face the caller set.
+func applyChartTextFont(f *Font, latin, ea string) {
+	if f == nil {
+		return
+	}
+	if latin != "" {
+		f.Name = latin
+	}
+	if ea != "" {
+		f.NameEA = ea
+	}
 }
 
 // isXMLTrue reports whether an OOXML boolean attribute value is true.

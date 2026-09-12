@@ -207,7 +207,16 @@ func chartFormatNumber(v float64) string {
 
 // chartFace resolves a font for chart text. A nil or unset font falls back to
 // the renderer default (10pt).
-func (r *renderer) chartFace(f *Font) font.Face {
+//
+// sample is the text the face is about to draw, and it decides the face.
+// Chart text used to resolve through the Latin path only, so a chart part that
+// left the font unstated — or named a Latin face — drew every East Asian
+// character as a .notdef box. The failure is silent by construction: the face's
+// name resolves, so FontDiagnostics reports a perfect match, and only the
+// pixels show the tofu. When the sample does contain East Asian characters the
+// face is therefore chosen by glyph coverage first, exactly as the slide text
+// path does, and any substitution is reported.
+func (r *renderer) chartFace(f *Font, sample string) font.Face {
 	if f == nil {
 		f = NewFont()
 	}
@@ -216,7 +225,19 @@ func (r *renderer) chartFace(f *Font) font.Face {
 		clone.Size = 10
 		f = &clone
 	}
+	if containsCJK(sample) {
+		face, used := r.getCJKFace(f, sample)
+		r.noteCJKFont(f, used)
+		if face != nil {
+			return face
+		}
+	}
 	return r.getFace(f)
+}
+
+// chartFaceForCats resolves the face for a set of labels drawn as one group.
+func (r *renderer) chartFaceForCats(f *Font, cats []string) font.Face {
+	return r.chartFace(f, strings.Join(cats, ""))
 }
 
 // chartFontColor returns the colour to use for a font, defaulting to the
@@ -316,7 +337,7 @@ func (r *renderer) renderChart(s *ChartShape) {
 	// Title strip at the top.
 	titleH := 0
 	if s.title != nil && s.title.Visible && s.title.Text != "" {
-		face := r.chartFace(s.title.Font)
+		face := r.chartFace(s.title.Font, s.title.Text)
 		titleH = r.chartLineHeight(face) + 4
 		r.drawStringCentered(s.title.Text, face, chartFontColor(s.title.Font),
 			image.Rect(x+pad, y+pad, x+w-pad, y+pad+titleH))
@@ -395,8 +416,10 @@ func (r *renderer) renderChart(s *ChartShape) {
 func (r *renderer) chartPlotAreaFor(s *ChartShape, px, py, pw, ph int, sc chartScale, cats []string, categoriesOnY bool) chartPlotArea {
 	axV := s.plotArea.GetAxisY()
 	axX := s.plotArea.GetAxisX()
-	valueFace := r.chartFace(axisFont(axV))
-	catFace := r.chartFace(axisFont(axX))
+	// The value labels are formatted numbers, so they never carry East Asian
+	// text; the category labels are the document's own strings and may.
+	valueFace := r.chartFace(axisFont(axV), "")
+	catFace := r.chartFaceForCats(axisFont(axX), cats)
 
 	left, top, right, bottom := 3, 2, 4, 2
 	if axV == nil || axV.Visible {
@@ -492,7 +515,7 @@ func (r *renderer) drawChartAxes(s *ChartShape, p chartPlotArea) {
 
 	// Value labels.
 	if axV == nil || axV.Visible {
-		face := r.chartFace(axisFont(axV))
+		face := r.chartFace(axisFont(axV), "")
 		fc := chartFontColor(axisFont(axV))
 		ascent := face.Metrics().Ascent.Ceil()
 		descent := face.Metrics().Descent.Ceil()
@@ -511,7 +534,7 @@ func (r *renderer) drawChartAxes(s *ChartShape, p chartPlotArea) {
 
 	// Category labels.
 	if (axX == nil || axX.Visible) && len(p.cats) > 0 {
-		face := r.chartFace(axisFont(axX))
+		face := r.chartFaceForCats(axisFont(axX), p.cats)
 		fc := chartFontColor(axisFont(axX))
 		ascent := face.Metrics().Ascent.Ceil()
 		descent := face.Metrics().Descent.Ceil()
@@ -547,7 +570,7 @@ func (r *renderer) drawChartAxisTitles(s *ChartShape, p chartPlotArea) {
 	axX := s.plotArea.GetAxisX()
 
 	if axV != nil && axV.Visible && strings.TrimSpace(axV.Title) != "" {
-		face := r.chartFace(axV.Font)
+		face := r.chartFace(axV.Font, axV.Title)
 		fc := chartFontColor(axV.Font)
 		if p.categoriesOnY {
 			// Value axis runs along the bottom.
@@ -562,7 +585,7 @@ func (r *renderer) drawChartAxisTitles(s *ChartShape, p chartPlotArea) {
 		}
 	}
 	if axX != nil && axX.Visible && strings.TrimSpace(axX.Title) != "" {
-		face := r.chartFace(axX.Font)
+		face := r.chartFace(axX.Font, axX.Title)
 		fc := chartFontColor(axX.Font)
 		if p.categoriesOnY {
 			if w := p.x - p.ox; w > 0 {
@@ -993,7 +1016,7 @@ func (r *renderer) drawPieLabel(ser *ChartSeries, cat string, percent float64, c
 		}
 		text += sep + p
 	}
-	face := r.chartFace(ser.Font)
+	face := r.chartFace(ser.Font, text)
 	fc := chartFontColor(ser.Font)
 	mid := (startAngle + endAngle) / 2
 	lx := cx + int(float64(radius)*0.65*math.Cos(mid))
@@ -1242,7 +1265,7 @@ func (r *renderer) renderRadarChart(c *RadarChart, s *ChartShape, px, py, pw, ph
 	// labels spill out of the plot rect and collide with the chart title above
 	// and the legend below.
 	axX := s.plotArea.GetAxisX()
-	catFace := r.chartFace(axisFont(axX))
+	catFace := r.chartFaceForCats(axisFont(axX), cats)
 	catColor := chartFontColor(axisFont(axX))
 	const labelGap = 8
 	labelInsetX, labelInsetY := 0, 0
@@ -1374,7 +1397,7 @@ func (r *renderer) chartLegendEntries(s *ChartShape) ([]string, []color.RGBA) {
 // chartLegendWidth is the horizontal space needed for a left/right legend.
 func (r *renderer) chartLegendWidth(s *ChartShape, maxW int) int {
 	names, _ := r.chartLegendEntries(s)
-	face := r.chartFace(s.legend.Font)
+	face := r.chartFace(s.legend.Font, strings.Join(names, ""))
 	w := 0
 	for _, n := range names {
 		if tw := chartTextWidth(face, n); tw > w {
@@ -1391,7 +1414,7 @@ func (r *renderer) chartLegendHeight(s *ChartShape, x, w int) int {
 	if len(names) == 0 {
 		return 0
 	}
-	face := r.chartFace(s.legend.Font)
+	face := r.chartFace(s.legend.Font, strings.Join(names, ""))
 	lineH := r.chartLineHeight(face) + 4
 	avail := w - 8
 	rowW := 0
@@ -1413,7 +1436,7 @@ func (r *renderer) renderChartLegend(s *ChartShape, x, y, w, h, titleH int, pos 
 	if len(names) == 0 {
 		return
 	}
-	face := r.chartFace(s.legend.Font)
+	face := r.chartFace(s.legend.Font, strings.Join(names, ""))
 	fc := chartFontColor(s.legend.Font)
 	lineH := r.chartLineHeight(face) + 4
 	box := 9

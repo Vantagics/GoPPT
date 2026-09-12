@@ -77,6 +77,12 @@ func (w *PPTXWriter) writeChartPart(zw *zip.Writer, chart *ChartShape, chartIdx 
 	// Title XML
 	titleXML := ""
 	if chart.title.Visible && chart.title.Text != "" {
+		f := chart.title.Font
+		if f == nil {
+			f = NewFont()
+		}
+		runProps := chartRunPropsXML(f, fmt.Sprintf(`lang="en-US" sz="%d" b="%s"`,
+			f.Size*100, boolToXML(f.Bold)))
 		titleXML = fmt.Sprintf(`  <c:title>
     <c:tx>
       <c:rich>
@@ -84,7 +90,7 @@ func (w *PPTXWriter) writeChartPart(zw *zip.Writer, chart *ChartShape, chartIdx 
         <a:lstStyle/>
         <a:p>
           <a:r>
-            <a:rPr lang="en-US" sz="%d" b="%s"/>
+            %s
             <a:t>%s</a:t>
           </a:r>
         </a:p>
@@ -92,7 +98,7 @@ func (w *PPTXWriter) writeChartPart(zw *zip.Writer, chart *ChartShape, chartIdx 
     </c:tx>
     <c:overlay val="0"/>
   </c:title>
-`, chart.title.Font.Size*100, boolToXML(chart.title.Font.Bold), xmlEscape(chart.title.Text))
+`, runProps, xmlEscape(chart.title.Text))
 	} else if !chart.title.Visible {
 		titleXML = `  <c:autoTitleDeleted val="1"/>
 `
@@ -160,6 +166,38 @@ func boolToXML(v bool) string {
 	return "0"
 }
 
+// chartRunPropsXML renders the <a:rPr> of a chart text run.
+//
+// Chart text carries the same font model as slide text: the Latin face on
+// <a:latin> and the East Asian face on <a:ea>. The chart writer emitted the
+// size and bold flag only, so an author's font choice was silently dropped on
+// save. PowerPoint then fell back to its theme font, and the preview
+// rasteriser — which has to read the font back out of the part — had no East
+// Asian face to use, so every Chinese chart label drew as a .notdef box.
+func chartRunPropsXML(f *Font, attrs string) string {
+	if attrs != "" {
+		attrs = " " + attrs
+	}
+	latin, ea := "", ""
+	if f != nil && f.Name != "" {
+		latin = fmt.Sprintf(`<a:latin typeface="%s"/>`, xmlEscape(f.Name))
+	}
+	if f != nil && f.NameEA != "" {
+		ea = fmt.Sprintf(`<a:ea typeface="%s"/>`, xmlEscape(f.NameEA))
+	}
+	if latin == "" && ea == "" {
+		return fmt.Sprintf(`<a:rPr%s/>`, attrs)
+	}
+	return fmt.Sprintf(`<a:rPr%s>%s%s</a:rPr>`, attrs, latin, ea)
+}
+
+// chartTitleXML renders an axis <c:title> whose single run carries the axis
+// font. It is shared by both axes so their run properties cannot drift apart.
+func chartTitleXML(text string, f *Font) string {
+	return fmt.Sprintf(`        <c:title><c:tx><c:rich><a:bodyPr/><a:lstStyle/><a:p><a:r>%s<a:t>%s</a:t></a:r></a:p></c:rich></c:tx></c:title>
+`, chartRunPropsXML(f, `lang="en-US"`), xmlEscape(text))
+}
+
 func isPieType(ct ChartType) bool {
 	switch ct.(type) {
 	case *PieChart, *Pie3DChart, *DoughnutChart:
@@ -183,8 +221,7 @@ func (w *PPTXWriter) writeAxesXML(chart *ChartShape) string {
 `, w.axisOrientation(axX), boolToXML(!axX.Visible), axX.CrossesAt, axX.TickLabelPos)
 
 	if axX.Title != "" {
-		catAxisXML += fmt.Sprintf(`        <c:title><c:tx><c:rich><a:bodyPr/><a:lstStyle/><a:p><a:r><a:rPr lang="en-US"/><a:t>%s</a:t></a:r></a:p></c:rich></c:tx></c:title>
-`, xmlEscape(axX.Title))
+		catAxisXML += chartTitleXML(axX.Title, axX.Font)
 	}
 	if axX.MajorGridlines != nil {
 		catAxisXML += w.writeGridlinesXML("c:majorGridlines", axX.MajorGridlines)
@@ -223,8 +260,7 @@ func (w *PPTXWriter) writeAxesXML(chart *ChartShape) string {
 `, *axY.MinorUnit)
 	}
 	if axY.Title != "" {
-		valAxisXML += fmt.Sprintf(`        <c:title><c:tx><c:rich><a:bodyPr/><a:lstStyle/><a:p><a:r><a:rPr lang="en-US"/><a:t>%s</a:t></a:r></a:p></c:rich></c:tx></c:title>
-`, xmlEscape(axY.Title))
+		valAxisXML += chartTitleXML(axY.Title, axY.Font)
 	}
 	if axY.MajorGridlines != nil {
 		valAxisXML += w.writeGridlinesXML("c:majorGridlines", axY.MajorGridlines)
