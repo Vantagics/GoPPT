@@ -1,4 +1,4 @@
-module github.com/VantageDataChat/GoPPT
+module github.com/Vantagics/GoPPT
 
 go 1.25.5
 

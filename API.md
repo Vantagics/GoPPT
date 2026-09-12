@@ -8,7 +8,7 @@
 
 ## English
 
-Package: `github.com/VantageDataChat/GoPPT`
+Package: `github.com/Vantagics/GoPPT`
 
 All dimensions use EMU (English Metric Units): 1 inch = 914400 EMU, 1 cm = 360000 EMU, 1 pt = 12700 EMU.
 
@@ -671,7 +671,7 @@ Chart shapes are rasterized natively instead of being flattened into placeholder
 
 ## 中文
 
-包路径：`github.com/VantageDataChat/GoPPT`
+包路径：`github.com/Vantagics/GoPPT`
 
 所有尺寸使用 EMU（英制公制单位）：1 英寸 = 914400 EMU，1 厘米 = 360000 EMU，1 磅 = 12700 EMU。
 

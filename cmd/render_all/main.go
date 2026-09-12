@@ -4,7 +4,7 @@ import (
 	"fmt"
 	"os"
 
-	gopresentation "github.com/VantageDataChat/GoPPT"
+	gopresentation "github.com/Vantagics/GoPPT"
 )
 
 func main() {

@@ -2,6 +2,9 @@
 *.png
 *.pptx
 cmd/debug_*/
+# Internal agent notes and render byproducts — local to this machine, never published.
+.workbuddy/
+out_deck/
 
 # Golden images for the rendering regression tests are deliberately tracked.
 !testdata/render/*.png

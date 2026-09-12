@@ -24,7 +24,7 @@ import (
 	"os"
 	"path/filepath"
 
-	ppt "github.com/VantageDataChat/GoPPT"
+	ppt "github.com/Vantagics/GoPPT"
 )
 
 const outDir = "cmd/chart_preview/out"

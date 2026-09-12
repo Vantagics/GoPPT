@@ -9,7 +9,7 @@ import (
 	"io"
 	"os"
 
-	gp "github.com/VantageDataChat/GoPPT"
+	gp "github.com/Vantagics/GoPPT"
 )
 
 func main() {

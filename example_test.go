@@ -3,7 +3,7 @@ package gopresentation_test
 import (
 	"fmt"
 
-	ppt "github.com/VantageDataChat/GoPPT"
+	ppt "github.com/Vantagics/GoPPT"
 )
 
 // These examples are compiled and run as part of `go test`, so the snippets in

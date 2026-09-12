@@ -140,7 +140,7 @@ When rendering unattended, pass a `FontDiagnostics` to `RenderOptions` to get th
 ### Installation
 
 ```bash
-go get github.com/VantageDataChat/GoPPT
+go get github.com/Vantagics/GoPPT
 ```
 
 ### Quick Start
@@ -150,7 +150,7 @@ package main
 
 import (
     "log"
-    ppt "github.com/VantageDataChat/GoPPT"
+    ppt "github.com/Vantagics/GoPPT"
 )
 
 func main() {
@@ -362,7 +362,7 @@ Draft 是画质取舍，而不是另一个渲染器：输出尺寸与内容都�
 ### 安装
 
 ```bash
-go get github.com/VantageDataChat/GoPPT
+go get github.com/Vantagics/GoPPT
 ```
 
 ### 快速开始
@@ -372,7 +372,7 @@ package main
 
 import (
     "log"
-    ppt "github.com/VantageDataChat/GoPPT"
+    ppt "github.com/Vantagics/GoPPT"
 )
 
 func main() {

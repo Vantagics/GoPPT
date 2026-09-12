@@ -5,7 +5,7 @@ import (
 	"os"
 	"path/filepath"
 
-	gopresentation "github.com/VantageDataChat/GoPPT"
+	gopresentation "github.com/Vantagics/GoPPT"
 )
 
 func main() {
