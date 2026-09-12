@@ -81,8 +81,7 @@ func (w *PPTXWriter) writeChartPart(zw *zip.Writer, chart *ChartShape, chartIdx 
 		if f == nil {
 			f = NewFont()
 		}
-		runProps := chartRunPropsXML(f, fmt.Sprintf(`lang="en-US" sz="%d" b="%s"`,
-			f.Size*100, boolToXML(f.Bold)))
+		runProps := chartRunPropsXML(f, "a:rPr", chartTextRunAttrs(f))
 		titleXML = fmt.Sprintf(`  <c:title>
     <c:tx>
       <c:rich>
@@ -104,14 +103,15 @@ func (w *PPTXWriter) writeChartPart(zw *zip.Writer, chart *ChartShape, chartIdx 
 `
 	}
 
-	// Legend XML
+	// Legend XML. <c:txPr> follows <c:overlay> in CT_Legend, and it is where
+	// PowerPoint reads the legend entry font from.
 	legendXML := ""
 	if chart.legend.Visible {
 		legendXML = fmt.Sprintf(`  <c:legend>
     <c:legendPos val="%s"/>
     <c:overlay val="0"/>
-  </c:legend>
-`, chart.legend.Position)
+%s  </c:legend>
+`, chart.legend.Position, chartTxPrXML("    ", chart.legend.Font))
 	}
 
 	// Axis XML
@@ -166,7 +166,11 @@ func boolToXML(v bool) string {
 	return "0"
 }
 
-// chartRunPropsXML renders the <a:rPr> of a chart text run.
+// chartRunPropsXML renders the run properties of a chart text element.
+//
+// elem is the element to emit: <a:rPr> for a run inside <c:title>, and
+// <a:defRPr> for the paragraph default a <c:txPr> carries. One function emits
+// both so the two ways a chart states a font cannot drift apart.
 //
 // Chart text carries the same font model as slide text: the Latin face on
 // <a:latin> and the East Asian face on <a:ea>. The chart writer emitted the
@@ -174,7 +178,7 @@ func boolToXML(v bool) string {
 // save. PowerPoint then fell back to its theme font, and the preview
 // rasteriser — which has to read the font back out of the part — had no East
 // Asian face to use, so every Chinese chart label drew as a .notdef box.
-func chartRunPropsXML(f *Font, attrs string) string {
+func chartRunPropsXML(f *Font, elem, attrs string) string {
 	if attrs != "" {
 		attrs = " " + attrs
 	}
@@ -186,16 +190,67 @@ func chartRunPropsXML(f *Font, attrs string) string {
 		ea = fmt.Sprintf(`<a:ea typeface="%s"/>`, xmlEscape(f.NameEA))
 	}
 	if latin == "" && ea == "" {
-		return fmt.Sprintf(`<a:rPr%s/>`, attrs)
+		return fmt.Sprintf(`<%s%s/>`, elem, attrs)
 	}
-	return fmt.Sprintf(`<a:rPr%s>%s%s</a:rPr>`, attrs, latin, ea)
+	return fmt.Sprintf(`<%s%s>%s%s</%s>`, elem, attrs, latin, ea, elem)
+}
+
+// chartTextRunAttrs is the attribute set every chart text element carries.
+//
+// Shared by the title runs and the <c:txPr> paragraph defaults so both paths
+// agree on what a chart font is. The size, bold and italic flags are exactly
+// the ones the rasteriser reads back (fontFaceFor takes bold and italic), and
+// an unstated size is omitted rather than written as sz="0".
+func chartTextRunAttrs(f *Font) string {
+	attrs := `lang="en-US"`
+	if f == nil {
+		return attrs
+	}
+	if f.Size > 0 {
+		attrs += fmt.Sprintf(` sz="%d"`, f.Size*100)
+	}
+	return attrs + fmt.Sprintf(` b="%s" i="%s"`, boolToXML(f.Bold), boolToXML(f.Italic))
+}
+
+// chartTxPrXML renders the <c:txPr> a chart text element uses for its label
+// font: axis tick labels, legend entries and data labels.
+//
+// PowerPoint reads a chart label's font from here and nowhere else, so
+// omitting it made every axis and legend label fall back to the theme font
+// even though the preview looked right — the rasteriser resolves the face
+// itself and had the model's font to resolve. The element is only written when
+// the font states something (a nil font, or one with no face and no size,
+// would be an empty <c:txPr> that says less than its absence).
+func chartTxPrXML(indent string, f *Font) string {
+	if f == nil || (f.Name == "" && f.NameEA == "" && f.Size <= 0) {
+		return ""
+	}
+	return fmt.Sprintf("%s<c:txPr><a:bodyPr/><a:lstStyle/><a:p><a:pPr>%s</a:pPr><a:endParaRPr lang=\"en-US\"/></a:p></c:txPr>\n",
+		indent, chartRunPropsXML(f, "a:defRPr", chartTextRunAttrs(f)))
+}
+
+// chartTickMarksXML renders the two tick-mark settings an axis may carry, in
+// schema order.
+//
+// The model has always held MajorTickMark/MinorTickMark and the reader has
+// always parsed them, but the writer emitted neither, so a document's tick
+// marks reverted to the model default every time it was saved.
+func chartTickMarksXML(indent, major, minor string) string {
+	out := ""
+	if major != "" {
+		out += fmt.Sprintf("%s<c:majorTickMark val=\"%s\"/>\n", indent, major)
+	}
+	if minor != "" {
+		out += fmt.Sprintf("%s<c:minorTickMark val=\"%s\"/>\n", indent, minor)
+	}
+	return out
 }
 
 // chartTitleXML renders an axis <c:title> whose single run carries the axis
 // font. It is shared by both axes so their run properties cannot drift apart.
 func chartTitleXML(text string, f *Font) string {
 	return fmt.Sprintf(`        <c:title><c:tx><c:rich><a:bodyPr/><a:lstStyle/><a:p><a:r>%s<a:t>%s</a:t></a:r></a:p></c:rich></c:tx></c:title>
-`, chartRunPropsXML(f, `lang="en-US"`), xmlEscape(text))
+`, chartRunPropsXML(f, "a:rPr", chartTextRunAttrs(f)), xmlEscape(text))
 }
 
 func isPieType(ct ChartType) bool {
@@ -210,63 +265,78 @@ func (w *PPTXWriter) writeAxesXML(chart *ChartShape) string {
 	axX := chart.plotArea.axisX
 	axY := chart.plotArea.axisY
 
+	// The element order here is fixed by CT_CatAx and CT_ValAx: gridlines and
+	// the title precede the tick settings, <c:txPr> sits immediately before the
+	// crossing axis, and a value axis' units follow the crossing pair. The
+	// reader matches on the local name and does not validate order, so a part
+	// PowerPoint would reject still round-trips here — which is how the order
+	// drifted in the first place.
 	catAxisXML := fmt.Sprintf(`      <c:catAx>
         <c:axId val="1"/>
         <c:scaling><c:orientation val="%s"/></c:scaling>
         <c:delete val="%s"/>
         <c:axPos val="b"/>
-        <c:crossAx val="2"/>
-        <c:crosses val="%s"/>
-        <c:tickLblPos val="%s"/>
-`, w.axisOrientation(axX), boolToXML(!axX.Visible), axX.CrossesAt, axX.TickLabelPos)
+`, w.axisOrientation(axX), boolToXML(!axX.Visible))
 
-	if axX.Title != "" {
-		catAxisXML += chartTitleXML(axX.Title, axX.Font)
-	}
 	if axX.MajorGridlines != nil {
 		catAxisXML += w.writeGridlinesXML("c:majorGridlines", axX.MajorGridlines)
 	}
-	catAxisXML += "      </c:catAx>\n"
+	if axX.MinorGridlines != nil {
+		catAxisXML += w.writeGridlinesXML("c:minorGridlines", axX.MinorGridlines)
+	}
+	if axX.Title != "" {
+		catAxisXML += chartTitleXML(axX.Title, axX.Font)
+	}
+	catAxisXML += chartTickMarksXML("        ", axX.MajorTickMark, axX.MinorTickMark)
+	catAxisXML += fmt.Sprintf("        <c:tickLblPos val=\"%s\"/>\n", axX.TickLabelPos)
+	catAxisXML += chartTxPrXML("        ", axX.Font)
+	catAxisXML += fmt.Sprintf(`        <c:crossAx val="2"/>
+        <c:crosses val="%s"/>
+      </c:catAx>
+`, axX.CrossesAt)
 
 	valAxisXML := fmt.Sprintf(`      <c:valAx>
         <c:axId val="2"/>
         <c:scaling>
           <c:orientation val="%s"/>`, w.axisOrientation(axY))
 
-	if axY.MinBounds != nil {
-		valAxisXML += fmt.Sprintf(`
-          <c:min val="%g"/>`, *axY.MinBounds)
-	}
+	// CT_Scaling puts max before min.
 	if axY.MaxBounds != nil {
 		valAxisXML += fmt.Sprintf(`
           <c:max val="%g"/>`, *axY.MaxBounds)
+	}
+	if axY.MinBounds != nil {
+		valAxisXML += fmt.Sprintf(`
+          <c:min val="%g"/>`, *axY.MinBounds)
 	}
 	valAxisXML += `
         </c:scaling>
 `
 	valAxisXML += fmt.Sprintf(`        <c:delete val="%s"/>
         <c:axPos val="l"/>
-        <c:crossAx val="1"/>
-        <c:crosses val="%s"/>
-        <c:tickLblPos val="%s"/>
-`, boolToXML(!axY.Visible), axY.CrossesAt, axY.TickLabelPos)
+`, boolToXML(!axY.Visible))
 
-	if axY.MajorUnit != nil {
-		valAxisXML += fmt.Sprintf(`        <c:majorUnit val="%g"/>
-`, *axY.MajorUnit)
-	}
-	if axY.MinorUnit != nil {
-		valAxisXML += fmt.Sprintf(`        <c:minorUnit val="%g"/>
-`, *axY.MinorUnit)
-	}
-	if axY.Title != "" {
-		valAxisXML += chartTitleXML(axY.Title, axY.Font)
-	}
 	if axY.MajorGridlines != nil {
 		valAxisXML += w.writeGridlinesXML("c:majorGridlines", axY.MajorGridlines)
 	}
 	if axY.MinorGridlines != nil {
 		valAxisXML += w.writeGridlinesXML("c:minorGridlines", axY.MinorGridlines)
+	}
+	if axY.Title != "" {
+		valAxisXML += chartTitleXML(axY.Title, axY.Font)
+	}
+	valAxisXML += chartTickMarksXML("        ", axY.MajorTickMark, axY.MinorTickMark)
+	valAxisXML += fmt.Sprintf("        <c:tickLblPos val=\"%s\"/>\n", axY.TickLabelPos)
+	valAxisXML += chartTxPrXML("        ", axY.Font)
+	valAxisXML += fmt.Sprintf(`        <c:crossAx val="1"/>
+        <c:crosses val="%s"/>
+`, axY.CrossesAt)
+
+	if axY.MajorUnit != nil {
+		valAxisXML += fmt.Sprintf("        <c:majorUnit val=\"%g\"/>\n", *axY.MajorUnit)
+	}
+	if axY.MinorUnit != nil {
+		valAxisXML += fmt.Sprintf("        <c:minorUnit val=\"%g\"/>\n", *axY.MinorUnit)
 	}
 	valAxisXML += "      </c:valAx>\n"
 
@@ -373,26 +443,29 @@ func (w *PPTXWriter) writeSeriesXML(series []*ChartSeries, categories []string, 
           <c:tx><c:strRef><c:f>Sheet1!$B$1</c:f><c:strCache><c:ptCount val="1"/><c:pt idx="0"><c:v>%s</c:v></c:pt></c:strCache></c:strRef></c:tx>
 %s`, idx, idx, xmlEscape(s.Title), spPrXML))
 
-		// Data labels
+		// Data labels. CT_DLbls orders <c:txPr> before <c:dLblPos> and the show
+		// flags, and <c:separator> last. The label font goes in the txPr, which
+		// is also where PowerPoint looks for it.
 		if s.ShowValue || s.ShowCategoryName || s.ShowPercentage || s.ShowSeriesName {
 			sb.WriteString("          <c:dLbls>\n")
+			sb.WriteString(chartTxPrXML("            ", s.Font))
+			if s.LabelPosition != "" {
+				sb.WriteString(fmt.Sprintf("            <c:dLblPos val=\"%s\"/>\n", s.LabelPosition))
+			}
 			if s.ShowValue {
 				sb.WriteString("            <c:showVal val=\"1\"/>\n")
 			}
 			if s.ShowCategoryName {
 				sb.WriteString("            <c:showCatName val=\"1\"/>\n")
 			}
-			if s.ShowPercentage {
-				sb.WriteString("            <c:showPercent val=\"1\"/>\n")
-			}
 			if s.ShowSeriesName {
 				sb.WriteString("            <c:showSerName val=\"1\"/>\n")
 			}
+			if s.ShowPercentage {
+				sb.WriteString("            <c:showPercent val=\"1\"/>\n")
+			}
 			if s.Separator != "" && s.Separator != "," {
 				sb.WriteString(fmt.Sprintf("            <c:separator>%s</c:separator>\n", xmlEscape(s.Separator)))
-			}
-			if s.LabelPosition != "" {
-				sb.WriteString(fmt.Sprintf("            <c:dLblPos val=\"%s\"/>\n", s.LabelPosition))
 			}
 			sb.WriteString("          </c:dLbls>\n")
 		}

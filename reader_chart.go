@@ -140,7 +140,9 @@ func parseChartXML(data []byte, themeColors map[string]string) *ChartShape {
 		inV          bool
 		inT          bool
 		inSeparator  bool
+		inLegend     bool
 		titleTarget  string // "", "chart" or "axis"
+		txPrTarget   string // "", "axis", "legend" or "series"
 		valueCtx     string // "", "serTitle", "cat", "val", "xval", "yval"
 
 		plotType    string
@@ -195,6 +197,23 @@ func parseChartXML(data []byte, themeColors map[string]string) *ChartShape {
 		// chart string came back as the model default.
 		runLatin string
 		runEA    string
+
+		// Run properties stated by that same title run. They are applied with
+		// the typefaces, on the matching close tag.
+		runSize            int
+		runBold, runItalic bool
+		runBoldSet         bool
+		runItalicSet       bool
+
+		// The <c:txPr> currently open: what its paragraph defaults state, and
+		// the series font it accumulates (a series' data labels are read into
+		// a font of their own, applied when the series closes).
+		txPrLatin, txPrEA    string
+		txPrSize             int
+		txPrBold, txPrItalic bool
+		txPrBoldSet          bool
+		txPrItalicSet        bool
+		serFont              *Font
 	)
 
 	resetSeries := func() {
@@ -209,6 +228,7 @@ func parseChartXML(data []byte, themeColors map[string]string) *ChartShape {
 		serMark = nil
 		serSmooth = false
 		serDlbls = nil
+		serFont = nil
 	}
 
 	finishSeries := func() {
@@ -248,6 +268,12 @@ func parseChartXML(data []byte, themeColors map[string]string) *ChartShape {
 		}
 
 		s := NewChartSeriesOrdered(strings.TrimSpace(serTitle.String()), catList, floats)
+		if serFont != nil {
+			// The series carried a <c:txPr>, which is where its data labels'
+			// font lives. NewChartSeriesOrdered seeds a default font, so the
+			// parsed one replaces it whole.
+			s.Font = serFont
+		}
 		if serFill != nil {
 			s.FillColor = *serFill
 		} else if serLine != nil {
@@ -619,6 +645,7 @@ func parseChartXML(data []byte, themeColors map[string]string) *ChartShape {
 
 			case "title":
 				runLatin, runEA = "", ""
+				runSize, runBoldSet, runItalicSet = 0, false, false
 				if inAxis {
 					titleTarget = "axis"
 					axisTitle.Reset()
@@ -627,17 +654,90 @@ func parseChartXML(data []byte, themeColors map[string]string) *ChartShape {
 					chartTitle.Reset()
 				}
 
-			case "latin", "ea":
-				// <a:rPr><a:latin>/<a:ea> name the faces a run uses, and the
-				// chart writer emits them on the title runs. A <c:txPr>
-				// default is a document-wide fallback rather than a run's own
-				// font, so only the title runs are read.
+			case "txPr":
+				// A <c:txPr> holds the default run properties for the text of
+				// the element it sits in: an axis' tick labels, the legend
+				// entries, or a series' data labels. PowerPoint reads a chart
+				// label's font from here, so the writer emits it and the reader
+				// has to read it back — the two used to disagree, with the
+				// rasteriser resolving the model's font while PowerPoint fell
+				// back to the theme.
+				txPrLatin, txPrEA = "", ""
+				txPrSize, txPrBoldSet, txPrItalicSet = 0, false, false
+				switch {
+				case inAxis:
+					txPrTarget = "axis"
+				case inSeries && inDLbls:
+					txPrTarget = "series"
+					if serFont == nil {
+						serFont = NewFont()
+					}
+				case inLegend:
+					txPrTarget = "legend"
+				default:
+					// Somewhere we do not model, e.g. a chart-group level
+					// <c:dLbls>: read nothing rather than guess a target.
+					txPrTarget = ""
+				}
+
+			case "defRPr":
+				if txPrTarget == "" {
+					break
+				}
+				if v := attrValue(t, "sz"); v != "" {
+					if n, err := strconv.Atoi(v); err == nil && n > 0 {
+						txPrSize = n
+					}
+				}
+				if v := attrValue(t, "b"); v != "" {
+					txPrBold, txPrBoldSet = isXMLTrue(v), true
+				}
+				if v := attrValue(t, "i"); v != "" {
+					txPrItalic, txPrItalicSet = isXMLTrue(v), true
+				}
+
+			case "rPr":
+				// A title states its font on the run itself rather than in a
+				// <c:txPr>, so the same properties are collected here and
+				// applied when the title closes.
 				if titleTarget == "" {
 					break
 				}
+				runSize, runBoldSet, runItalicSet = 0, false, false
+				if v := attrValue(t, "sz"); v != "" {
+					if n, err := strconv.Atoi(v); err == nil && n > 0 {
+						runSize = n
+					}
+				}
+				if v := attrValue(t, "b"); v != "" {
+					runBold, runBoldSet = isXMLTrue(v), true
+				}
+				if v := attrValue(t, "i"); v != "" {
+					runItalic, runItalicSet = isXMLTrue(v), true
+				}
+
+			case "latin", "ea":
+				// <a:rPr> names the faces a run uses and <a:defRPr> names the
+				// defaults for a whole text element, so both the title runs and
+				// every <c:txPr> have to be read: the writer emits the font on
+				// both, and a part that states it only in a <c:txPr> would
+				// otherwise come back as the model default.
 				typeface := attrValue(t, "typeface")
 				// "+mn-lt" and friends are theme references, not font names.
 				if typeface == "" || strings.HasPrefix(typeface, "+") {
+					break
+				}
+				if txPrTarget != "" {
+					if name == "latin" {
+						if txPrLatin == "" {
+							txPrLatin = typeface
+						}
+					} else if txPrEA == "" {
+						txPrEA = typeface
+					}
+					break
+				}
+				if titleTarget == "" {
 					break
 				}
 				if name == "latin" {
@@ -650,6 +750,10 @@ func parseChartXML(data []byte, themeColors map[string]string) *ChartShape {
 
 			case "legend":
 				chart.legend.Visible = true
+				// The legend's <c:txPr> carries the entry font; the flag pairs
+				// with the close handler below so the target is only ever
+				// chosen for text that really is inside a legend.
+				inLegend = true
 			case "legendPos":
 				if val != "" {
 					chart.legend.Position = LegendPosition(val)
@@ -793,10 +897,38 @@ func parseChartXML(data []byte, themeColors map[string]string) *ChartShape {
 				case titleTarget == "chart":
 					chartTitleText = strings.TrimSpace(chartTitle.String())
 					applyChartTextFont(chart.title.Font, runLatin, runEA)
+					applyChartFontAttributes(chart.title.Font, runSize,
+						runBold, runBoldSet, runItalic, runItalicSet)
 				case titleTarget == "axis" && curAxis != nil:
 					applyChartTextFont(curAxis.Font, runLatin, runEA)
+					applyChartFontAttributes(curAxis.Font, runSize,
+						runBold, runBoldSet, runItalic, runItalicSet)
 				}
 				titleTarget = ""
+
+			case "txPr":
+				// Commit the paragraph defaults to whichever element owned the
+				// <c:txPr>. Every target the start handler can choose has to
+				// appear here: a missing case drops the font silently, which is
+				// exactly how the label fonts went unread.
+				switch {
+				case txPrTarget == "axis" && curAxis != nil:
+					applyChartTextFont(curAxis.Font, txPrLatin, txPrEA)
+					applyChartFontAttributes(curAxis.Font, txPrSize,
+						txPrBold, txPrBoldSet, txPrItalic, txPrItalicSet)
+				case txPrTarget == "legend":
+					applyChartTextFont(chart.legend.Font, txPrLatin, txPrEA)
+					applyChartFontAttributes(chart.legend.Font, txPrSize,
+						txPrBold, txPrBoldSet, txPrItalic, txPrItalicSet)
+				case txPrTarget == "series" && serFont != nil:
+					applyChartTextFont(serFont, txPrLatin, txPrEA)
+					applyChartFontAttributes(serFont, txPrSize,
+						txPrBold, txPrBoldSet, txPrItalic, txPrItalicSet)
+				}
+				txPrTarget = ""
+
+			case "legend":
+				inLegend = false
 
 			case "t":
 				if inT {
@@ -925,6 +1057,24 @@ func attrValue(se xml.StartElement, local string) string {
 		}
 	}
 	return ""
+}
+
+// applyChartFontAttributes copies the run properties a chart text element
+// stated into the model font, leaving anything it did not state alone. Size is
+// in hundredths of a point in the file, as everywhere else in the format.
+func applyChartFontAttributes(f *Font, size int, bold, boldSet, italic, italicSet bool) {
+	if f == nil {
+		return
+	}
+	if size > 0 {
+		f.Size = size / 100
+	}
+	if boldSet {
+		f.Bold = bold
+	}
+	if italicSet {
+		f.Italic = italic
+	}
 }
 
 // applyChartTextFont copies the typefaces a chart text run declared into the
