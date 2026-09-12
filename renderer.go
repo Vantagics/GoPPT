@@ -4889,8 +4889,9 @@ func (r *renderer) measureParagraphsHeight(paragraphs []*Paragraph, w, h int, an
 		lineSpacing int
 	}
 	var allLines []lineInfo
+	ordinals := bulletOrdinals(paragraphs)
 
-	for _, para := range paragraphs {
+	for pi, para := range paragraphs {
 		marginLeft := 0
 		marginRight := 0
 		indent := 0
@@ -4901,7 +4902,7 @@ func (r *renderer) measureParagraphsHeight(paragraphs []*Paragraph, w, h int, an
 		}
 		var paraRuns []textRun
 		if para.bullet != nil && para.bullet.Type != BulletTypeNone {
-			bRun := r.buildBulletRun(para.bullet, para)
+			bRun := r.buildBulletRun(para.bullet, para, ordinals[pi])
 			if bRun.text != "" {
 				paraRuns = append(paraRuns, bRun)
 			}
@@ -4965,7 +4966,8 @@ func (r *renderer) measureMaxLineWidth(paragraphs []*Paragraph, w int, wordWrap 
 		return 0
 	}
 	maxW := 0
-	for _, para := range paragraphs {
+	ordinals := bulletOrdinals(paragraphs)
+	for pi, para := range paragraphs {
 		marginLeft := 0
 		marginRight := 0
 		indent := 0
@@ -4976,7 +4978,7 @@ func (r *renderer) measureMaxLineWidth(paragraphs []*Paragraph, w int, wordWrap 
 		}
 		var paraRuns []textRun
 		if para.bullet != nil && para.bullet.Type != BulletTypeNone {
-			bRun := r.buildBulletRun(para.bullet, para)
+			bRun := r.buildBulletRun(para.bullet, para, ordinals[pi])
 			if bRun.text != "" {
 				paraRuns = append(paraRuns, bRun)
 			}
@@ -5025,6 +5027,7 @@ func (r *renderer) drawParagraphs(paragraphs []*Paragraph, x, y, w, h int, ancho
 		isLast      bool // last line of paragraph
 	}
 	var allLines []lineInfo
+	ordinals := bulletOrdinals(paragraphs)
 
 	for pi, para := range paragraphs {
 		align := HorizontalLeft
@@ -5043,7 +5046,7 @@ func (r *renderer) drawParagraphs(paragraphs []*Paragraph, x, y, w, h int, ancho
 
 		// Bullet run
 		if para.bullet != nil && para.bullet.Type != BulletTypeNone {
-			bRun := r.buildBulletRun(para.bullet, para)
+			bRun := r.buildBulletRun(para.bullet, para, ordinals[pi])
 			if bRun.text != "" {
 				paraRuns = append(paraRuns, bRun)
 			}
@@ -5252,8 +5255,51 @@ func (r *renderer) drawUnderline(x1, x2, y int, c color.RGBA, style UnderlineTyp
 	}
 }
 
-// buildBulletRun creates a textRun for a bullet prefix.
-func (r *renderer) buildBulletRun(b *Bullet, para *Paragraph) textRun {
+// bulletOrdinals returns, for each paragraph, the number its auto-numbered
+// bullet displays; non-numbered paragraphs get 0.
+//
+// PowerPoint keeps a single element for a numbered bullet (<a:buAutoNum>) and
+// numbers a list implicitly: startAt carries the number of the list's *first*
+// item and every following paragraph continues the count. The model stores one
+// Bullet per paragraph, so the running count has to be reconstructed here.
+// Without it buildBulletRun read the same StartAt for every paragraph and a
+// numbered list rendered as "1. 1. 1.".
+//
+// A sequence is broken by a paragraph with no bullet, a character bullet, or a
+// different number format — a new list then starts from its own startAt. Both
+// the measuring passes and the drawing pass call this, so they cannot disagree
+// about how wide the bullet is.
+func bulletOrdinals(paragraphs []*Paragraph) []int {
+	ordinals := make([]int, len(paragraphs))
+	format := ""
+	running := 0
+	for i, para := range paragraphs {
+		b := para.bullet
+		if b == nil || (b.Type != BulletTypeNumeric && b.Type != BulletTypeAutoNum) {
+			format, running = "", 0
+			continue
+		}
+		num := b.NumFormat
+		if num == "" {
+			num = defaultNumFormat
+		}
+		if running == 0 || num != format {
+			running = b.StartAt
+			if running < defaultBulletStart {
+				running = defaultBulletStart
+			}
+			format = num
+		} else {
+			running++
+		}
+		ordinals[i] = running
+	}
+	return ordinals
+}
+
+// buildBulletRun creates a textRun for a bullet prefix. ordinal is the number
+// an auto-numbered bullet shows, as returned by bulletOrdinals.
+func (r *renderer) buildBulletRun(b *Bullet, para *Paragraph, ordinal int) textRun {
 	if b == nil || b.Type == BulletTypeNone {
 		return textRun{}
 	}
@@ -5269,6 +5315,16 @@ func (r *renderer) buildBulletRun(b *Bullet, para *Paragraph) textRun {
 			break
 		}
 	}
+	// <a:buSzPct> sizes the bullet as a percentage of the text, and the reader
+	// and the writer both carry Bullet.Size — only the renderer never looked at
+	// it, so a bullet set to 200% drew at 100% in the preview while the file
+	// said otherwise.
+	if b.Size > 0 && b.Size != 100 {
+		bulletFont.Size = bulletFont.Size * b.Size / 100
+		if bulletFont.Size < 1 {
+			bulletFont.Size = 1
+		}
+	}
 	if b.Color != nil {
 		bulletFont.Color = *b.Color
 	}
@@ -5279,13 +5335,27 @@ func (r *renderer) buildBulletRun(b *Bullet, para *Paragraph) textRun {
 	var text string
 	switch b.Type {
 	case BulletTypeChar:
-		text = b.Style + " "
-	case BulletTypeNumeric, BulletTypeAutoNum:
-		num := b.StartAt
-		if num < 1 {
-			num = 1
+		// The writer substitutes <a:buChar char="•"/> for an empty character;
+		// the renderer drew a bare space, so an empty bullet showed nothing
+		// where the file had a bullet.
+		char := b.Style
+		if char == "" {
+			char = defaultBulletChar
 		}
-		text = formatBulletNumber(num, b.NumFormat) + " "
+		text = char + " "
+	case BulletTypeNumeric, BulletTypeAutoNum:
+		num := ordinal
+		if num < defaultBulletStart {
+			num = b.StartAt
+		}
+		if num < defaultBulletStart {
+			num = defaultBulletStart
+		}
+		format := b.NumFormat
+		if format == "" {
+			format = defaultNumFormat
+		}
+		text = formatBulletNumber(num, format) + " "
 	}
 
 	// Handle symbol font characters (Wingdings, Symbol, etc.).
@@ -6357,10 +6427,22 @@ func decodeWMFDIB(data []byte, fc *FontCache) image.Image {
 		return nil
 	}
 
-	// Render at a higher resolution for quality (4x the WMF logical units)
-	scale := 4
-	imgW := winW * scale
-	imgH := winH * scale
+	// Render at a higher resolution for quality (up to 4x the WMF logical
+	// units). The window extent is read straight out of the file, so it decides
+	// how much memory this allocates: a metafile claiming a 3000x3000 logical
+	// extent asks for a 12000x12000 canvas, which image.NewRGBA tries to
+	// allocate and dies on — a crash the recover boundary in safety.go cannot
+	// catch, because it is the allocator failing, not a panic. parseDIB already
+	// refuses any dimension over 4096 and the EMF path clamps its canvas to
+	// 2000 px, so apply the same ceiling here, giving up the quality multiplier
+	// first so that ordinary metafiles keep their 4x.
+	const maxMetafileDim = 2000
+	scale := 4.0
+	if ext := float64(maxInt(winW, winH)); ext > 0 && ext*scale > maxMetafileDim {
+		scale = float64(maxMetafileDim) / ext
+	}
+	imgW := int(float64(winW) * scale)
+	imgH := int(float64(winH) * scale)
 	if imgW <= 0 || imgH <= 0 {
 		imgW = 408
 		imgH = 336
@@ -6373,10 +6455,10 @@ func decodeWMFDIB(data []byte, fc *FontCache) image.Image {
 	// Draw DIBs with mask compositing
 	var maskImg image.Image
 	for _, d := range dibs {
-		dx := d.destX * scale
-		dy := d.destY * scale
-		dw := d.destW * scale
-		dh := d.destH * scale
+		dx := int(float64(d.destX) * scale)
+		dy := int(float64(d.destY) * scale)
+		dw := int(float64(d.destW) * scale)
+		dh := int(float64(d.destH) * scale)
 		scaled := scaleImageBilinear(d.img, dw, dh)
 
 		if d.rasterOp == 0x008800C6 { // SRCAND - this is the mask
@@ -6400,8 +6482,8 @@ func decodeWMFDIB(data []byte, fc *FontCache) image.Image {
 
 	// Draw text
 	for _, t := range texts {
-		tx := t.x * scale
-		ty := t.y * scale
+		tx := int(float64(t.x) * scale)
+		ty := int(float64(t.y) * scale)
 		drawWMFText(canvas, tx, ty, t.text, scale, t.centerH, fc)
 	}
 
@@ -6418,13 +6500,13 @@ func decodeGBKToUTF8(data []byte) string {
 }
 
 // drawWMFText draws text onto the canvas at the given position.
-func drawWMFText(canvas *image.RGBA, x, y int, text string, scale int, centerH bool, fc *FontCache) {
+func drawWMFText(canvas *image.RGBA, x, y int, text string, scale float64, centerH bool, fc *FontCache) {
 	col := color.Black
 	// Try to use a proper font that supports Chinese characters
 	var face font.Face
 	if fc != nil {
 		// Try common Chinese fonts at a size proportional to the scale
-		fontSize := float64(10 * scale)
+		fontSize := 10 * scale
 		for _, name := range []string{"microsoft yahei", "微软雅黑", "simsun", "宋体", "simhei", "黑体"} {
 			if f := fc.GetFace(name, fontSize, false, false); f != nil {
 				face = f

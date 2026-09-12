@@ -32,6 +32,16 @@ const (
 	NumFormatAlphaLcParen  = "alphaLcParenR"
 )
 
+// The two fallbacks for an empty bullet. An empty <a:buChar char=""/> is not a
+// bullet and an empty <a:buAutoNum type=""/> is not a number format — PowerPoint
+// offers to repair a file containing either — so the reader, the writer and the
+// renderer all fall back to these rather than each inventing its own.
+const (
+	defaultBulletChar  = "•"
+	defaultNumFormat   = NumFormatArabicPeriod
+	defaultBulletStart = 1
+)
+
 // NewBullet creates a new bullet with no bullet type.
 func NewBullet() *Bullet {
 	return &Bullet{
