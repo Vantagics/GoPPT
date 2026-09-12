@@ -118,8 +118,9 @@ When rendering unattended, pass a `FontDiagnostics` to `RenderOptions` to get th
 - Create and save `.pptx` files (OOXML / PowerPoint 2007+)
 - Read existing `.pptx` files with full round-trip support, including charts embedded as native chart parts (`ppt/charts/chartN.xml`)
 - Rich text with fonts, colors, bold, italic, underline, strikethrough
+- Hyperlinks on text runs, external and to another slide of the same presentation; both are written and read back
 - Images (PNG, JPEG, GIF, BMP, SVG) from bytes or file path
-- Tables with cell formatting and fills
+- Tables with cell formatting, fills, per-side cell borders and merges (column and row spans, written and read back)
 - Auto shapes (rectangle, ellipse, triangle, arrows, stars, etc.)
 - Line shapes with style and color
 - Charts: Bar, Bar3D, Line, Area, Pie, Pie3D, Doughnut, Scatter, Radar
@@ -130,7 +131,7 @@ When rendering unattended, pass a `FontDiagnostics` to `RenderOptions` to get th
 - Unsupported OOXML constructs (SmartArt, OLE objects, unreadable chart parts) are kept as visible placeholders and are enumerable via `UnsupportedShapes()`, instead of being silently dropped
 - Bullets (character and numeric)
 - Comments with authors — name, initials, timestamp and position survive a write → read round trip
-- Speaker notes
+- Speaker notes, one paragraph per line, in both directions
 - Slide backgrounds (solid and gradient)
 - Animations (basic grouping)
 - Document properties and custom properties
@@ -341,7 +342,7 @@ Draft 是画质取舍，而不是另一个渲染器：输出尺寸与内容都�
 - 读取现有 `.pptx` 文件，支持完整的读写往返，包括以原生图表部件（`ppt/charts/chartN.xml`）形式嵌入的图表
 - 富文本：字体、颜色、粗体、斜体、下划线、删除线
 - 图片（PNG、JPEG、GIF、BMP、SVG），支持字节数据或文件路径
-- 表格，支持单元格格式和填充
+- 表格，支持单元格格式、填充、按边设置的单元格边框，以及列/行合并（都可写出并读回）
 - 自动形状（矩形、椭圆、三角形、箭头、星形等）
 - 线条形状，支持样式和颜色
 - 图表：柱状图、3D柱状图、折线图、面积图、饼图、3D饼图、环形图、散点图、雷达图

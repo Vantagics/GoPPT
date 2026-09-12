@@ -34,12 +34,17 @@ p.GetDocumentProperties().Company = "ACME"
 // Custom properties
 p.GetDocumentProperties().SetCustomProperty("version", "1.0", ppt.PropertyTypeString)
 p.GetDocumentProperties().GetCustomPropertyValue("version") // "1.0"
+// Custom properties are written to docProps/custom.xml, which is declared in
+// [Content_Types].xml and related from _rels/.rels. The part is emitted only
+// when at least one custom property is set.
 
 // Presentation properties
 p.GetPresentationProperties().SetZoom(1.5)
 p.GetPresentationProperties().SetLastView(ppt.ViewSlide)
 p.GetPresentationProperties().SetSlideshowType(ppt.SlideshowTypePresent)
-p.GetPresentationProperties().SetCommentVisible(true)
+// Zoom, last view and slideshow type are written (to ppt/viewProps.xml and
+// ppt/presProps.xml). Comment visibility and MarkAsFinal are in-memory only:
+// the extension that carries them is not written, so they do not survive a save.
 p.GetPresentationProperties().MarkAsFinal()
 
 // Layout
@@ -92,7 +97,7 @@ shape.BaseShape.SetRotation(45)      // degrees
 shape.BaseShape.SetFill(fill)
 shape.BaseShape.SetBorder(border)
 shape.BaseShape.SetShadow(shadow)
-shape.BaseShape.SetHyperlink(ppt.NewHyperlink("https://example.com"))
+shape.BaseShape.SetHyperlink(ppt.NewHyperlink("https://example.com")) // not serialized yet — see Hyperlink
 ```
 
 #### RichTextShape
@@ -163,6 +168,18 @@ cell.SetText("Header")
 cell.SetFill(ppt.NewFill().SetSolid(ppt.ColorBlue))
 cell.SetColSpan(2)
 cell.SetRowSpan(1)
+
+// Cell borders are per side, and the width is in points.
+cell.GetBorders().Top.SetSolidFill(ppt.ColorRed).SetWidth(2)
+cell.GetBorders().Bottom.Style = ppt.BorderDash // BorderSolid / BorderDash / BorderDot
+
+// A merge is written as gridSpan/rowSpan on the spanning cell plus the empty
+// continuation cells PowerPoint expects for the positions it covers, so a row
+// always holds one <a:tc> per column. Text on a cell another cell spans is not
+// written — that position belongs to the span.
+//
+// A table read from a file keeps its <a:gridCol> widths and <a:tr> heights when
+// it is saved again; a table built through the API is split evenly.
 ```
 
 #### AutoShape
@@ -457,10 +474,26 @@ align.Level = 2 // indentation level
 
 #### Hyperlink
 
+A hyperlink lives on a text run. Both kinds are written to the file and read
+back, so a presentation that is opened and saved again keeps them:
+
 ```go
 ppt.NewHyperlink("https://example.com")       // external
 ppt.NewInternalHyperlink(2)                     // link to slide 2
+
+run.SetHyperlink(link)          // put it on a run
+run.GetHyperlink().URL          // https://example.com
+run.GetHyperlink().SlideNumber  // 2
 ```
+
+An internal link names a slide by number. A number no slide in the presentation
+backs is not written at all, rather than written as a relationship pointing at a
+slide part that does not exist.
+
+Not serialized: a hyperlink set on the shape itself with
+`shape.BaseShape.SetHyperlink`. It is stored on the shape but never reaches the
+file — no `<a:hlinkClick>` is written into the shape's `<p:cNvPr>`, and the
+reader does not look for one. Put the link on a run instead.
 
 ---
 
@@ -692,11 +725,16 @@ p.GetDocumentProperties().Description = "描述"
 
 // 自定义属性
 p.GetDocumentProperties().SetCustomProperty("版本", "1.0", ppt.PropertyTypeString)
+// 自定义属性写入 docProps/custom.xml，并在 [Content_Types].xml 中声明、
+// 由 _rels/.rels 建立关系；只有设置了至少一个自定义属性时才会写出该部件。
 
 // 演示文稿属性
 p.GetPresentationProperties().SetZoom(1.5)
 p.GetPresentationProperties().SetLastView(ppt.ViewSlide)
 p.GetPresentationProperties().SetSlideshowType(ppt.SlideshowTypePresent)
+// 缩放、上次视图、放映方式会写入文件（ppt/viewProps.xml 与 ppt/presProps.xml）。
+// SetCommentVisible 与 MarkAsFinal 仅存在于内存：承载它们的扩展未写出，
+// 保存后不会保留。
 
 // 布局
 p.GetLayout().SetLayout(ppt.LayoutScreen16x9)
@@ -748,7 +786,7 @@ shape.BaseShape.SetRotation(45)      // 度
 shape.BaseShape.SetFill(fill)
 shape.BaseShape.SetBorder(border)
 shape.BaseShape.SetShadow(shadow)
-shape.BaseShape.SetHyperlink(ppt.NewHyperlink("https://example.com"))
+shape.BaseShape.SetHyperlink(ppt.NewHyperlink("https://example.com")) // 尚未序列化 — 见「超链接」
 ```
 
 #### 富文本形状 (RichTextShape)
@@ -811,6 +849,17 @@ cell := table.GetCell(0, 0)
 cell.SetText("表头")
 cell.SetFill(ppt.NewFill().SetSolid(ppt.ColorBlue))
 cell.SetColSpan(2)
+
+// 单元格边框按边设置，宽度单位是磅。
+cell.GetBorders().Top.SetSolidFill(ppt.ColorRed).SetWidth(2)
+cell.GetBorders().Bottom.Style = ppt.BorderDash // BorderSolid / BorderDash / BorderDot
+
+// 合并会写成跨格单元上的 gridSpan/rowSpan，以及 PowerPoint 期望的、覆盖位置上的
+// 空续格，因此每行始终有与列数相同的 <a:tc>。被其他单元跨过的单元格上的文字不会
+// 写出——那个位置属于合并区域。
+//
+// 从文件读入的表格在再次保存时会保留其 <a:gridCol> 列宽与 <a:tr> 行高；
+// 通过 API 新建的表格则按列数均分。
 ```
 
 #### 自动形状 (AutoShape)
@@ -1073,10 +1122,22 @@ align.SetVertical(ppt.VerticalMiddle)      // t, ctr, b
 
 #### 超链接
 
+超链接挂在文本 run 上。两种链接都会写入文件并读回，因此「打开再保存」不会丢：
+
 ```go
 ppt.NewHyperlink("https://example.com")  // 外部链接
 ppt.NewInternalHyperlink(2)               // 链接到第 2 张幻灯片
+
+run.SetHyperlink(link)          // 挂到 run 上
+run.GetHyperlink().URL          // https://example.com
+run.GetHyperlink().SlideNumber  // 2
 ```
+
+内部链接用幻灯片序号指定目标。指向不存在的幻灯片时**不写出**，而不是写一条指向不存在部件的
+关系。
+
+尚未序列化：用 `shape.BaseShape.SetHyperlink` 设在形状本身上的超链接。它只存在模型里，不会
+进文件——形状的 `<p:cNvPr>` 里不会写 `<a:hlinkClick>`，读取端也不找它。请把链接挂在 run 上。
 
 ---
 
