@@ -565,11 +565,15 @@ func (r *PPTXReader) parseSlideXML(decoder *xml.Decoder, slide *Slide, rels []xm
 	var pendingBlipFillData []byte
 	var pendingBlipFillMime string
 
-	// Background blipFill image data (bgPr blipFill)
-	// TODO: use these to set slide.background as an image fill
+	// Background blipFill image data (bgPr blipFill). The picture becomes a
+	// full-slide DrawingShape prepended to the shape list; its crop and opacity
+	// have to be collected here because they are siblings of the <a:blip>
+	// rather than children of a <p:pic>, which is what the picture cases below
+	// are keyed on.
 	var bgBlipFillData []byte
 	var bgBlipFillMime string
-	_, _ = bgBlipFillData, bgBlipFillMime
+	var bgCropLeft, bgCropTop, bgCropRight, bgCropBottom int
+	var bgAlpha int
 
 	// Group shape nesting
 	grpDepth := 0
@@ -2088,37 +2092,26 @@ func (r *PPTXReader) parseSlideXML(decoder *xml.Decoder, slide *Slide, rels []xm
 					}
 				}
 			case "alphaModFix":
+				// <a:alphaModFix amt="50000"/> is a child of <a:blip>, so it
+				// occurs both under a <p:pic> and under a background's
+				// blipFill. Only the first was collected, which left a
+				// translucent background image fully opaque.
 				if state.inPic && currentDrawing != nil {
-					for _, attr := range t.Attr {
-						if attr.Name.Local == "amt" {
-							if v, err := strconv.Atoi(attr.Value); err == nil {
-								currentDrawing.alpha = v
-							}
-						}
+					if v, ok := intAttrValue(t, "amt"); ok {
+						currentDrawing.alpha = v
+					}
+				} else if state.inBgBlipFill {
+					if v, ok := intAttrValue(t, "amt"); ok {
+						bgAlpha = v
 					}
 				}
 			case "srcRect":
 				if state.inPic && currentDrawing != nil {
-					for _, attr := range t.Attr {
-						switch attr.Name.Local {
-						case "l":
-							if v, err := strconv.Atoi(attr.Value); err == nil {
-								currentDrawing.cropLeft = v
-							}
-						case "t":
-							if v, err := strconv.Atoi(attr.Value); err == nil {
-								currentDrawing.cropTop = v
-							}
-						case "r":
-							if v, err := strconv.Atoi(attr.Value); err == nil {
-								currentDrawing.cropRight = v
-							}
-						case "b":
-							if v, err := strconv.Atoi(attr.Value); err == nil {
-								currentDrawing.cropBottom = v
-							}
-						}
-					}
+					l, top, r, b := cropFromAttrs(t)
+					currentDrawing.cropLeft, currentDrawing.cropTop = l, top
+					currentDrawing.cropRight, currentDrawing.cropBottom = r, b
+				} else if state.inBgBlipFill {
+					bgCropLeft, bgCropTop, bgCropRight, bgCropBottom = cropFromAttrs(t)
 				}
 			case "ln":
 				if state.inSpPr {
@@ -3060,6 +3053,12 @@ func (r *PPTXReader) parseSlideXML(decoder *xml.Decoder, slide *Slide, rels []xm
 		ds.offsetY = 0
 		ds.width = pres.layout.CX
 		ds.height = pres.layout.CY
+		// A background picture carries its crop and opacity on the same
+		// siblings a <p:pic> uses, so carry them over rather than drawing the
+		// whole image stretched.
+		ds.cropLeft, ds.cropTop = bgCropLeft, bgCropTop
+		ds.cropRight, ds.cropBottom = bgCropRight, bgCropBottom
+		ds.alpha = bgAlpha
 		slide.shapes = append([]Shape{ds}, slide.shapes...)
 	}
 
@@ -3115,6 +3114,33 @@ func embedRelID(t xml.StartElement) string {
 		}
 	}
 	return ""
+}
+
+// intAttrValue returns the named attribute as an int. It reports false when the
+// attribute is absent or not an integer, so callers can leave the previous
+// value (or the zero value) alone instead of writing a silent 0.
+func intAttrValue(t xml.StartElement, local string) (int, bool) {
+	for _, attr := range t.Attr {
+		if attr.Name.Local == local {
+			if v, err := strconv.Atoi(attr.Value); err == nil {
+				return v, true
+			}
+			return 0, false
+		}
+	}
+	return 0, false
+}
+
+// cropFromAttrs reads the l/t/r/b of an <a:srcRect>. The values are signed
+// percentages in 1/1000 of a percent, and PowerPoint uses negatives for a
+// picture cropped outwards (the "fill" mode), so they must not be clamped to
+// zero.
+func cropFromAttrs(t xml.StartElement) (left, top, right, bottom int) {
+	left, _ = intAttrValue(t, "l")
+	top, _ = intAttrValue(t, "t")
+	right, _ = intAttrValue(t, "r")
+	bottom, _ = intAttrValue(t, "b")
+	return left, top, right, bottom
 }
 
 // imageRelData resolves an image relationship to the bytes of the part it
@@ -3674,6 +3700,11 @@ func (r *PPTXReader) parseLayoutBackground(data []byte, rels []xmlRelForRead, zr
 	inSolidFill := false
 	inBlipFill := false
 
+	// The background picture is not returned the moment its <a:blip> is seen:
+	// <a:srcRect> and <a:alphaModFix> are siblings that follow it, so bailing
+	// out there is what made a cropped layout background render stretched.
+	var bgDS *DrawingShape
+
 	for {
 		token, err := decoder.Token()
 		if err != nil {
@@ -3700,13 +3731,23 @@ func (r *PPTXReader) parseLayoutBackground(data []byte, rels []xmlRelForRead, zr
 			case "blip", "svgBlip":
 				// Both tags name the background part through r:embed; which one
 				// carries it depends on whether the artwork is a raster or an
-				// SVG written through the Microsoft extension.
-				if inBlipFill {
+				// SVG written through the Microsoft extension. A raster on
+				// <a:blip> wins over the SVG fallback, so the first hit is kept.
+				if inBlipFill && bgDS == nil {
 					if data, mime := imageRelData(rels, layoutPath, zr, embedRelID(t)); data != nil {
-						ds := NewDrawingShape()
-						ds.data = data
-						ds.mimeType = mime
-						return nil, ds
+						bgDS = NewDrawingShape()
+						bgDS.data = data
+						bgDS.mimeType = mime
+					}
+				}
+			case "srcRect":
+				if inBlipFill && bgDS != nil {
+					bgDS.cropLeft, bgDS.cropTop, bgDS.cropRight, bgDS.cropBottom = cropFromAttrs(t)
+				}
+			case "alphaModFix":
+				if inBlipFill && bgDS != nil {
+					if v, ok := intAttrValue(t, "amt"); ok {
+						bgDS.alpha = v
 					}
 				}
 			case "srgbClr":
@@ -3752,6 +3793,9 @@ func (r *PPTXReader) parseLayoutBackground(data []byte, rels []xmlRelForRead, zr
 				inSolidFill = false
 			case "blipFill":
 				inBlipFill = false
+				if bgDS != nil {
+					return nil, bgDS
+				}
 			}
 		}
 	}

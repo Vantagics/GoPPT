@@ -4,6 +4,7 @@ import (
 	"archive/zip"
 	"fmt"
 	"os"
+	"sort"
 	"strings"
 )
 
@@ -356,7 +357,7 @@ func (w *PPTXWriter) writeRichTextShapeXML(s *RichTextShape, shapeID *int) strin
 	xfAttrs := xfrmAttrs(&s.BaseShape)
 
 	fillXML := w.writeFillXML(s.GetFill())
-	borderXML := w.writeBorderXML(s.GetBorder())
+	borderXML := w.writeBorderXMLWithEnds(s.GetBorder(), s.headEnd, s.tailEnd)
 
 	var paragraphsXML strings.Builder
 	for _, para := range s.paragraphs {
@@ -379,9 +380,7 @@ func (w *PPTXWriter) writeRichTextShapeXML(s *RichTextShape, shapeID *int) strin
             <a:off x="%d" y="%d"/>
             <a:ext cx="%d" cy="%d"/>
           </a:xfrm>
-          <a:prstGeom prst="rect">
-            <a:avLst/>
-          </a:prstGeom>
+%s
 %s%s        </p:spPr>
         <p:txBody>
           <a:bodyPr wrap="%s" numCol="%d"%s>%s</a:bodyPr>
@@ -390,6 +389,7 @@ func (w *PPTXWriter) writeRichTextShapeXML(s *RichTextShape, shapeID *int) strin
       </p:sp>
 `, id, xmlEscape(name), descrAttr, xfAttrs,
 		s.offsetX, s.offsetY, s.width, s.height,
+		shapeGeomXML("rect", nil, s.customPath, "          "),
 		fillXML, borderXML,
 		boolToWrap(s.wordWrap), s.columns, textAnchorAttr(s.textAnchor),
 		normAutofitXML(s.fontScale),
@@ -546,6 +546,159 @@ func (w *PPTXWriter) writeTextRunXMLAt(tr *TextRun, indent string) string {
 `, indent, inner, attrs, solidFill, latin, ea, hlink, inner, inner, xmlEscape(tr.text), indent)
 }
 
+// --- Geometry ---
+
+// shapeGeomXML serialises the geometry child of a <p:spPr>: <a:custGeom> when
+// the shape carries a custom path, otherwise <a:prstGeom> with its adjustment
+// list.
+//
+// Custom geometry and preset geometry are alternatives in the schema, so a
+// shape with a custom path must not also carry a prstGeom. The writer used to
+// emit <a:prstGeom prst="rect"> unconditionally, which turned every freeform
+// shape into a rectangle on save — the reader and the renderer both handled the
+// path, only the byte that leaves the library did not.
+func shapeGeomXML(prst string, adj map[string]int, cp *CustomGeomPath, indent string) string {
+	if cp != nil && len(cp.Commands) > 0 {
+		return custGeomXML(cp, indent)
+	}
+	return prstGeomXML(prst, adj, indent)
+}
+
+// prstGeomXML serialises <a:prstGeom> together with its adjustment list.
+//
+// Every caller used to emit a hardcoded <a:avLst/>, so a rounded rectangle's
+// corner radius, an arrow's proportions, a callout's tail position and a bent
+// connector's knee were read from the file, drawn by the renderer, and then
+// dropped on save — PowerPoint reverted each of them to the preset default.
+//
+// The names are sorted because Go randomises map iteration: without it the same
+// model produces different bytes on two consecutive saves.
+func prstGeomXML(prst string, adj map[string]int, indent string) string {
+	inner := indent + "  "
+	var b strings.Builder
+	fmt.Fprintf(&b, "%s<a:prstGeom prst=\"%s\">\n", indent, xmlEscape(prst))
+	if len(adj) == 0 {
+		fmt.Fprintf(&b, "%s<a:avLst/>\n", inner)
+	} else {
+		fmt.Fprintf(&b, "%s<a:avLst>\n", inner)
+		for _, name := range sortedAdjustNames(adj) {
+			fmt.Fprintf(&b, "%s  <a:gd name=\"%s\" fmla=\"val %d\"/>\n", inner, xmlEscape(name), adj[name])
+		}
+		fmt.Fprintf(&b, "%s</a:avLst>\n", inner)
+	}
+	fmt.Fprintf(&b, "%s</a:prstGeom>", indent)
+	return b.String()
+}
+
+// sortedAdjustNames returns an adjustment map's keys in a stable order.
+func sortedAdjustNames(adj map[string]int) []string {
+	names := make([]string, 0, len(adj))
+	for name := range adj {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	return names
+}
+
+// custGeomXML serialises a custom geometry path as <a:custGeom>.
+//
+// The child order is fixed by CT_CustomGeometry2D — avLst, gdLst, ahLst, cxnLst,
+// rect, pathLst — and the four empty lists are emitted because PowerPoint
+// writes them and the schema expects pathLst last. The commands mirror exactly
+// what the reader parses, so a path survives a read/write round trip unchanged.
+//
+// A path whose coordinate space is unknown (w or h unset, which is what a path
+// built through the API starts as) falls back to the shape's own extents, and
+// the renderer draws nothing at all for a non-positive space. Negative
+// coordinates are legal in a path, so they are written as they stand.
+func custGeomXML(cp *CustomGeomPath, indent string) string {
+	inner := indent + "  "
+	w, h := cp.Width, cp.Height
+	if w <= 0 || h <= 0 {
+		// The caller's shape extents are not visible here, so fall back to the
+		// path's own bounds: the smallest box that contains every point.
+		w, h = pathBounds(cp)
+	}
+	var b strings.Builder
+	fmt.Fprintf(&b, "%s<a:custGeom>\n", indent)
+	fmt.Fprintf(&b, "%s<a:avLst/>\n", inner)
+	fmt.Fprintf(&b, "%s<a:gdLst/>\n", inner)
+	fmt.Fprintf(&b, "%s<a:ahLst/>\n", inner)
+	fmt.Fprintf(&b, "%s<a:cxnLst/>\n", inner)
+	fmt.Fprintf(&b, "%s<a:rect l=\"0\" t=\"0\" r=\"0\" b=\"0\"/>\n", inner)
+	fmt.Fprintf(&b, "%s<a:pathLst>\n", inner)
+	fmt.Fprintf(&b, "%s  <a:path w=\"%d\" h=\"%d\">\n", inner, w, h)
+	for _, cmd := range cp.Commands {
+		b.WriteString(pathCommandXML(cmd, inner+"    "))
+	}
+	fmt.Fprintf(&b, "%s  </a:path>\n", inner)
+	fmt.Fprintf(&b, "%s</a:pathLst>\n", inner)
+	fmt.Fprintf(&b, "%s</a:custGeom>", indent)
+	return b.String()
+}
+
+// pathCommandXML serialises one path command. A command with fewer points than
+// it requires is skipped rather than emitted half-formed: the reader appends
+// whatever <a:pt> children it sees to the last command, so a truncated
+// cubicBezTo would parse as a two-point curve and draw a wrong shape.
+func pathCommandXML(cmd PathCommand, indent string) string {
+	switch cmd.Type {
+	case "moveTo", "lnTo":
+		if len(cmd.Pts) < 1 {
+			return ""
+		}
+		return fmt.Sprintf("%s<a:%s><a:pt x=\"%d\" y=\"%d\"/></a:%s>\n",
+			indent, cmd.Type, cmd.Pts[0].X, cmd.Pts[0].Y, cmd.Type)
+	case "cubicBezTo":
+		if len(cmd.Pts) < 3 {
+			return ""
+		}
+		return fmt.Sprintf("%s<a:cubicBezTo><a:pt x=\"%d\" y=\"%d\"/><a:pt x=\"%d\" y=\"%d\"/><a:pt x=\"%d\" y=\"%d\"/></a:cubicBezTo>\n",
+			indent, cmd.Pts[0].X, cmd.Pts[0].Y, cmd.Pts[1].X, cmd.Pts[1].Y, cmd.Pts[2].X, cmd.Pts[2].Y)
+	case "quadBezTo":
+		if len(cmd.Pts) < 2 {
+			return ""
+		}
+		return fmt.Sprintf("%s<a:quadBezTo><a:pt x=\"%d\" y=\"%d\"/><a:pt x=\"%d\" y=\"%d\"/></a:quadBezTo>\n",
+			indent, cmd.Pts[0].X, cmd.Pts[0].Y, cmd.Pts[1].X, cmd.Pts[1].Y)
+	case "arcTo":
+		return fmt.Sprintf("%s<a:arcTo wR=\"%d\" hR=\"%d\" stAng=\"%d\" swAng=\"%d\"/>\n",
+			indent, cmd.WR, cmd.HR, cmd.StAng, cmd.SwAng)
+	case "close":
+		return fmt.Sprintf("%s<a:close/>\n", indent)
+	default:
+		// An unknown command names a path element this library does not model.
+		// Dropping it keeps the file valid; inventing an element would not.
+		return ""
+	}
+}
+
+// pathBounds returns the smallest box containing every point of a path, used
+// when the path carries no coordinate space of its own. It never returns zero,
+// so the result is always a usable <a:path w h>.
+func pathBounds(cp *CustomGeomPath) (int64, int64) {
+	maxX, maxY := int64(1), int64(1)
+	for _, cmd := range cp.Commands {
+		for _, p := range cmd.Pts {
+			if p.X > maxX {
+				maxX = p.X
+			}
+			if p.Y > maxY {
+				maxY = p.Y
+			}
+		}
+		if cmd.Type == "arcTo" {
+			if cmd.WR > maxX {
+				maxX = cmd.WR
+			}
+			if cmd.HR > maxY {
+				maxY = cmd.HR
+			}
+		}
+	}
+	return maxX, maxY
+}
+
 // --- Drawing Shape XML ---
 
 func (w *PPTXWriter) writeDrawingShapeXML(s *DrawingShape, shapeID *int, slideNum int) string {
@@ -588,7 +741,7 @@ func (w *PPTXWriter) writeDrawingShapeXML(s *DrawingShape, shapeID *int, slideNu
           <p:nvPr/>
         </p:nvPicPr>
         <p:blipFill>
-          <a:blip r:embed="rId%d"/>
+          %s
           <a:stretch>
             <a:fillRect/>
           </a:stretch>
@@ -604,10 +757,37 @@ func (w *PPTXWriter) writeDrawingShapeXML(s *DrawingShape, shapeID *int, slideNu
         </p:spPr>
       </p:pic>
 `, id, xmlEscape(name), xmlEscape(s.description),
-		relIdx,
+		blipFillChildrenXML(relIdx, s.alpha, s.cropLeft, s.cropTop, s.cropRight, s.cropBottom),
 		xfrmAttrs(&s.BaseShape),
 		s.offsetX, s.offsetY, s.width, s.height,
 		shadowXML)
+}
+
+// blipFillChildrenXML serialises the children of <p:blipFill> that describe the
+// image itself: the reference, its crop and the picture's opacity.
+//
+// They are built together because CT_BlipFillProperties fixes their order —
+// blip, then srcRect, then stretch — and the opacity is a child *of the blip*,
+// so formatting the three independently would either reorder them or leave
+// blank lines behind when one is absent. A crop or an opacity that is absent
+// produces no element, which is what PowerPoint does.
+//
+// alpha is in 1/1000 of a percent, where 0 means fully opaque; a stored 100000
+// is equally a no-op, so neither produces an <a:alphaModFix>. The srcRect
+// values are signed percentages in the same 1/1000 unit, and negatives are
+// meaningful (a picture cropped outwards), so they are written as they stand.
+func blipFillChildrenXML(relIdx, alpha, left, top, right, bottom int) string {
+	blip := fmt.Sprintf(`<a:blip r:embed="rId%d"/>`, relIdx)
+	if alpha > 0 && alpha < 100000 {
+		blip = fmt.Sprintf(`<a:blip r:embed="rId%d">
+            <a:alphaModFix amt="%d"/>
+          </a:blip>`, relIdx, alpha)
+	}
+	if left != 0 || top != 0 || right != 0 || bottom != 0 {
+		blip += fmt.Sprintf(`
+          <a:srcRect l="%d" t="%d" r="%d" b="%d"/>`, left, top, right, bottom)
+	}
+	return blip
 }
 
 // --- Auto Shape XML ---
@@ -622,7 +802,7 @@ func (w *PPTXWriter) writeAutoShapeXML(s *AutoShape, shapeID *int) string {
 	}
 
 	fillXML := w.writeFillXML(s.GetFill())
-	borderXML := w.writeBorderXML(s.GetBorder())
+	borderXML := w.writeBorderXMLWithEnds(s.GetBorder(), s.headEnd, s.tailEnd)
 
 	textXML := ""
 	if s.text != "" {
@@ -655,15 +835,13 @@ func (w *PPTXWriter) writeAutoShapeXML(s *AutoShape, shapeID *int) string {
             <a:off x="%d" y="%d"/>
             <a:ext cx="%d" cy="%d"/>
           </a:xfrm>
-          <a:prstGeom prst="%s">
-            <a:avLst/>
-          </a:prstGeom>
+%s
 %s%s        </p:spPr>%s
       </p:sp>
 `, id, xmlEscape(name), descrAttr,
 		xfrmAttrs(&s.BaseShape),
 		s.offsetX, s.offsetY, s.width, s.height,
-		s.shapeType,
+		shapeGeomXML(string(s.shapeType), s.adjustValues, nil, "          "),
 		fillXML, borderXML, textXML)
 }
 
@@ -678,16 +856,8 @@ func (w *PPTXWriter) writeLineShapeXML(s *LineShape, shapeID *int) string {
 		name = fmt.Sprintf("Line %d", id)
 	}
 
-	// Build headEnd/tailEnd XML
-	var headEndXML, tailEndXML string
-	if s.headEnd != nil && s.headEnd.Type != ArrowNone && s.headEnd.Type != "" {
-		headEndXML = fmt.Sprintf(`
-            <a:headEnd type="%s" w="%s" len="%s"/>`, s.headEnd.Type, s.headEnd.Width, s.headEnd.Length)
-	}
-	if s.tailEnd != nil && s.tailEnd.Type != ArrowNone && s.tailEnd.Type != "" {
-		tailEndXML = fmt.Sprintf(`
-            <a:tailEnd type="%s" w="%s" len="%s"/>`, s.tailEnd.Type, s.tailEnd.Width, s.tailEnd.Length)
-	}
+	// Arrow ends, as they are written inside <a:ln> below.
+	endsXML := lineEndXML(s.headEnd, s.tailEnd, "\n            ")
 
 	prstGeom := "line"
 	if s.connectorType != "" {
@@ -714,23 +884,39 @@ func (w *PPTXWriter) writeLineShapeXML(s *LineShape, shapeID *int) string {
             <a:off x="%d" y="%d"/>
             <a:ext cx="%d" cy="%d"/>
           </a:xfrm>
-          <a:prstGeom prst="%s">
-            <a:avLst/>
-          </a:prstGeom>
+%s
           <a:ln w="%d">
             <a:solidFill>
               <a:srgbClr val="%s"/>
-            </a:solidFill>%s%s%s
+            </a:solidFill>%s%s
           </a:ln>
         </p:spPr>
       </p:cxnSp>
 `, id, xmlEscape(name),
 		xfrmAttrs(&s.BaseShape),
 		s.offsetX, s.offsetY, s.width, s.height,
-		prstGeom,
+		shapeGeomXML(prstGeom, s.adjustValues, s.customPath, "          "),
 		int64(s.GetLineWidthEMU()),
 		colorRGB(s.lineColor),
-		dashXML, headEndXML, tailEndXML)
+		dashXML, endsXML)
+}
+
+// lineEndXML serialises the arrow ends of an <a:ln>. Both arrow ends are drawn
+// by the renderer and read back from the file, so a shape that carries them has
+// to write them; prefix is placed before each element so the same helper serves
+// an element written inline and one written on its own line.
+//
+// An absent end, or one whose type is ArrowNone, produces nothing: that is the
+// schema default, and writing type="none" explicitly would be noise.
+func lineEndXML(head, tail *LineEnd, prefix string) string {
+	var b strings.Builder
+	if head != nil && head.Type != ArrowNone && head.Type != "" {
+		fmt.Fprintf(&b, "%s<a:headEnd type=\"%s\" w=\"%s\" len=\"%s\"/>", prefix, head.Type, head.Width, head.Length)
+	}
+	if tail != nil && tail.Type != ArrowNone && tail.Type != "" {
+		fmt.Fprintf(&b, "%s<a:tailEnd type=\"%s\" w=\"%s\" len=\"%s\"/>", prefix, tail.Type, tail.Width, tail.Length)
+	}
+	return b.String()
 }
 
 // --- Table Shape XML ---
@@ -1019,6 +1205,17 @@ func (w *PPTXWriter) writeFillXML(f *Fill) string {
 // converted to EMU here. Writing it raw made every border shrink to roughly
 // 1/12700 of its intended width on a read/write round trip.
 func (w *PPTXWriter) writeBorderXML(b *Border) string {
+	return w.writeBorderXMLWithEnds(b, nil, nil)
+}
+
+// writeBorderXMLWithEnds is writeBorderXML for a shape that also carries arrow
+// ends. A shape's <a:ln> owns its headEnd/tailEnd, so a shape whose line is
+// drawn with arrowheads — an arc, or a freeform path — loses them if the ends
+// are not emitted with the border they belong to.
+//
+// The child order is the one CT_LineProperties fixes: the fill, then the dash,
+// then headEnd and tailEnd.
+func (w *PPTXWriter) writeBorderXMLWithEnds(b *Border, head, tail *LineEnd) string {
 	if b == nil || b.Style == BorderNone {
 		return ""
 	}
@@ -1030,12 +1227,8 @@ func (w *PPTXWriter) writeBorderXML(b *Border) string {
 	case BorderDot:
 		dashXML = "<a:prstDash val=\"dot\"/>"
 	}
-	if dashXML != "" {
-		return fmt.Sprintf("          <a:ln w=\"%d\"><a:solidFill><a:srgbClr val=\"%s\"/></a:solidFill>%s</a:ln>\n",
-			widthEMU, colorRGB(b.Color), dashXML)
-	}
-	return fmt.Sprintf("          <a:ln w=\"%d\"><a:solidFill><a:srgbClr val=\"%s\"/></a:solidFill></a:ln>\n",
-		widthEMU, colorRGB(b.Color))
+	return fmt.Sprintf("          <a:ln w=\"%d\"><a:solidFill><a:srgbClr val=\"%s\"/></a:solidFill>%s%s</a:ln>\n",
+		widthEMU, colorRGB(b.Color), dashXML, lineEndXML(head, tail, ""))
 }
 
 // --- Media ---
@@ -1217,7 +1410,7 @@ func (w *PPTXWriter) writePlaceholderShapeXML(s *PlaceholderShape, shapeID *int)
             <a:spLocks noGrp="1"/>
           </p:cNvSpPr>
           <p:nvPr>
-            <p:ph type="%s" idx="%d"/>
+            <p:ph%s/>
           </p:nvPr>
         </p:nvSpPr>
         <p:spPr>
@@ -1232,10 +1425,24 @@ func (w *PPTXWriter) writePlaceholderShapeXML(s *PlaceholderShape, shapeID *int)
 %s        </p:txBody>
       </p:sp>
 `, id, xmlEscape(name),
-		s.phType, s.phIdx,
+		placeholderAttrsXML(s.phType, s.phIdx),
 		xfrmAttrs(&s.BaseShape),
 		s.offsetX, s.offsetY, s.width, s.height,
 		paragraphsXML.String())
+}
+
+// placeholderAttrsXML serialises the attributes of <p:ph>.
+//
+// The type is optional in the schema: a placeholder that inherits its type from
+// the layout omits the attribute entirely, and such placeholders are common.
+// ST_PlaceholderType is an enumeration with no empty member, so emitting
+// type="" produces a file PowerPoint refuses to open cleanly — while this
+// library's own reader accepts it, which is why no round-trip test can see it.
+func placeholderAttrsXML(phType PlaceholderType, phIdx int) string {
+	if phType == "" {
+		return fmt.Sprintf(` idx="%d"`, phIdx)
+	}
+	return fmt.Sprintf(` type="%s" idx="%d"`, xmlEscape(string(phType)), phIdx)
 }
 
 // --- Notes Slide ---
@@ -1351,7 +1558,7 @@ func (w *PPTXWriter) writeBulletXML(b *Bullet) string {
 		// char="" is what makes PowerPoint offer to repair the file.
 		char := b.Style
 		if char == "" {
-			char = "•"
+			char = defaultBulletChar
 		}
 		sb.WriteString(fmt.Sprintf("\n              <a:buChar char=\"%s\"/>", xmlEscape(char)))
 	case BulletTypeNumeric, BulletTypeAutoNum:
@@ -1362,11 +1569,11 @@ func (w *PPTXWriter) writeBulletXML(b *Bullet) string {
 		// preview showed "1." and the file had no bullet.
 		format := b.NumFormat
 		if format == "" {
-			format = NumFormatArabicPeriod
+			format = defaultNumFormat
 		}
 		startAt := b.StartAt
-		if startAt < 1 {
-			startAt = 1
+		if startAt < defaultBulletStart {
+			startAt = defaultBulletStart
 		}
 		sb.WriteString(fmt.Sprintf("\n              <a:buAutoNum type=\"%s\" startAt=\"%d\"/>", xmlEscape(format), startAt))
 	}

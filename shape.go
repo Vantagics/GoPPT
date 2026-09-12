@@ -325,9 +325,36 @@ func (r *RichTextShape) GetTextAnchor() TextAnchorType {
 	return r.textAnchor
 }
 
-// GetCustomPath returns the custom geometry path, if any.
+// GetCustomPath returns the custom geometry path, or nil for a shape that uses
+// preset geometry.
 func (r *RichTextShape) GetCustomPath() *CustomGeomPath {
 	return r.customPath
+}
+
+// SetCustomPath sets a custom geometry path. A shape with a path is written as
+// <a:custGeom> instead of <a:prstGeom>, and the path's Width and Height are its
+// coordinate space: the renderer scales that space onto the shape's frame.
+func (r *RichTextShape) SetCustomPath(cp *CustomGeomPath) *RichTextShape {
+	r.customPath = cp
+	return r
+}
+
+// GetHeadEnd returns the arrow drawn at the start of a custom path.
+func (r *RichTextShape) GetHeadEnd() *LineEnd { return r.headEnd }
+
+// SetHeadEnd sets the arrow drawn at the start of a custom path.
+func (r *RichTextShape) SetHeadEnd(e *LineEnd) *RichTextShape {
+	r.headEnd = e
+	return r
+}
+
+// GetTailEnd returns the arrow drawn at the end of a custom path.
+func (r *RichTextShape) GetTailEnd() *LineEnd { return r.tailEnd }
+
+// SetTailEnd sets the arrow drawn at the end of a custom path.
+func (r *RichTextShape) SetTailEnd(e *LineEnd) *RichTextShape {
+	r.tailEnd = e
+	return r
 }
 
 // Paragraph represents a text paragraph.
@@ -573,8 +600,26 @@ func (d *DrawingShape) GetCropRight() int { return d.cropRight }
 // GetCropBottom returns the bottom crop percentage (in 1/1000 of a percent).
 func (d *DrawingShape) GetCropBottom() int { return d.cropBottom }
 
+// SetCrop sets the four crop percentages, in 1/1000 of a percent (56333 =
+// 56.333%), matching the getters. Negative values crop the picture outwards,
+// which is how a picture in "fill" mode is expressed; all four zero removes the
+// crop. The crop is written as <a:srcRect> and is also applied by the renderer.
+func (d *DrawingShape) SetCrop(left, top, right, bottom int) *DrawingShape {
+	d.cropLeft, d.cropTop = left, top
+	d.cropRight, d.cropBottom = right, bottom
+	return d
+}
+
 // GetAlphaValue returns the alphaModFix amount (0-100000).
 func (d *DrawingShape) GetAlphaValue() int { return d.alpha }
+
+// SetAlphaValue sets the picture's opacity in 1/1000 of a percent (50000 =
+// 50%). Zero means fully opaque, which is also the default. It is written as
+// <a:alphaModFix amt="..."/> and is also applied by the renderer.
+func (d *DrawingShape) SetAlphaValue(amount int) *DrawingShape {
+	d.alpha = amount
+	return d
+}
 
 // AutoShape represents a predefined shape (rectangle, ellipse, etc.).
 type AutoShape struct {
@@ -706,14 +751,40 @@ func (a *AutoShape) GetParagraphs() []*Paragraph {
 	return a.paragraphs
 }
 
-// GetAdjustValues returns the adjustment values map.
 // GetHeadEnd returns the head end arrow.
 func (a *AutoShape) GetHeadEnd() *LineEnd { return a.headEnd }
 
+// SetHeadEnd sets the head end arrow.
+func (a *AutoShape) SetHeadEnd(e *LineEnd) *AutoShape {
+	a.headEnd = e
+	return a
+}
+
 // GetTailEnd returns the tail end arrow.
 func (a *AutoShape) GetTailEnd() *LineEnd { return a.tailEnd }
+
+// SetTailEnd sets the tail end arrow.
+func (a *AutoShape) SetTailEnd(e *LineEnd) *AutoShape {
+	a.tailEnd = e
+	return a
+}
+
+// GetAdjustValues returns the adjustment values map, which is nil until one is
+// set.
 func (a *AutoShape) GetAdjustValues() map[string]int {
 	return a.adjustValues
+}
+
+// SetAdjustValue sets a single preset-geometry adjustment ("adj", "adj1", ...).
+// The value is in the units the preset geometry defines — the same number the
+// file carries — and the map is created on first use, since a nil map cannot be
+// assigned to.
+func (a *AutoShape) SetAdjustValue(name string, value int) *AutoShape {
+	if a.adjustValues == nil {
+		a.adjustValues = make(map[string]int)
+	}
+	a.adjustValues[name] = value
+	return a
 }
 
 // LineShape represents a line shape.
@@ -798,8 +869,38 @@ func (l *LineShape) GetTailEnd() *LineEnd { return l.tailEnd }
 // GetConnectorType returns the connector type (prstGeom value).
 func (l *LineShape) GetConnectorType() string { return l.connectorType }
 
-// GetAdjustValues returns the adjustment values for connector geometry.
+// SetConnectorType sets the connector type, which is the prstGeom value the
+// shape is written with ("straightConnector1", "bentConnector3", ...). An empty
+// value writes a plain line.
+func (l *LineShape) SetConnectorType(connector string) *LineShape {
+	l.connectorType = connector
+	return l
+}
+
+// GetAdjustValues returns the adjustment values for connector geometry, which
+// is nil until one is set.
 func (l *LineShape) GetAdjustValues() map[string]int { return l.adjustValues }
+
+// SetAdjustValue sets a single connector geometry adjustment ("adj1", ...),
+// creating the map on first use.
+func (l *LineShape) SetAdjustValue(name string, value int) *LineShape {
+	if l.adjustValues == nil {
+		l.adjustValues = make(map[string]int)
+	}
+	l.adjustValues[name] = value
+	return l
+}
+
+// GetCustomPath returns the custom geometry path, or nil for a connector that
+// uses preset geometry.
+func (l *LineShape) GetCustomPath() *CustomGeomPath { return l.customPath }
+
+// SetCustomPath sets a custom geometry path, which replaces the connector's
+// preset geometry when the shape is written.
+func (l *LineShape) SetCustomPath(cp *CustomGeomPath) *LineShape {
+	l.customPath = cp
+	return l
+}
 
 // TableShape represents a table shape.
 type TableShape struct {

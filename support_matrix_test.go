@@ -63,7 +63,7 @@ func TestSrcRectCropIsApplied(t *testing.T) {
 		d.SetImageData(img, "image/png")
 		d.BaseShape.SetOffsetX(2000000).SetOffsetY(1500000)
 		d.BaseShape.SetWidth(4000000).SetHeight(2500000)
-		d.cropLeft = cropLeft
+		d.SetCrop(cropLeft, 0, 0, 0)
 		p.GetActiveSlide().AddShape(d)
 		return p
 	}
