@@ -7,9 +7,10 @@ import (
 	"fmt"
 	"strconv"
 	"strings"
+	"time"
 )
 
-func (r *PPTXReader) readSlide(zr *zip.Reader, path string, pres *Presentation) (*Slide, error) {
+func (r *PPTXReader) readSlide(zr *zip.Reader, path string, pres *Presentation, commentAuthors map[int]*CommentAuthor) (*Slide, error) {
 	data, err := readFileFromZip(zr, path)
 	if err != nil {
 		return nil, err
@@ -30,7 +31,7 @@ func (r *PPTXReader) readSlide(zr *zip.Reader, path string, pres *Presentation) 
 	r.applyLayoutInheritance(zr, slide, slideRels, path, pres)
 
 	// Read comments if relationship exists
-	r.readSlideComments(zr, slide, slideRels, path)
+	r.readSlideComments(zr, slide, slideRels, path, commentAuthors)
 
 	// Read notes if relationship exists
 	r.readSlideNotes(zr, slide, slideRels, path)
@@ -38,7 +39,7 @@ func (r *PPTXReader) readSlide(zr *zip.Reader, path string, pres *Presentation) 
 	return slide, nil
 }
 
-func (r *PPTXReader) readSlideComments(zr *zip.Reader, slide *Slide, rels []xmlRelForRead, slidePath string) {
+func (r *PPTXReader) readSlideComments(zr *zip.Reader, slide *Slide, rels []xmlRelForRead, slidePath string, authors map[int]*CommentAuthor) {
 	for _, rel := range rels {
 		if rel.Type == relTypeComment {
 			target := rel.Target
@@ -50,15 +51,124 @@ func (r *PPTXReader) readSlideComments(zr *zip.Reader, slide *Slide, rels []xmlR
 			if err != nil {
 				continue
 			}
-			r.parseCommentsXML(data, slide)
+			r.parseCommentsXML(data, slide, authors)
 		}
 	}
 }
 
-func (r *PPTXReader) parseCommentsXML(data []byte, slide *Slide) {
+// commentAuthorsPath is where the package-level comment author table lives.
+//
+// ECMA-376 fixes the part name, so it is read directly rather than through a
+// relationship: PowerPoint writes it here and does not reference it from
+// presentation.xml.rels, and the writer in this package emits the same path.
+const commentAuthorsPath = "ppt/commentAuthors.xml"
+
+// readCommentAuthors reads the author table keyed by author id.
+//
+// It is needed because <p:cm> carries only an authorId — the name, initials and
+// colour index live in this separate part. Without it a comment can only record
+// a numeric id, and since the writer groups comments into authors by name, every
+// author would collapse into one blank-named entry on the next save.
+//
+// A missing or unreadable part yields a nil map; comments then keep a bare id,
+// which is what the reader did before this part was read at all.
+func (r *PPTXReader) readCommentAuthors(zr *zip.Reader) map[int]*CommentAuthor {
+	data, err := readFileFromZip(zr, commentAuthorsPath)
+	if err != nil {
+		return nil
+	}
+
+	authors := make(map[int]*CommentAuthor)
 	decoder := xml.NewDecoder(bytes.NewReader(data))
-	var currentComment *Comment
-	var inText bool
+	for {
+		token, err := decoder.Token()
+		if err != nil {
+			break
+		}
+		start, ok := token.(xml.StartElement)
+		if !ok || start.Name.Local != "cmAuthor" {
+			continue
+		}
+
+		author := &CommentAuthor{}
+		hasID := false
+		for _, attr := range start.Attr {
+			switch attr.Name.Local {
+			case "id":
+				if v, err := strconv.Atoi(attr.Value); err == nil {
+					author.ID = v
+					hasID = true
+				}
+			case "name":
+				author.Name = attr.Value
+			case "initials":
+				author.Initials = attr.Value
+			case "clrIdx":
+				if v, err := strconv.Atoi(attr.Value); err == nil {
+					author.ColorIdx = v
+				}
+			}
+		}
+		if hasID {
+			authors[author.ID] = author
+		}
+	}
+	return authors
+}
+
+// commentDateLayouts lists the timestamp shapes a comment may carry, most
+// specific first. This writer emits milliseconds with no zone and treats the
+// value as UTC; other producers may add a zone or omit the fraction.
+var commentDateLayouts = []string{
+	"2006-01-02T15:04:05.000",
+	"2006-01-02T15:04:05",
+	time.RFC3339Nano,
+	time.RFC3339,
+}
+
+func parseCommentDate(value string) (time.Time, bool) {
+	for _, layout := range commentDateLayouts {
+		if t, err := time.Parse(layout, value); err == nil {
+			return t.UTC(), true
+		}
+	}
+	return time.Time{}, false
+}
+
+// parseCommentsXML reads one slide's comment list.
+//
+// <p:cm> carries the author id and timestamp, while the author's name lives in a
+// separate package part, so authors is the lookup filled in by
+// readCommentAuthors.
+//
+// Comment text comes from the <a:t> runs inside the <p:text> body — the shape
+// the schema requires (p:text is a CT_TextBody) and the one PowerPoint writes.
+// A body with no runs, such as the bare <p:text>text</p:text> this library used
+// to emit, is still read through the fallback below. Reading runs rather than
+// any character data inside <p:text> also matters because these parts are
+// normally indented: the whitespace that precedes </p:text> would otherwise be
+// taken as the comment text.
+func (r *PPTXReader) parseCommentsXML(data []byte, slide *Slide, authors map[int]*CommentAuthor) {
+	decoder := xml.NewDecoder(bytes.NewReader(data))
+
+	var (
+		current  *Comment
+		inText   bool
+		inPara   bool
+		inRun    bool
+		runs     []string // runs of the paragraph being read
+		paras    []string // completed paragraphs
+		fallback strings.Builder
+	)
+
+	resetBody := func() {
+		inText = false
+		inPara = false
+		inRun = false
+		runs = runs[:0]
+		paras = paras[:0]
+		fallback.Reset()
+	}
 
 	for {
 		token, err := decoder.Token()
@@ -69,48 +179,85 @@ func (r *PPTXReader) parseCommentsXML(data []byte, slide *Slide) {
 		case xml.StartElement:
 			switch t.Name.Local {
 			case "cm":
-				currentComment = NewComment()
+				current = NewComment()
 				for _, attr := range t.Attr {
 					switch attr.Name.Local {
 					case "authorId":
 						if v, err := strconv.Atoi(attr.Value); err == nil {
-							currentComment.Author = &CommentAuthor{ID: v}
+							if a, ok := authors[v]; ok {
+								current.Author = a
+							} else {
+								current.Author = &CommentAuthor{ID: v}
+							}
+						}
+					case "dt":
+						if d, ok := parseCommentDate(attr.Value); ok {
+							current.Date = d
 						}
 					}
 				}
 			case "pos":
-				if currentComment != nil {
+				if current != nil {
 					for _, attr := range t.Attr {
 						switch attr.Name.Local {
 						case "x":
 							if v, err := strconv.Atoi(attr.Value); err == nil {
-								currentComment.PositionX = v
+								current.PositionX = v
 							}
 						case "y":
 							if v, err := strconv.Atoi(attr.Value); err == nil {
-								currentComment.PositionY = v
+								current.PositionY = v
 							}
 						}
 					}
 				}
 			case "text":
-				if currentComment != nil {
+				if current != nil {
+					resetBody()
 					inText = true
+				}
+			case "p":
+				if inText {
+					runs = runs[:0]
+					inPara = true
+				}
+			case "t":
+				if inText && inPara {
+					inRun = true
 				}
 			}
 		case xml.CharData:
-			if inText && currentComment != nil {
-				currentComment.Text = string(t)
+			switch {
+			case inRun:
+				runs = append(runs, string(t))
+			case inText:
+				// Character data directly inside <p:text>.
+				fallback.WriteString(string(t))
 			}
 		case xml.EndElement:
 			switch t.Name.Local {
 			case "cm":
-				if currentComment != nil {
-					slide.comments = append(slide.comments, currentComment)
-					currentComment = nil
+				if current != nil {
+					slide.comments = append(slide.comments, current)
+					current = nil
 				}
 			case "text":
-				inText = false
+				if current != nil {
+					if len(paras) > 0 {
+						current.Text = strings.Join(paras, "\n")
+					} else {
+						current.Text = fallback.String()
+					}
+				}
+				resetBody()
+			case "p":
+				if inText && inPara {
+					paras = append(paras, strings.Join(runs, ""))
+					runs = runs[:0]
+					inPara = false
+				}
+			case "t":
+				inRun = false
 			}
 		}
 	}
@@ -184,39 +331,56 @@ func (r *PPTXReader) parseNotesXML(data []byte) string {
 	return strings.Join(texts, "")
 }
 
+// maxGroupDepth caps how deeply the reader will nest groups inside a slide.
+//
+// The cap exists because nesting depth is chosen entirely by the file, while
+// the consumers of the resulting tree recurse over it: the renderer descends
+// through renderGroup, and the writer through writeGroupShapeXML. A few
+// megabytes of <p:grpSp> elements can therefore nest deeply enough to exhaust
+// the goroutine stack, and a stack overflow is a fatal error that recover
+// cannot turn into a *PanicError — the very failure mode the fail-closed
+// boundary exists to prevent.
+//
+// Past the cap the subtree is still parsed, because the XML token stream has to
+// stay balanced, but into a group that is never attached to the slide, so it is
+// unreachable and gets collected. Real decks nest a handful of levels deep; 64
+// is far beyond anything PowerPoint produces, so the cap only ever trips on
+// input that is malformed or hostile.
+const maxGroupDepth = 64
+
 func (r *PPTXReader) parseSlideXML(decoder *xml.Decoder, slide *Slide, rels []xmlRelForRead, zr *zip.Reader, slidePath string, pres *Presentation) error {
 	type parseState struct {
-		inSpTree       bool
-		inSp           bool
-		inPic          bool
-		inCxnSp        bool
-		inGraphicFrame bool
-		inGrpSp        bool
-		inTxBody       bool
-		inParagraph    bool
-		inRun          bool
-		inRunProps     bool
-		inText         bool
-		inTbl          bool
-		inTr           bool
-		inTc           bool
-		inTcTxBody     bool
-		inTcParagraph  bool
+		inSpTree        bool
+		inSp            bool
+		inPic           bool
+		inCxnSp         bool
+		inGraphicFrame  bool
+		inGrpSp         bool
+		inTxBody        bool
+		inParagraph     bool
+		inRun           bool
+		inRunProps      bool
+		inText          bool
+		inTbl           bool
+		inTr            bool
+		inTc            bool
+		inTcTxBody      bool
+		inTcParagraph   bool
 		inTcRun         bool
 		inTcText        bool
 		inTcPr          bool
 		inTcPrSolidFill bool
 		inTcPrLn        bool
 		tcPrLnSide      string // "L", "R", "T", "B" or "" for generic
-		inNvSpPr       bool
-		inSolidFill    bool
-		inSpPr         bool
-		inLn           bool
-		inPPr          bool
-		inBg           bool
-		inBgPr         bool
-		inBgSolidFill  bool
-		inBuClr        bool
+		inNvSpPr        bool
+		inSolidFill     bool
+		inSpPr          bool
+		inLn            bool
+		inPPr           bool
+		inBg            bool
+		inBgPr          bool
+		inBgSolidFill   bool
+		inBuClr         bool
 
 		// Spacing context tracking
 		inSpcBef bool
@@ -250,23 +414,23 @@ func (r *PPTXReader) parseSlideXML(decoder *xml.Decoder, slide *Slide, rels []xm
 		inBgBlipFill bool
 
 		// gradFill tracking
-		inGradFill    bool
-		inGsLst       bool
-		inGs          bool
-		gradFillPos   int // current gs position (0-100000)
+		inGradFill         bool
+		inGsLst            bool
+		inGs               bool
+		gradFillPos        int  // current gs position (0-100000)
 		inRunPropsGradFill bool // gradFill inside rPr (text color gradient)
 
 		// avLst tracking (adjustment values for preset geometry)
 		inAvLst bool
 
 		// custGeom tracking
-		inCustGeom  bool
-		inPathLst   bool
-		inCustPath  bool
+		inCustGeom bool
+		inPathLst  bool
+		inCustPath bool
 
 		// effectLst / outerShdw tracking
-		inEffectLst  bool
-		inOuterShdw  bool
+		inEffectLst bool
+		inOuterShdw bool
 	}
 
 	state := &parseState{}
@@ -301,6 +465,15 @@ func (r *PPTXReader) parseSlideXML(decoder *xml.Decoder, slide *Slide, rels []xm
 	var flipH, flipV bool
 	var shapeRotation int
 	var prstGeom string
+
+	// Chart graphicFrame tracking. A chart is a graphicFrame whose
+	// graphicData references a chart part through a relationship id.
+	var chartRelID string
+	var graphicDataIsChart bool
+	// graphicDataURI is the raw a:graphicData uri of the graphicFrame being
+	// read. It classifies the frame when it turns out to be neither a table nor
+	// a chart, so the stand-in can name what it replaced.
+	var graphicDataURI string
 	var textAnchor TextAnchorType
 	var textDir string
 
@@ -359,6 +532,9 @@ func (r *PPTXReader) parseSlideXML(decoder *xml.Decoder, slide *Slide, rels []xm
 		flipV    bool
 		rotation int
 		grpFill  *Fill // solidFill from grpSpPr, inherited by child <a:grpFill/>
+		// detached marks a group nested deeper than maxGroupDepth. Its subtree
+		// is still parsed but is never attached to the slide; see maxGroupDepth.
+		detached bool
 	}
 	var grpStack []*grpSaved
 
@@ -384,7 +560,7 @@ func (r *PPTXReader) parseSlideXML(decoder *xml.Decoder, slide *Slide, rels []xm
 					state.inGrpSp = true
 					grpDepth++
 					newGroup := NewGroupShape()
-					grpStack = append(grpStack, &grpSaved{group: newGroup})
+					grpStack = append(grpStack, &grpSaved{group: newGroup, detached: grpDepth > maxGroupDepth})
 					currentGroup = newGroup
 					offX, offY, extCX, extCY = 0, 0, 0, 0
 					chOffX, chOffY, chExtCX, chExtCY = 0, 0, 0, 0
@@ -447,6 +623,27 @@ func (r *PPTXReader) parseSlideXML(decoder *xml.Decoder, slide *Slide, rels []xm
 					shapeName = ""
 					prstGeom = ""
 					shapeRotation = 0
+					chartRelID = ""
+					graphicDataIsChart = false
+					graphicDataURI = ""
+				}
+			case "graphicData":
+				if state.inGraphicFrame {
+					for _, attr := range t.Attr {
+						if attr.Name.Local == "uri" {
+							graphicDataURI = attr.Value
+							graphicDataIsChart = strings.Contains(attr.Value, "/chart")
+						}
+					}
+				}
+			case "chart":
+				// <c:chart r:id="rIdN"/> inside a chart graphicData.
+				if state.inGraphicFrame && graphicDataIsChart {
+					for _, attr := range t.Attr {
+						if attr.Name.Local == "id" {
+							chartRelID = attr.Value
+						}
+					}
 				}
 			case "tbl":
 				if state.inGraphicFrame {
@@ -1777,66 +1974,45 @@ func (r *PPTXReader) parseSlideXML(decoder *xml.Decoder, slide *Slide, rels []xm
 					}
 				}
 			case "blip":
-				if state.inPic {
-					for _, attr := range t.Attr {
-						if attr.Name.Local == "embed" {
-							for _, rel := range rels {
-								if rel.ID == attr.Value {
-									imgPath := rel.Target
-									if !strings.HasPrefix(imgPath, "ppt/") {
-										dir := strings.TrimSuffix(slidePath, "/"+lastPathComponent(slidePath))
-										imgPath = resolveRelativePath(dir, imgPath)
-									}
-									imgData, err := readFileFromZip(zr, imgPath)
-									if err == nil {
-										currentDrawing.data = imgData
-										currentDrawing.mimeType = guessMimeType(imgPath)
-									}
-									break
-								}
-							}
-						}
+				// <a:blip r:embed="rIdN"> — the image reference proper.
+				//
+				// The one element serves three unrelated contexts, told apart
+				// by what encloses it rather than by anything on the tag: a
+				// picture, a shape's picture fill, and a slide background.
+				if id := embedRelID(t); id != "" {
+					if state.inPic && currentDrawing != nil {
+						currentDrawing.data, currentDrawing.mimeType = imageRelData(rels, slidePath, zr, id)
+					} else if state.inSpPrBlipFill {
+						pendingBlipFillData, pendingBlipFillMime = imageRelData(rels, slidePath, zr, id)
+					} else if state.inBgBlipFill {
+						bgBlipFillData, bgBlipFillMime = imageRelData(rels, slidePath, zr, id)
 					}
-				} else if state.inSpPrBlipFill {
-					// <a:blip> inside <a:blipFill> inside <p:spPr> — shape image fill
-					for _, attr := range t.Attr {
-						if attr.Name.Local == "embed" {
-							for _, rel := range rels {
-								if rel.ID == attr.Value {
-									imgPath := rel.Target
-									if !strings.HasPrefix(imgPath, "ppt/") {
-										dir := strings.TrimSuffix(slidePath, "/"+lastPathComponent(slidePath))
-										imgPath = resolveRelativePath(dir, imgPath)
-									}
-									imgData, err := readFileFromZip(zr, imgPath)
-									if err == nil {
-										pendingBlipFillData = imgData
-										pendingBlipFillMime = guessMimeType(imgPath)
-									}
-									break
-								}
-							}
+				}
+			case "svgBlip":
+				// <asvg:svgBlip r:embed="rIdN"/>, a child of <a:blip> in the
+				// Microsoft SVG extension (ext uri
+				// 96DAC541-7B7A-43D3-8B79-37D633B846F1).
+				//
+				// PowerPoint writes this next to a raster reference on the
+				// parent <a:blip>, so the raster is normally already in hand
+				// and the nil guards below leave it alone. But SVG artwork can
+				// also be written with the parent blip left bare and the sole
+				// reference in here — decks that inline SVG art tend to do
+				// exactly that. Without this case such a picture reads as zero
+				// bytes and nothing is drawn, with no sign that anything was
+				// skipped.
+				if id := embedRelID(t); id != "" {
+					if state.inPic && currentDrawing != nil {
+						if currentDrawing.data == nil {
+							currentDrawing.data, currentDrawing.mimeType = imageRelData(rels, slidePath, zr, id)
 						}
-					}
-				} else if state.inBgBlipFill {
-					// <a:blip> inside <a:blipFill> inside <p:bgPr> — slide background image
-					for _, attr := range t.Attr {
-						if attr.Name.Local == "embed" {
-							for _, rel := range rels {
-								if rel.ID == attr.Value {
-									imgPath := rel.Target
-									if !strings.HasPrefix(imgPath, "ppt/") {
-										dir := strings.TrimSuffix(slidePath, "/"+lastPathComponent(slidePath))
-										imgPath = resolveRelativePath(dir, imgPath)
-									}
-									imgData, err := readFileFromZip(zr, imgPath)
-									if err == nil {
-										bgBlipFillData = imgData
-										bgBlipFillMime = guessMimeType(imgPath)
-									}
-									break
-								}
-							}
+					} else if state.inSpPrBlipFill {
+						if pendingBlipFillData == nil {
+							pendingBlipFillData, pendingBlipFillMime = imageRelData(rels, slidePath, zr, id)
+						}
+					} else if state.inBgBlipFill {
+						if bgBlipFillData == nil {
+							bgBlipFillData, bgBlipFillMime = imageRelData(rels, slidePath, zr, id)
 						}
 					}
 				}
@@ -2215,11 +2391,16 @@ func (r *PPTXReader) parseSlideXML(decoder *xml.Decoder, slide *Slide, rels []xm
 							g.flipVertical = top.flipV
 							g.rotation = top.rotation
 							g.groupFill = top.grpFill
-							// Add to parent group or slide
-							if len(grpStack) > 0 {
+							// Add to parent group or slide — unless this group was
+							// nested past maxGroupDepth, in which case it is
+							// dropped rather than attached anywhere.
+							switch {
+							case top.detached:
+								// Intentionally discarded; see maxGroupDepth.
+							case len(grpStack) > 0:
 								parentGroup := grpStack[len(grpStack)-1].group
 								parentGroup.AddShape(g)
-							} else {
+							default:
 								slide.shapes = append(slide.shapes, g)
 							}
 						}
@@ -2284,16 +2465,16 @@ func (r *PPTXReader) parseSlideXML(decoder *xml.Decoder, slide *Slide, rels []xm
 							autoShape.shadow = pendingShadow
 							pendingShadow = nil
 						}
-																// Apply deferred arrow ends
-										if pendingHeadEnd != nil {
-											autoShape.headEnd = pendingHeadEnd
-											pendingHeadEnd = nil
-										}
-										if pendingTailEnd != nil {
-											autoShape.tailEnd = pendingTailEnd
-											pendingTailEnd = nil
-										}
-// Copy paragraphs from richtext if any (preserves font info)
+						// Apply deferred arrow ends
+						if pendingHeadEnd != nil {
+							autoShape.headEnd = pendingHeadEnd
+							pendingHeadEnd = nil
+						}
+						if pendingTailEnd != nil {
+							autoShape.tailEnd = pendingTailEnd
+							pendingTailEnd = nil
+						}
+						// Copy paragraphs from richtext if any (preserves font info)
 						if currentRichText != nil && len(currentRichText.paragraphs) > 0 {
 							autoShape.paragraphs = currentRichText.paragraphs
 							autoShape.textAnchor = textAnchor
@@ -2462,16 +2643,16 @@ func (r *PPTXReader) parseSlideXML(decoder *xml.Decoder, slide *Slide, rels []xm
 							autoShape.shadow = pendingShadow
 							pendingShadow = nil
 						}
-																// Apply deferred arrow ends
-										if pendingHeadEnd != nil {
-											autoShape.headEnd = pendingHeadEnd
-											pendingHeadEnd = nil
-										}
-										if pendingTailEnd != nil {
-											autoShape.tailEnd = pendingTailEnd
-											pendingTailEnd = nil
-										}
-if state.inGrpSp && currentGroup != nil {
+						// Apply deferred arrow ends
+						if pendingHeadEnd != nil {
+							autoShape.headEnd = pendingHeadEnd
+							pendingHeadEnd = nil
+						}
+						if pendingTailEnd != nil {
+							autoShape.tailEnd = pendingTailEnd
+							pendingTailEnd = nil
+						}
+						if state.inGrpSp && currentGroup != nil {
 							currentGroup.AddShape(autoShape)
 						} else {
 							slide.shapes = append(slide.shapes, autoShape)
@@ -2533,15 +2714,82 @@ if state.inGrpSp && currentGroup != nil {
 			case "graphicFrame":
 				if state.inGraphicFrame {
 					state.inGraphicFrame = false
-					if currentTable != nil {
+					isTable := currentTable != nil
+					if isTable {
 						currentTable.name = shapeName
 						currentTable.offsetX = offX
 						currentTable.offsetY = offY
 						currentTable.width = extCX
 						currentTable.height = extCY
-						slide.shapes = append(slide.shapes, currentTable)
+						// Tables are the same kind of object as every other
+						// shape here, so they belong inside the enclosing group
+						// like the rest. Appending them to the slide instead
+						// left their child-space coordinates untransformed,
+						// which placed a grouped table in the wrong spot.
+						if state.inGrpSp && currentGroup != nil {
+							currentGroup.AddShape(currentTable)
+						} else {
+							slide.shapes = append(slide.shapes, currentTable)
+						}
 					}
 					currentTable = nil
+
+					// A chart graphicFrame: resolve the chart part and turn it
+					// into a ChartShape so the rasterizer can draw it.
+					hadChartRef := chartRelID != ""
+					isChart := false
+					if hadChartRef {
+						var themeColors map[string]string
+						if pres != nil {
+							themeColors = pres.themeColors
+						}
+						if cs := r.readChartShape(zr, rels, slidePath, chartRelID, themeColors); cs != nil {
+							cs.name = shapeName
+							cs.offsetX = offX
+							cs.offsetY = offY
+							cs.width = extCX
+							cs.height = extCY
+							cs.rotation = ((shapeRotation % 360) + 360) % 360
+							cs.flipHorizontal = flipH
+							cs.flipVertical = flipV
+							if state.inGrpSp && currentGroup != nil {
+								currentGroup.AddShape(cs)
+							} else {
+								slide.shapes = append(slide.shapes, cs)
+							}
+							isChart = true
+						}
+					}
+					chartRelID = ""
+					graphicDataIsChart = false
+
+					// Anything else — SmartArt, an OLE object, a chart whose part
+					// could not be read — used to be dropped here, which left a
+					// blank region in the preview that nobody could tell apart
+					// from a correctly rendered empty shape. Keep a visible
+					// stand-in so the gap is obvious and reportable.
+					if !isTable && !isChart {
+						reason := classifyGraphicData(graphicDataURI)
+						if hadChartRef {
+							reason = "chart (its part could not be read)"
+						}
+						ph := NewUnsupportedShape(reason)
+						ph.name = shapeName
+						ph.offsetX = offX
+						ph.offsetY = offY
+						ph.width = extCX
+						ph.height = extCY
+						ph.rotation = ((shapeRotation % 360) + 360) % 360
+						ph.flipHorizontal = flipH
+						ph.flipVertical = flipV
+						ph.SetContentType(graphicDataURI)
+						if state.inGrpSp && currentGroup != nil {
+							currentGroup.AddShape(ph)
+						} else {
+							slide.shapes = append(slide.shapes, ph)
+						}
+					}
+					graphicDataURI = ""
 				}
 			case "tbl":
 				state.inTbl = false
@@ -2769,6 +3017,54 @@ func resolveRelativePath(base, rel string) string {
 	return resolved
 }
 
+// embedRelID returns the r:embed relationship id carried by an element, or ""
+// when it carries none.
+//
+// Only the local name is compared: the reverse namespace may be bound to any
+// prefix, and xml.Decoder hands back the local name either way.
+func embedRelID(t xml.StartElement) string {
+	for _, attr := range t.Attr {
+		if attr.Name.Local == "embed" {
+			return attr.Value
+		}
+	}
+	return ""
+}
+
+// imageRelData resolves an image relationship to the bytes of the part it
+// names, along with the MIME type implied by that part's extension.
+//
+// A nil result means the picture cannot be drawn: the id is unknown, the part
+// is missing, or the package cannot be read. Callers record that as "no image",
+// which the renderer turns into a labelled placeholder — a blank rectangle
+// looks exactly like a picture that was meant to be blank, so the failure has
+// to be visible.
+//
+// Targets are normally relative to the part owning the relationship
+// ("media/image6.svg" from "ppt/slides/slide8.xml"), but package-absolute
+// targets ("ppt/media/image6.png") are also written; both are handled.
+func imageRelData(rels []xmlRelForRead, slidePath string, zr *zip.Reader, relID string) ([]byte, string) {
+	if relID == "" {
+		return nil, ""
+	}
+	for _, rel := range rels {
+		if rel.ID != relID {
+			continue
+		}
+		imgPath := rel.Target
+		if !strings.HasPrefix(imgPath, "ppt/") {
+			dir := strings.TrimSuffix(slidePath, "/"+lastPathComponent(slidePath))
+			imgPath = resolveRelativePath(dir, imgPath)
+		}
+		data, err := readFileFromZip(zr, imgPath)
+		if err != nil {
+			return nil, ""
+		}
+		return data, guessMimeType(imgPath)
+	}
+	return nil, ""
+}
+
 func guessMimeType(path string) string {
 	lower := strings.ToLower(path)
 	switch {
@@ -2804,10 +3100,10 @@ type layoutPlaceholder struct {
 	extCX  int64
 	extCY  int64
 	// Default font properties from defRPr
-	fontName string
-	fontEA   string
-	fontSize int
-	fontBold bool
+	fontName  string
+	fontEA    string
+	fontSize  int
+	fontBold  bool
 	fontColor Color
 	// Text insets from bodyPr
 	insetLeft   int64
@@ -3252,28 +3548,16 @@ func (r *PPTXReader) parseLayoutBackground(data []byte, rels []xmlRelForRead, zr
 				if inBgPr {
 					inBlipFill = true
 				}
-			case "blip":
+			case "blip", "svgBlip":
+				// Both tags name the background part through r:embed; which one
+				// carries it depends on whether the artwork is a raster or an
+				// SVG written through the Microsoft extension.
 				if inBlipFill {
-					for _, attr := range t.Attr {
-						if attr.Name.Local == "embed" {
-							for _, rel := range rels {
-								if rel.ID == attr.Value {
-									imgPath := rel.Target
-									if !strings.HasPrefix(imgPath, "ppt/") {
-										dir := strings.TrimSuffix(layoutPath, "/"+lastPathComponent(layoutPath))
-										imgPath = resolveRelativePath(dir, imgPath)
-									}
-									imgData, err := readFileFromZip(zr, imgPath)
-									if err == nil {
-										ds := NewDrawingShape()
-										ds.data = imgData
-										ds.mimeType = guessMimeType(imgPath)
-										return nil, ds
-									}
-									break
-								}
-							}
-						}
+					if data, mime := imageRelData(rels, layoutPath, zr, embedRelID(t)); data != nil {
+						ds := NewDrawingShape()
+						ds.data = data
+						ds.mimeType = mime
+						return nil, ds
 					}
 				}
 			case "srgbClr":
@@ -3355,7 +3639,7 @@ func (r *PPTXReader) parseLayoutImages(data []byte, rels []xmlRelForRead, zr *zi
 	var offX, offY, extCX, extCY int64
 	var embedID string
 	var flipH, flipV bool
-	var picAlpha int // alphaModFix amount for pic blip
+	var picAlpha int                   // alphaModFix amount for pic blip
 	var cropL, cropT, cropR, cropB int // srcRect crop percentages
 
 	// For cxnSp (line connector) shapes
@@ -3460,11 +3744,17 @@ func (r *PPTXReader) parseLayoutImages(data []byte, rels []xmlRelForRead, zr *zi
 				}
 			case "blip":
 				if inPic {
-					for _, attr := range t.Attr {
-						if attr.Name.Local == "embed" {
-							embedID = attr.Value
-						}
+					if id := embedRelID(t); id != "" {
+						embedID = id
 					}
+				}
+			case "svgBlip":
+				// SVG-only artwork skips the raster reference on <a:blip> and
+				// names the part here instead (see parseSlideXML). Recorded only
+				// when the parent blip named nothing, so a raster fallback still
+				// takes precedence.
+				if inPic && embedID == "" {
+					embedID = embedRelID(t)
 				}
 			case "alphaModFix":
 				if inPic {

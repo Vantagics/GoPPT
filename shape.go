@@ -31,6 +31,32 @@ const (
 	ShapeTypeChart
 )
 
+// String returns the shape type name. Useful in diagnostics, support matrices
+// and error messages, where the numeric enum value is meaningless.
+func (t ShapeType) String() string {
+	switch t {
+	case ShapeTypeRichText:
+		return "RichText"
+	case ShapeTypeDrawing:
+		return "Picture"
+	case ShapeTypeTable:
+		return "Table"
+	case ShapeTypeAutoShape:
+		return "AutoShape"
+	case ShapeTypeLine:
+		return "Line"
+	case ShapeTypeChart:
+		return "Chart"
+	case ShapeTypeGroup:
+		return "Group"
+	case ShapeTypePlaceholder:
+		return "Placeholder"
+	case ShapeTypeUnsupported:
+		return "Unsupported"
+	}
+	return fmt.Sprintf("ShapeType(%d)", int(t))
+}
+
 // BaseShape contains common shape properties.
 type BaseShape struct {
 	name           string
@@ -140,8 +166,8 @@ type PathCommand struct {
 	Type string // "moveTo", "lnTo", "close", "cubicBezTo", "quadBezTo", "arcTo"
 	Pts  []PathPoint
 	// Arc parameters (only for arcTo): radii and angles in OOXML 60000ths of a degree
-	WR, HR         int64 // ellipse radii in path coordinate units
-	StAng, SwAng   int64 // start angle and sweep angle (60000ths of a degree)
+	WR, HR       int64 // ellipse radii in path coordinate units
+	StAng, SwAng int64 // start angle and sweep angle (60000ths of a degree)
 }
 
 // PathPoint represents a point in path coordinates.
@@ -695,7 +721,7 @@ type LineShape struct {
 	BaseShape
 	lineStyle     BorderStyle
 	lineWidth     int
-	lineWidthEMU  int             // raw line width in EMU for precision; 0 means use lineWidth*12700
+	lineWidthEMU  int // raw line width in EMU for precision; 0 means use lineWidth*12700
 	lineColor     Color
 	headEnd       *LineEnd
 	tailEnd       *LineEnd

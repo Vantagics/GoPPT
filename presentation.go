@@ -104,7 +104,14 @@ func (p *Presentation) GetActiveSlideIndex() int {
 }
 
 // GetSlide returns a slide by index.
-func (p *Presentation) GetSlide(index int) (*Slide, error) {
+//
+// GetSlide never panics, including when called on a nil *Presentation (which
+// can result from a failed Open whose error the caller ignored).
+func (p *Presentation) GetSlide(index int) (slide *Slide, err error) {
+	defer recoverToError(&err, "Presentation.GetSlide")
+	if p == nil {
+		return nil, errors.New("presentation is nil")
+	}
 	if index < 0 || index >= len(p.slides) {
 		return nil, errors.New("slide index out of range")
 	}
@@ -113,11 +120,17 @@ func (p *Presentation) GetSlide(index int) (*Slide, error) {
 
 // GetAllSlides returns all slides.
 func (p *Presentation) GetAllSlides() []*Slide {
+	if p == nil {
+		return nil
+	}
 	return p.slides
 }
 
 // GetSlideCount returns the number of slides.
 func (p *Presentation) GetSlideCount() int {
+	if p == nil {
+		return 0
+	}
 	return len(p.slides)
 }
 
@@ -198,7 +211,7 @@ type CustomProperty struct {
 type PropertyType int
 
 const (
-	PropertyTypeString  PropertyType = iota
+	PropertyTypeString PropertyType = iota
 	PropertyTypeBoolean
 	PropertyTypeInteger
 	PropertyTypeFloat

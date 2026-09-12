@@ -151,10 +151,11 @@ func (w *PPTXWriter) WriteTo(writer io.Writer) error {
 		return err
 	}
 
-	// Write charts
+	// Write charts, including those nested in groups, in the same document order
+	// getChartIndex numbers them in.
 	chartIdx := 1
 	for _, slide := range w.presentation.slides {
-		for _, shape := range slide.shapes {
+		for _, shape := range flattenShapes(slide.shapes) {
 			if cs, ok := shape.(*ChartShape); ok {
 				if err := w.writeChartPart(zw, cs, chartIdx); err != nil {
 					return err

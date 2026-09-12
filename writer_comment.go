@@ -57,13 +57,26 @@ func (w *PPTXWriter) writeCommentAuthors(zw *zip.Writer) error {
 	return writeRawXMLToZip(zw, "ppt/commentAuthors.xml", content)
 }
 
+// writeSlideComments emits one slide's comment list into ppt/comments/commentN.xml.
+//
+// The comment text is wrapped in a real text body rather than written as
+// character data directly inside <p:text>. p:text is a CT_TextBody, so it has to
+// hold <a:bodyPr> plus at least one <a:p> of runs; <p:text>text</p:text> is not
+// a shape PowerPoint will read, and the comment text would be lost there. The
+// structure below matches what the notes writer emits and what PowerPoint
+// produces, and the reader accepts it (it also still accepts the bare form, for
+// files written before this).
+//
+// Comments are numbered per slide and authors come from ppt/commentAuthors.xml,
+// which writeCommentAuthors has already emitted — and which assigns the author
+// ids this function writes — so the two parts agree.
 func (w *PPTXWriter) writeSlideComments(zw *zip.Writer, slide *Slide, slideNum int) error {
 	if len(slide.comments) == 0 {
 		return nil
 	}
 
 	content := fmt.Sprintf(`<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
-<p:cmLst xmlns:p="%s">`, nsPresentationML)
+<p:cmLst xmlns:p="%s" xmlns:a="%s">`, nsPresentationML, nsDrawingML)
 
 	for idx, c := range slide.comments {
 		authorID := 0
@@ -73,7 +86,7 @@ func (w *PPTXWriter) writeSlideComments(zw *zip.Writer, slide *Slide, slideNum i
 		content += fmt.Sprintf(`
   <p:cm authorId="%d" dt="%s" idx="%d">
     <p:pos x="%d" y="%d"/>
-    <p:text>%s</p:text>
+    <p:text><a:bodyPr/><a:lstStyle/><a:p><a:r><a:rPr lang="en-US" dirty="0"/><a:t>%s</a:t></a:r></a:p></p:text>
   </p:cm>`,
 			authorID,
 			c.Date.UTC().Format("2006-01-02T15:04:05.000"),

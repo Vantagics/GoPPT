@@ -21,16 +21,58 @@ type fontKey struct {
 	italic bool
 }
 
+// glyphCoverageKey identifies a cached "this font has this glyph" answer. Size
+// is deliberately absent: glyph coverage is a property of the font file, not of
+// the rasterisation size.
+type glyphCoverageKey struct {
+	name   string
+	r      rune
+	bold   bool
+	italic bool
+}
+
+// lowerFontName is strings.ToLower with no allocation when the name is already
+// lowercase, which is the common case and sits on the per-text-run path. Names
+// containing non-ASCII bytes fall through to strings.ToLower so Unicode case
+// folding behaves exactly as before.
+func lowerFontName(s string) string {
+	for i := 0; i < len(s); i++ {
+		c := s[i]
+		if c >= 0x80 || (c >= 'A' && c <= 'Z') {
+			return strings.ToLower(s)
+		}
+	}
+	return s
+}
+
 // FontCache manages TrueType font loading and face caching.
 // It searches system font directories and user-specified directories
 // for .ttf and .otf files, then caches parsed fonts and rendered faces.
+//
+// A FontCache is safe for concurrent use, so one cache can back a pool of
+// parallel renders. Constructing it scans the font directories, so build it once
+// and pass it in RenderOptions.FontCache rather than letting each render make
+// its own.
 type FontCache struct {
 	mu           sync.RWMutex
 	dirs         []string                  // directories to search for fonts
 	fonts        map[string]*opentype.Font // lowercase font name -> parsed font
 	faces        map[fontKey]font.Face     // cached render faces (HintingFull)
 	measureFaces map[fontKey]font.Face     // cached measure faces (HintingNone)
-	scanned      bool
+	// misses caches requests that matched no installed font. Without it a
+	// document that names an uninstalled font re-runs the whole style-variant
+	// search (and, when nothing matches at all, the entire fallback chain) for
+	// every text run on every slide. It is dropped whenever a font is
+	// registered, so a font loaded after a failed lookup is still found.
+	misses map[fontKey]struct{}
+	// coverage caches "does this font have a real glyph for this rune". A font
+	// can be installed and resolvable by name yet still lack the characters a
+	// document needs, so a successful lookup says only that the *face* exists,
+	// not that it can draw the text. The renderer asks this on every CJK run,
+	// and a deck repeats the same characters across slides, so the answer is
+	// memoised. Dropped whenever a font is registered.
+	coverage map[glyphCoverageKey]bool
+	scanned  bool
 }
 
 // NewFontCache creates a FontCache that searches the given directories
@@ -42,6 +84,8 @@ func NewFontCache(extraDirs ...string) *FontCache {
 		fonts:        make(map[string]*opentype.Font),
 		faces:        make(map[fontKey]font.Face),
 		measureFaces: make(map[fontKey]font.Face),
+		misses:       make(map[fontKey]struct{}),
+		coverage:     make(map[glyphCoverageKey]bool),
 	}
 }
 
@@ -50,18 +94,23 @@ func NewFontCache(extraDirs ...string) *FontCache {
 func (fc *FontCache) GetFace(name string, sizePt float64, bold, italic bool) font.Face {
 	fc.ensureScanned()
 
-	key := fontKey{name: strings.ToLower(name), size: sizePt, bold: bold, italic: italic}
+	key := fontKey{name: lowerFontName(name), size: sizePt, bold: bold, italic: italic}
 
 	fc.mu.RLock()
 	if face, ok := fc.faces[key]; ok {
 		fc.mu.RUnlock()
 		return face
 	}
+	_, miss := fc.misses[key]
 	fc.mu.RUnlock()
+	if miss {
+		return nil
+	}
 
 	// Try to find the font with style variants
 	f := fc.findFont(name, bold, italic)
 	if f == nil {
+		fc.rememberMiss(key)
 		return nil
 	}
 
@@ -89,17 +138,22 @@ func (fc *FontCache) GetFace(name string, sizePt float64, bold, italic bool) fon
 func (fc *FontCache) GetMeasureFace(name string, sizePt float64, bold, italic bool) font.Face {
 	fc.ensureScanned()
 
-	key := fontKey{name: strings.ToLower(name), size: sizePt, bold: bold, italic: italic}
+	key := fontKey{name: lowerFontName(name), size: sizePt, bold: bold, italic: italic}
 
 	fc.mu.RLock()
 	if face, ok := fc.measureFaces[key]; ok {
 		fc.mu.RUnlock()
 		return face
 	}
+	_, miss := fc.misses[key]
 	fc.mu.RUnlock()
+	if miss {
+		return nil
+	}
 
 	f := fc.findFont(name, bold, italic)
 	if f == nil {
+		fc.rememberMiss(key)
 		return nil
 	}
 
@@ -118,81 +172,149 @@ func (fc *FontCache) GetMeasureFace(name string, sizePt float64, bold, italic bo
 	return face
 }
 
+// rememberMiss records that no installed font matched a request, so the
+// style-variant search is not repeated. Only "nothing matched" is cached, never
+// a face-construction failure: the render and measure paths build their faces
+// with different hinting, and the two share this set, so caching an error from
+// one of them could wrongly suppress the other. The set is cleared whenever a
+// font is registered, so a font loaded after a failed lookup is still found.
+func (fc *FontCache) rememberMiss(key fontKey) {
+	fc.mu.Lock()
+	if fc.misses == nil {
+		fc.misses = make(map[fontKey]struct{})
+	}
+	fc.misses[key] = struct{}{}
+	fc.mu.Unlock()
+}
+
+// resetDerivedCachesLocked drops the caches derived from the registered font
+// set. It must be called after any font registration: otherwise a font loaded
+// after a failed lookup stays invisible for the lifetime of the cache, and a
+// glyph-coverage answer computed against the old set keeps suppressing (or
+// wrongly permitting) that font. The caller must hold fc.mu.
+func (fc *FontCache) resetDerivedCachesLocked() {
+	fc.misses = make(map[fontKey]struct{})
+	fc.coverage = make(map[glyphCoverageKey]bool)
+}
+
 // findFont looks up a parsed font by name, trying style-specific variants first.
 func (fc *FontCache) findFont(name string, bold, italic bool) *opentype.Font {
+	f, _ := fc.findFontKey(name, bold, italic)
+	return f
+}
+
+// findFontKey is findFont plus the cache key that actually matched, so callers
+// can report which font was substituted. The key is empty when nothing matched.
+func (fc *FontCache) findFontKey(name string, bold, italic bool) (*opentype.Font, string) {
 	fc.mu.RLock()
 	defer fc.mu.RUnlock()
+	return fc.findFontKeyLocked(lowerFontName(name), bold, italic)
+}
 
-	lower := strings.ToLower(name)
+// FindFontName reports which registered font would satisfy a request for name,
+// or "" if no installed font matches. It is intended for diagnostics: it lets a
+// caller tell whether a document's font is actually available before rendering.
+func (fc *FontCache) FindFontName(name string, bold, italic bool) string {
+	fc.ensureScanned()
+	_, key := fc.findFontKey(name, bold, italic)
+	return key
+}
 
+// HasFont reports whether a font matching name is available.
+func (fc *FontCache) HasFont(name string, bold, italic bool) bool {
+	return fc.FindFontName(name, bold, italic) != ""
+}
+
+// CoversRune reports whether the font matching name has a real glyph for r.
+//
+// HasFont answers "is this font installed", which is not the same question as
+// "can it draw this text", and the difference is what produces tofu. A face
+// that is missing a character does not fail: it silently renders the font's
+// .notdef glyph, which for most Latin fonts is an empty rectangle. So a run
+// that names a Latin font for East Asian text — exactly what a generator that
+// copies one font-family list into both <a:latin> and <a:ea> emits — looks
+// perfectly resolved while drawing nothing but boxes.
+//
+// Glyph index 0 is .notdef, so a zero index means the character is absent.
+// Answers are memoised per (font, style, rune); see FontCache.coverage.
+func (fc *FontCache) CoversRune(name string, bold, italic bool, r rune) bool {
+	if name == "" {
+		return false
+	}
+	fc.ensureScanned()
+
+	key := glyphCoverageKey{name: lowerFontName(name), r: r, bold: bold, italic: italic}
+	fc.mu.RLock()
+	if covered, ok := fc.coverage[key]; ok {
+		fc.mu.RUnlock()
+		return covered
+	}
+	fc.mu.RUnlock()
+
+	covered := false
+	if f := fc.findFont(name, bold, italic); f != nil {
+		if idx, err := f.GlyphIndex(nil, r); err == nil && idx != 0 {
+			covered = true
+		}
+	}
+
+	fc.mu.Lock()
+	if fc.coverage == nil {
+		fc.coverage = make(map[glyphCoverageKey]bool)
+	}
+	fc.coverage[key] = covered
+	fc.mu.Unlock()
+	return covered
+}
+
+// findFontKeyLocked is findFontKey without locking. The caller must hold fc.mu.
+func (fc *FontCache) findFontKeyLocked(lower string, bold, italic bool) (*opentype.Font, string) {
 	// Try style-specific names: Windows uses "arialbd", "arialbi", "ariali" etc.
 	if bold && italic {
 		for _, suffix := range []string{" bold italic", "bi", " bolditalic", "z"} {
 			if f, ok := fc.fonts[lower+suffix]; ok {
-				return f
+				return f, lower + suffix
 			}
 		}
 	}
 	if bold {
 		for _, suffix := range []string{" bold", "bd", "b"} {
 			if f, ok := fc.fonts[lower+suffix]; ok {
-				return f
+				return f, lower + suffix
 			}
 		}
 	}
 	if italic {
 		for _, suffix := range []string{" italic", "i", " it"} {
 			if f, ok := fc.fonts[lower+suffix]; ok {
-				return f
+				return f, lower + suffix
 			}
 		}
 	}
 
 	// Fall back to base name
 	if f, ok := fc.fonts[lower]; ok {
-		return f
+		return f, lower
 	}
 
 	// Try Chinese font name alias
 	if alias, ok := chineseFontAliases[lower]; ok {
-		return fc.findFontByKey(alias, bold, italic)
+		return fc.findFontKeyLocked(alias, bold, italic)
 	}
 
-	return nil
+	return nil, ""
 }
-
-// findFontByKey looks up a font by its already-lowercased key, with style variants.
-func (fc *FontCache) findFontByKey(lower string, bold, italic bool) *opentype.Font {
-	if bold && italic {
-		for _, suffix := range []string{" bold italic", "bi", " bolditalic", "z"} {
-			if f, ok := fc.fonts[lower+suffix]; ok {
-				return f
-			}
-		}
-	}
-	if bold {
-		for _, suffix := range []string{" bold", "bd", "b"} {
-			if f, ok := fc.fonts[lower+suffix]; ok {
-				return f
-			}
-		}
-	}
-	if italic {
-		for _, suffix := range []string{" italic", "i", " it"} {
-			if f, ok := fc.fonts[lower+suffix]; ok {
-				return f
-			}
-		}
-	}
-	if f, ok := fc.fonts[lower]; ok {
-		return f
-	}
-	return nil
-}
-
 
 // LoadFont manually loads a TrueType/OpenType font file and registers it under the given name.
 // Returns an error if the file exceeds maxFontFileSize.
+//
+// A font registered here takes precedence over one the directory scan finds
+// under the same name. Without that ordering the scan, which runs lazily on the
+// first face lookup, would silently replace a deliberately supplied font with
+// whatever the machine happens to have installed — defeating the point of
+// bundling a font to make rendering reproducible. The scan is therefore run
+// before the registration, which can make the first LoadFont pay for the
+// directory walk that the first render would have triggered anyway.
 func (fc *FontCache) LoadFont(name string, path string) error {
 	info, err := os.Stat(path)
 	if err != nil {
@@ -209,22 +331,30 @@ func (fc *FontCache) LoadFont(name string, path string) error {
 	if err != nil {
 		return err
 	}
+	fc.ensureScanned()
 	fc.mu.Lock()
-	fc.fonts[strings.ToLower(name)] = f
+	fc.fonts[lowerFontName(name)] = f
 	fc.registerByFamilyName(f)
+	// A newly registered font may satisfy a request that previously missed.
+	fc.resetDerivedCachesLocked()
 	fc.mu.Unlock()
 	return nil
 }
 
 // LoadFontData registers a TrueType/OpenType font from raw bytes.
+//
+// Like LoadFont, a font registered here takes precedence over one found by the
+// directory scan under the same name.
 func (fc *FontCache) LoadFontData(name string, data []byte) error {
 	f, err := opentype.Parse(data)
 	if err != nil {
 		return err
 	}
+	fc.ensureScanned()
 	fc.mu.Lock()
-	fc.fonts[strings.ToLower(name)] = f
+	fc.fonts[lowerFontName(name)] = f
 	fc.registerByFamilyName(f)
+	fc.resetDerivedCachesLocked()
 	fc.mu.Unlock()
 	return nil
 }
@@ -273,7 +403,7 @@ func (fc *FontCache) scanDirDepth(dir string, depth int) {
 			continue
 		}
 		name := entry.Name()
-		lower := strings.ToLower(name)
+		lower := lowerFontName(name)
 		isTTC := strings.HasSuffix(lower, ".ttc") || strings.HasSuffix(lower, ".otc")
 		isSingle := strings.HasSuffix(lower, ".ttf") || strings.HasSuffix(lower, ".otf")
 		if !isTTC && !isSingle {

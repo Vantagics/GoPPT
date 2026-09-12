@@ -8,7 +8,11 @@ import (
 
 // Open reads a PPTX file from disk and returns a Presentation.
 // This is a convenience wrapper around NewReader + Read.
-func Open(path string) (*Presentation, error) {
+//
+// Open never panics: a malformed package that trips up the parser is reported
+// as a *PanicError rather than crashing the process.
+func Open(path string) (pres *Presentation, err error) {
+	defer recoverToError(&err, "Open")
 	reader, err := NewReader(ReaderPowerPoint2007)
 	if err != nil {
 		return nil, err
@@ -17,7 +21,8 @@ func Open(path string) (*Presentation, error) {
 }
 
 // ReadFrom reads a PPTX from an io.ReaderAt with the given size.
-func ReadFrom(r io.ReaderAt, size int64) (*Presentation, error) {
+func ReadFrom(r io.ReaderAt, size int64) (pres *Presentation, err error) {
+	defer recoverToError(&err, "ReadFrom")
 	reader, err := NewReader(ReaderPowerPoint2007)
 	if err != nil {
 		return nil, err
@@ -28,8 +33,9 @@ func ReadFrom(r io.ReaderAt, size int64) (*Presentation, error) {
 // OpenTemplate opens a PPTX template file and returns a Presentation.
 // Unlike Open, this removes all existing slides so you can add new ones
 // using the template's layouts. The slide layouts and masters are preserved.
-func OpenTemplate(path string) (*Presentation, error) {
-	pres, err := Open(path)
+func OpenTemplate(path string) (pres *Presentation, err error) {
+	defer recoverToError(&err, "OpenTemplate")
+	pres, err = Open(path)
 	if err != nil {
 		return nil, fmt.Errorf("failed to open template: %w", err)
 	}
@@ -41,7 +47,8 @@ func OpenTemplate(path string) (*Presentation, error) {
 
 // Save writes the presentation to a PPTX file.
 // This is a convenience wrapper around NewWriter + Save.
-func (p *Presentation) Save(path string) error {
+func (p *Presentation) Save(path string) (err error) {
+	defer recoverToError(&err, "Presentation.Save")
 	writer, err := NewWriter(p, WriterPowerPoint2007)
 	if err != nil {
 		return err
@@ -50,7 +57,8 @@ func (p *Presentation) Save(path string) error {
 }
 
 // WriteTo writes the presentation to a writer in PPTX format.
-func (p *Presentation) WriteTo(w io.Writer) error {
+func (p *Presentation) WriteTo(w io.Writer) (err error) {
+	defer recoverToError(&err, "Presentation.WriteTo")
 	writer, err := NewWriter(p, WriterPowerPoint2007)
 	if err != nil {
 		return err
@@ -77,6 +85,9 @@ func (p *Presentation) Close() error {
 // Slides returns all slides. This is an alias for GetAllSlides
 // matching unioffice naming convention.
 func (p *Presentation) Slides() []*Slide {
+	if p == nil {
+		return nil
+	}
 	return p.slides
 }
 

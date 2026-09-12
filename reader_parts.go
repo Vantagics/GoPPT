@@ -2,6 +2,7 @@ package gopresentation
 
 import (
 	"archive/zip"
+	"bytes"
 	"encoding/xml"
 	"fmt"
 	"strconv"
@@ -17,7 +18,7 @@ func (r *PPTXReader) readCoreProperties(zr *zip.Reader, pres *Presentation) erro
 		return err
 	}
 
-	decoder := xml.NewDecoder(strings.NewReader(string(data)))
+	decoder := xml.NewDecoder(bytes.NewReader(data))
 	props := pres.properties
 
 	var currentElement string
@@ -69,11 +70,11 @@ func (r *PPTXReader) readCoreProperties(zr *zip.Reader, pres *Presentation) erro
 // --- Presentation ---
 
 type xmlPresentation struct {
-	XMLName        xml.Name           `xml:"presentation"`
-	SldMasterIdLst xmlSldMasterIdLst  `xml:"sldMasterIdLst"`
-	SldIdLst       xmlSldIdLst        `xml:"sldIdLst"`
-	SldSz          xmlSldSz           `xml:"sldSz"`
-	NotesSz        xmlNotesSz         `xml:"notesSz"`
+	XMLName        xml.Name          `xml:"presentation"`
+	SldMasterIdLst xmlSldMasterIdLst `xml:"sldMasterIdLst"`
+	SldIdLst       xmlSldIdLst       `xml:"sldIdLst"`
+	SldSz          xmlSldSz          `xml:"sldSz"`
+	NotesSz        xmlNotesSz        `xml:"notesSz"`
 }
 
 type xmlSldMasterIdLst struct {
@@ -81,7 +82,7 @@ type xmlSldMasterIdLst struct {
 }
 
 type xmlSldMasterId struct {
-	ID  string `xml:"id,attr"`
+	ID string `xml:"id,attr"`
 }
 
 type xmlSldIdLst struct {
@@ -89,7 +90,7 @@ type xmlSldIdLst struct {
 }
 
 type xmlSldId struct {
-	ID  string `xml:"id,attr"`
+	ID string `xml:"id,attr"`
 }
 
 type xmlSldSz struct {
@@ -110,7 +111,7 @@ func (r *PPTXReader) readPresentation(zr *zip.Reader, pres *Presentation) ([]str
 	}
 
 	// Parse using streaming to handle namespaces properly
-	decoder := xml.NewDecoder(strings.NewReader(string(data)))
+	decoder := xml.NewDecoder(bytes.NewReader(data))
 	var slideRelIDs []string
 
 	for {
@@ -183,7 +184,7 @@ func (r *PPTXReader) readThemeColors(zr *zip.Reader, pres *Presentation) {
 	}
 
 	pres.themeColors = make(map[string]string)
-	decoder := xml.NewDecoder(strings.NewReader(string(data)))
+	decoder := xml.NewDecoder(bytes.NewReader(data))
 
 	// Track which scheme color element we're inside
 	var currentSchemeColor string

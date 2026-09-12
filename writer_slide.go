@@ -12,7 +12,7 @@ import (
 func (w *PPTXWriter) buildHyperlinkRelMap(slide *Slide) map[*TextRun]string {
 	m := make(map[*TextRun]string)
 	relIdx := 2 // rId1 is slideLayout
-	for _, shape := range slide.shapes {
+	for _, shape := range flattenShapes(slide.shapes) {
 		relIdx += countShapeRels(shape)
 		for _, para := range shapeParagraphs(shape) {
 			for _, elem := range para.elements {
@@ -52,10 +52,11 @@ func shapeParagraphs(shape Shape) []*Paragraph {
 }
 
 // countRelIdxBefore computes the relIdx for a target shape within a slide,
-// counting all rels (images, charts, hyperlinks) for shapes before it.
+// counting all rels (images, charts, hyperlinks) for shapes before it in
+// document order, which is the order flattenShapes defines.
 func countRelIdxBefore(shapes []Shape, target Shape) int {
 	relIdx := 2 // rId1 is slideLayout
-	for _, shape := range shapes {
+	for _, shape := range flattenShapes(shapes) {
 		if shape == target {
 			break
 		}
@@ -146,7 +147,7 @@ func (w *PPTXWriter) writeSlideRels(zw *zip.Writer, slide *Slide, slideNum int, 
   <Relationship Id="rId1" Type="%s" Target="../slideLayouts/slideLayout1.xml"/>`, nsRelationships, relTypeSlideLayout)
 
 	relIdx := 2
-	for _, shape := range slide.shapes {
+	for _, shape := range flattenShapes(slide.shapes) {
 		switch s := shape.(type) {
 		case *DrawingShape:
 			if s.data != nil || s.path != "" {
@@ -219,6 +220,31 @@ func (w *PPTXWriter) getImageIndex(slide *Slide, target *DrawingShape) int {
 		}
 	}
 	return idx
+}
+
+// flattenShapes returns every shape of a slide in document order, with the
+// children of a group following the group itself.
+//
+// Slide relationships — a picture, a chart, an external hyperlink — are numbered
+// in this order, starting at rId2 because rId1 is the slide layout. Every part
+// of the writer that has to agree on an rId therefore has to derive it from this
+// one walk: the .rels file, the picture and chart emitters, and the hyperlink
+// map. They used to walk only the top-level shapes, which is what left a picture
+// or chart inside a group referring to an rId that no relationship defined and,
+// in the chart's case, to a chart part that was never written.
+func flattenShapes(shapes []Shape) []Shape {
+	var out []Shape
+	var visit func([]Shape)
+	visit = func(list []Shape) {
+		for _, s := range list {
+			out = append(out, s)
+			if g, ok := s.(*GroupShape); ok {
+				visit(g.shapes)
+			}
+		}
+	}
+	visit(shapes)
+	return out
 }
 
 // collectDrawingShapes returns all DrawingShapes from a shape list,
@@ -737,10 +763,17 @@ func (w *PPTXWriter) writeFillXML(f *Fill) string {
 	}
 }
 
+// writeBorderXML serialises a Border as an <a:ln> element.
+//
+// Border.Width is in points (the reader converts from the EMU in the file with
+// v/12700, and the renderer multiplies back by 12700), so it has to be
+// converted to EMU here. Writing it raw made every border shrink to roughly
+// 1/12700 of its intended width on a read/write round trip.
 func (w *PPTXWriter) writeBorderXML(b *Border) string {
 	if b == nil || b.Style == BorderNone {
 		return ""
 	}
+	widthEMU := maxInt(b.Width, 1) * 12700
 	var dashXML string
 	switch b.Style {
 	case BorderDash:
@@ -750,10 +783,10 @@ func (w *PPTXWriter) writeBorderXML(b *Border) string {
 	}
 	if dashXML != "" {
 		return fmt.Sprintf("          <a:ln w=\"%d\"><a:solidFill><a:srgbClr val=\"%s\"/></a:solidFill>%s</a:ln>\n",
-			b.Width, colorRGB(b.Color), dashXML)
+			widthEMU, colorRGB(b.Color), dashXML)
 	}
 	return fmt.Sprintf("          <a:ln w=\"%d\"><a:solidFill><a:srgbClr val=\"%s\"/></a:solidFill></a:ln>\n",
-		b.Width, colorRGB(b.Color))
+		widthEMU, colorRGB(b.Color))
 }
 
 // --- Media ---
@@ -799,10 +832,13 @@ func (w *PPTXWriter) writeMedia(zw *zip.Writer) error {
 	return nil
 }
 
+// getChartIndex returns the 1-based index of a chart part, numbering charts in
+// the same document order that WriteTo emits them in. The two have to agree or a
+// chart relationship points at another slide's chart.
 func (w *PPTXWriter) getChartIndex(target *ChartShape) int {
 	idx := 1
 	for _, slide := range w.presentation.slides {
-		for _, shape := range slide.shapes {
+		for _, shape := range flattenShapes(slide.shapes) {
 			if cs, ok := shape.(*ChartShape); ok {
 				if cs == target {
 					return idx
@@ -864,6 +900,9 @@ func (w *PPTXWriter) writeGroupShapeXML(g *GroupShape, shapeID *int, slideNum in
 
 	var childXML strings.Builder
 	for _, shape := range g.shapes {
+		// Every shape kind the slide can hold has to be written here too.
+		// A missing case does not fail loudly: the child simply disappears from
+		// the saved file, so a group's contents are lost on a round trip.
 		switch s := shape.(type) {
 		case *PlaceholderShape:
 			childXML.WriteString(w.writePlaceholderShapeXML(s, shapeID))
@@ -877,6 +916,10 @@ func (w *PPTXWriter) writeGroupShapeXML(g *GroupShape, shapeID *int, slideNum in
 			childXML.WriteString(w.writeDrawingShapeXML(s, shapeID, slideNum))
 		case *TableShape:
 			childXML.WriteString(w.writeTableShapeXML(s, shapeID))
+		case *ChartShape:
+			childXML.WriteString(w.writeChartShapeXML(s, shapeID, slideNum))
+		case *GroupShape:
+			childXML.WriteString(w.writeGroupShapeXML(s, shapeID, slideNum))
 		}
 	}
 

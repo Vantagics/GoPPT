@@ -49,11 +49,38 @@ type RenderOptions struct {
 	FontDirs []string
 	// FontCache allows sharing a pre-configured FontCache across multiple renders.
 	// If nil, a new FontCache is created using FontDirs.
+	//
+	// Creating a FontCache scans the font directories, so when rendering many
+	// slides or many files, build one cache and reuse it here. SlidesToImages
+	// already reuses the cache across the slides of a single call.
 	FontCache *FontCache
+	// FontFallback lists font names tried, in order, when a document requests a
+	// font that is not installed. These are tried before the built-in fallback
+	// chain. Setting e.g. []string{"Noto Sans CJK SC"} pins CJK text to a known
+	// installed font instead of depending on the built-in order.
+	FontFallback []string
+	// FontDiagnostics, when non-nil, collects every font request that was
+	// substituted or not found at all during the render. Use it to tell a
+	// broken document apart from a machine that lacks the required font.
+	FontDiagnostics *FontDiagnostics
+	// OnFontFallback, when non-nil, is called for each font request that could
+	// not be satisfied exactly. It may be called concurrently.
+	OnFontFallback func(FontUsage)
 	// OverlayOpacityScale scales the opacity of semi-transparent shape fills.
 	// Value between 0.0 and 1.0. Default 0 means use 1.0 (no change).
 	// Set to e.g. 0.5 to halve the opacity of overlays, making dark backgrounds brighter.
 	OverlayOpacityScale float64
+	// Draft trades fidelity for speed, for batch previews whose purpose is to
+	// show roughly what a slide looks like rather than to judge it pixel by
+	// pixel. It skips anti-aliasing on lines and ellipses, skips shadows
+	// entirely, and scales images with nearest-neighbour sampling instead of
+	// bilinear.
+	//
+	// Glyph rasterisation is still anti-aliased, because that cannot be turned
+	// off without replacing the text renderer; text stays readable, which is the
+	// point of a preview. Combine Draft with a small Width (e.g. 480) for the
+	// largest saving.
+	Draft bool
 }
 
 // DefaultRenderOptions returns default rendering options.
@@ -67,29 +94,53 @@ func DefaultRenderOptions() *RenderOptions {
 }
 
 // SlideToImage renders a single slide to an image.
-func (p *Presentation) SlideToImage(slideIndex int, opts *RenderOptions) (image.Image, error) {
+//
+// SlideToImage never panics: malformed shape data that trips up the rasterizer
+// is reported as a *PanicError.
+func (p *Presentation) SlideToImage(slideIndex int, opts *RenderOptions) (img image.Image, err error) {
+	defer recoverToError(&err, "Presentation.SlideToImage")
+	if p == nil {
+		return nil, fmt.Errorf("presentation is nil")
+	}
 	if slideIndex < 0 || slideIndex >= len(p.slides) {
 		return nil, fmt.Errorf("slide index %d out of range (0-%d)", slideIndex, len(p.slides)-1)
 	}
 	if opts == nil {
 		opts = DefaultRenderOptions()
 	}
-	if opts.Width <= 0 {
-		opts.Width = 960
+	// Fill in defaults on a copy. Options belong to the caller, so writing a
+	// derived value back into them would be an unexpected side effect, and it
+	// would race with a second render handed the same struct. SlidesToImages
+	// relies on this too.
+	local := *opts
+	if local.Width <= 0 {
+		local.Width = 960
 	}
+	opts = &local
 
 	slide := p.slides[slideIndex]
 	layout := p.layout
+	if layout == nil {
+		return nil, fmt.Errorf("presentation has no document layout")
+	}
+	if layout.CX <= 0 || layout.CY <= 0 {
+		return nil, fmt.Errorf("presentation has an invalid slide size (%d x %d EMU)", layout.CX, layout.CY)
+	}
 
 	slideW := float64(layout.CX)
 	slideH := float64(layout.CY)
 	imgW := opts.Width
 	imgH := int(float64(imgW) * slideH / slideW)
+	// An extreme slide aspect ratio can round the height away; a zero-height
+	// canvas is not a usable image, so keep at least one row.
+	if imgH < 1 {
+		imgH = 1
+	}
 
 	scaleX := float64(imgW) / slideW
 	scaleY := float64(imgH) / slideH
 
-	img := image.NewRGBA(image.Rect(0, 0, imgW, imgH))
+	canvas := image.NewRGBA(image.Rect(0, 0, imgW, imgH))
 
 	fc := opts.FontCache
 	if fc == nil {
@@ -101,12 +152,17 @@ func (p *Presentation) SlideToImage(slideIndex int, opts *RenderOptions) (image.
 	}
 
 	r := &renderer{
-		img:                 img,
+		img:                 canvas,
 		scaleX:              scaleX,
 		scaleY:              scaleY,
 		fontCache:           fc,
 		dpi:                 dpi,
 		overlayOpacityScale: opts.OverlayOpacityScale,
+		fontFallback:        mergeFallbackChain(opts.FontFallback, defaultFontFallbackChain),
+		cjkFallback:         mergeFallbackChain(opts.FontFallback, defaultCJKFallbackChain),
+		fontDiag:            opts.FontDiagnostics,
+		onFontFallback:      opts.OnFontFallback,
+		draft:               opts.Draft,
 	}
 
 	// Fill background
@@ -119,15 +175,15 @@ func (p *Presentation) SlideToImage(slideIndex int, opts *RenderOptions) (image.
 		case FillSolid:
 			bgColor = argbToRGBA(slide.background.Color)
 		case FillGradientLinear:
-			r.fillGradientLinear(img.Bounds(), slide.background)
+			r.fillGradientLinear(canvas.Bounds(), slide.background)
 			drawn = true
 		case FillGradientPath:
-			r.fillGradientPath(img.Bounds(), slide.background)
+			r.fillGradientPath(canvas.Bounds(), slide.background)
 			drawn = true
 		}
 	}
 	if !drawn {
-		r.fillRectFast(img.Bounds(), bgColor)
+		r.fillRectFast(canvas.Bounds(), bgColor)
 	}
 
 	// Render shapes in their original XML order (z-order).
@@ -137,30 +193,43 @@ func (p *Presentation) SlideToImage(slideIndex int, opts *RenderOptions) (image.
 		r.renderShape(shape)
 	}
 
-	return img, nil
+	return canvas, nil
 }
 
 // SlidesToImages renders all slides to images.
-func (p *Presentation) SlidesToImages(opts *RenderOptions) ([]image.Image, error) {
+//
+// The FontCache in opts is reused across slides; if it is nil one is created
+// once per call, so pass a shared cache when rendering repeatedly. opts itself
+// is never modified.
+func (p *Presentation) SlidesToImages(opts *RenderOptions) (imgs []image.Image, err error) {
+	defer recoverToError(&err, "Presentation.SlidesToImages")
+	if p == nil {
+		return nil, fmt.Errorf("presentation is nil")
+	}
 	if opts == nil {
 		opts = DefaultRenderOptions()
 	}
-	if opts.FontCache == nil {
-		opts.FontCache = NewFontCache(opts.FontDirs...)
+	// Work on a copy rather than writing the derived cache back into the
+	// caller's struct: options are caller-owned data, and mutating them here
+	// would race if the same options were passed to two presentations at once.
+	local := *opts
+	if local.FontCache == nil {
+		local.FontCache = NewFontCache(local.FontDirs...)
 	}
-	images := make([]image.Image, len(p.slides))
+	imgs = make([]image.Image, len(p.slides))
 	for i := range p.slides {
-		img, err := p.SlideToImage(i, opts)
-		if err != nil {
-			return nil, fmt.Errorf("slide %d: %w", i, err)
+		img, slideErr := p.SlideToImage(i, &local)
+		if slideErr != nil {
+			return nil, fmt.Errorf("slide %d: %w", i, slideErr)
 		}
-		images[i] = img
+		imgs[i] = img
 	}
-	return images, nil
+	return imgs, nil
 }
 
 // SaveSlideAsImage renders a slide and saves it to a file.
-func (p *Presentation) SaveSlideAsImage(slideIndex int, path string, opts *RenderOptions) error {
+func (p *Presentation) SaveSlideAsImage(slideIndex int, path string, opts *RenderOptions) (err error) {
+	defer recoverToError(&err, "Presentation.SaveSlideAsImage")
 	img, err := p.SlideToImage(slideIndex, opts)
 	if err != nil {
 		return err
@@ -170,10 +239,27 @@ func (p *Presentation) SaveSlideAsImage(slideIndex int, path string, opts *Rende
 
 // SaveSlidesAsImages renders all slides and saves them to files.
 // The pattern should contain %d for the slide number (1-based), e.g. "slide_%d.png".
-func (p *Presentation) SaveSlidesAsImages(pattern string, opts *RenderOptions) error {
+//
+// As in SlidesToImages, the FontCache in opts is shared across the slides and
+// opts itself is never modified.
+func (p *Presentation) SaveSlidesAsImages(pattern string, opts *RenderOptions) (err error) {
+	defer recoverToError(&err, "Presentation.SaveSlidesAsImages")
+	if p == nil {
+		return fmt.Errorf("presentation is nil")
+	}
+	if opts == nil {
+		opts = DefaultRenderOptions()
+	}
+	// Build the font cache once for the whole call. Creating one scans the font
+	// directories, so leaving it to each slide would repeat that scan — and keep
+	// a second copy of every parsed font — once per slide.
+	local := *opts
+	if local.FontCache == nil {
+		local.FontCache = NewFontCache(local.FontDirs...)
+	}
 	for i := range p.slides {
 		path := fmt.Sprintf(pattern, i+1)
-		if err := p.SaveSlideAsImage(i, path, opts); err != nil {
+		if err := p.SaveSlideAsImage(i, path, &local); err != nil {
 			return fmt.Errorf("slide %d: %w", i+1, err)
 		}
 	}
@@ -222,6 +308,22 @@ type renderer struct {
 	dpi                 float64
 	overlayOpacityScale float64 // 0 means 1.0 (no change)
 	fontScale           float64 // normAutofit font scale factor (0 or 1.0 = no scaling)
+	fontFallback        []string
+	cjkFallback         []string
+	fontDiag            *FontDiagnostics
+	onFontFallback      func(FontUsage)
+	// draft skips anti-aliasing, shadows and image smoothing. See
+	// RenderOptions.Draft.
+	draft bool
+}
+
+// subRenderer returns a renderer that shares this renderer's configuration but
+// draws into a different image. Always use this rather than building a renderer
+// literal: a literal silently drops any configuration field added later.
+func (r *renderer) subRenderer(img *image.RGBA) *renderer {
+	clone := *r
+	clone.img = img
+	return &clone
 }
 
 func (r *renderer) renderShape(shape Shape) {
@@ -242,6 +344,10 @@ func (r *renderer) renderShape(shape Shape) {
 		r.renderChart(s)
 	case *GroupShape:
 		r.renderGroup(s)
+	case *UnsupportedShape:
+		// A construct the reader could not represent. Draw a visible
+		// placeholder so the gap shows up in a preview instead of a blank area.
+		r.renderUnsupported(s)
 	}
 }
 
@@ -258,6 +364,27 @@ func (r *renderer) hundredthPtToPixelY(val int) int {
 
 func argbToRGBA(c Color) color.RGBA {
 	return color.RGBA{R: c.GetRed(), G: c.GetGreen(), B: c.GetBlue(), A: c.GetAlpha()}
+}
+
+// drawSrc adapts one of this renderer's colours for use with image/draw and
+// font.Drawer.
+//
+// Colour values here carry *straight* alpha: blendPixel and its relatives
+// multiply by c.A themselves, so the channels have to be the un-multiplied
+// ones. Go, however, defines color.RGBA as alpha-premultiplied, and both
+// image/draw and font.Drawer trust that definition. Handing them a
+// straight-alpha value whose A is below 255 therefore violates the invariant —
+// the channels exceed the alpha, the fixed-point blend overflows the byte it
+// stores into, and the result wraps to something arbitrary rather than to the
+// intended colour. In practice a white glyph at 12% opacity came out *darker*
+// than the navy it was drawn on.
+//
+// color.NRGBA is the straight-alpha type, and its RGBA method premultiplies
+// correctly, so it is the right source for those APIs. Opaque colours behave
+// identically either way, which is why this only surfaced once a run carried
+// <a:alpha>.
+func drawSrc(c color.RGBA) color.Color {
+	return color.NRGBA{R: c.R, G: c.G, B: c.B, A: c.A}
 }
 
 // --- Pixel operations (performance-critical) ---
@@ -291,6 +418,16 @@ func (r *renderer) blendPixel(x, y int, c color.RGBA) {
 
 // blendPixelF blends with fractional coverage (0.0–1.0) for anti-aliasing.
 func (r *renderer) blendPixelF(x, y int, c color.RGBA, coverage float64) {
+	if r.draft {
+		// Draft mode snaps partial coverage to fully on or fully off. Anti-
+		// aliasing costs a per-pixel alpha computation and blend; thresholding
+		// keeps the shape's core while removing the soft edges.
+		if coverage < 0.5 {
+			return
+		}
+		r.blendPixel(x, y, c)
+		return
+	}
 	if coverage <= 0 {
 		return
 	}
@@ -303,7 +440,10 @@ func (r *renderer) blendPixelF(x, y int, c color.RGBA, coverage float64) {
 
 // fillRectFast fills a rectangle with an opaque color using draw.Draw.
 func (r *renderer) fillRectFast(rect image.Rectangle, c color.RGBA) {
-	draw.Draw(r.img, rect, &image.Uniform{c}, image.Point{}, draw.Over)
+	// drawSrc even for the opaque case: Uniform.RGBA reports sa == 0xffff for
+	// an opaque colour whatever its concrete type, so the fast fill path is
+	// still taken, and a translucent caller gets the right answer.
+	draw.Draw(r.img, rect, &image.Uniform{drawSrc(c)}, image.Point{}, draw.Over)
 }
 
 // fillRectBlend fills a rectangle with alpha blending, using row-based direct Pix access.
@@ -429,7 +569,7 @@ func (r *renderer) renderRotatedExpanded(x, y, w, h, bufH, rotation int, flipH, 
 		bufH = h
 	}
 	tmp := image.NewRGBA(image.Rect(0, 0, w, bufH))
-	tmpR := &renderer{img: tmp, scaleX: r.scaleX, scaleY: r.scaleY, fontCache: r.fontCache, dpi: r.dpi, fontScale: r.fontScale}
+	tmpR := r.subRenderer(tmp)
 	drawFn(tmpR)
 
 	if rotation == 0 && !flipH && !flipV {
@@ -514,7 +654,6 @@ func (r *renderer) renderRotatedExpanded(x, y, w, h, bufH, rotation int, flipH, 
 		}
 	}
 }
-
 
 func (r *renderer) renderGroup(g *GroupShape) {
 	// Transform child coordinates from child space (chOff/chExt) to group space (off/ext)
@@ -884,7 +1023,7 @@ func (r *renderer) renderRichText(s *RichTextShape) {
 				vtw, vth := drawTH, tw // text area: width=drawTH, height=tw (before rotation)
 				if vtw > 0 && vth > 0 {
 					tmp := image.NewRGBA(image.Rect(0, 0, vtw, vth))
-					tmpR := &renderer{img: tmp, scaleX: tr.scaleX, scaleY: tr.scaleY, fontCache: tr.fontCache, dpi: tr.dpi, fontScale: tr.fontScale}
+					tmpR := tr.subRenderer(tmp)
 					tmpR.drawParagraphs(s.paragraphs, 0, 0, vtw, vth, s.textAnchor, wordWrap)
 					rotateAndComposite(tr.img, tmp, tx, ty, tw, drawTH, vertRotation)
 				}
@@ -925,7 +1064,7 @@ func (r *renderer) renderRichText(s *RichTextShape) {
 				vtw, vth := drawTH, tw
 				if vtw > 0 && vth > 0 {
 					tmp := image.NewRGBA(image.Rect(0, 0, vtw, vth))
-					tmpR := &renderer{img: tmp, scaleX: tr.scaleX, scaleY: tr.scaleY, fontCache: tr.fontCache, dpi: tr.dpi, fontScale: tr.fontScale}
+					tmpR := tr.subRenderer(tmp)
 					tmpR.drawParagraphs(s.paragraphs, 0, 0, vtw, vth, s.textAnchor, wordWrap)
 					rotateAndComposite(tr.img, tmp, tx, ty, tw, drawTH, vertRotation)
 				}
@@ -943,6 +1082,38 @@ func (r *renderer) renderRichText(s *RichTextShape) {
 	} else {
 		drawContent(r)
 	}
+}
+
+// looksLikeSVG reports whether picture bytes are an SVG document. The test is
+// content-based because a DrawingShape carries bytes, not the part's content
+// type, so the file extension that named the part is no longer available here.
+func looksLikeSVG(data []byte) bool {
+	s := data
+	if i := bytes.IndexByte(s, '<'); i >= 0 {
+		s = s[i:]
+	} else {
+		return false
+	}
+	if bytes.HasPrefix(s, []byte("<svg")) {
+		return true
+	}
+	return bytes.HasPrefix(s, []byte("<?xml")) && bytes.Contains(s, []byte("<svg"))
+}
+
+// renderPicturePlaceholder marks a picture that could not be rasterised.
+//
+// It reuses the unsupported-shape treatment — amber, dashed, labelled — because
+// this is the same kind of event: part of the document is not in the preview.
+// Drawing nothing, or a neutral grey frame, hides that, and a grey frame in
+// particular reads as a picture that legitimately has a grey border.
+func (r *renderer) renderPicturePlaceholder(x, y, w, h int, label string) {
+	if w <= 0 || h <= 0 {
+		return
+	}
+	rect := image.Rect(x, y, x+w, y+h)
+	r.fillRectBlend(rect, unsupportedFill)
+	r.drawRectBorder(rect, unsupportedBorder, placeholderBorderWidth(w, h), BorderDash)
+	r.drawPlaceholderLabel(label, rect)
 }
 
 func (r *renderer) renderDrawing(s *DrawingShape) {
@@ -969,8 +1140,18 @@ func (r *renderer) renderDrawing(s *DrawingShape) {
 			err = nil
 		}
 	}
+	// SVG needs its own rasteriser; without it, every icon and connector line a
+	// design pipeline emits as SVG disappears from the preview.
+	pictureLabel := "Undecodable image"
+	if err != nil && looksLikeSVG(imgData) {
+		if svgImg, svgErr := renderSVG(imgData, w, h); svgErr == nil {
+			srcImg, err = svgImg, nil
+		} else {
+			pictureLabel = "SVG: " + strings.TrimPrefix(svgErr.Error(), "svg: ")
+		}
+	}
 	if err != nil {
-		r.drawRect(image.Rect(x, y, x+w, y+h), color.RGBA{R: 200, G: 200, B: 200, A: 255}, 1)
+		r.renderPicturePlaceholder(x, y, w, h, pictureLabel)
 		return
 	}
 
@@ -999,7 +1180,7 @@ func (r *renderer) renderDrawing(s *DrawingShape) {
 		if tr != r {
 			ox, oy = 0, 0
 		}
-		scaledImg := scaleImageBilinear(srcImg, w, h)
+		scaledImg := tr.scaleForRender(srcImg, w, h)
 		// Apply alphaModFix opacity if set (value is in 1/1000 of a percent, e.g. 5000 = 5%)
 		if s.alpha > 0 && s.alpha < 100000 {
 			alphaScale := float64(s.alpha) / 100000.0
@@ -1173,7 +1354,7 @@ func (r *renderer) renderAutoShape(s *AutoShape) {
 			// Auto-shrink when text overflows the full shape height —
 			// CJK font metrics in Go are often larger than PowerPoint's.
 			// Use a conservative floor to avoid making text too small.
-			if (s.fontScale == 0 || s.fontScale == 100000) {
+			if s.fontScale == 0 || s.fontScale == 100000 {
 				atextH := r.measureParagraphsHeight(s.paragraphs, tw, th, s.textAnchor, true)
 				if atextH > h && h > 0 && atextH > th && th > 0 {
 					lo, hi := 0.65, 1.0
@@ -1220,7 +1401,7 @@ func (r *renderer) renderAutoShape(s *AutoShape) {
 				vtw, vth := th, tw
 				if vtw > 0 && vth > 0 {
 					tmp := image.NewRGBA(image.Rect(0, 0, vtw, vth))
-					tmpR := &renderer{img: tmp, scaleX: tr.scaleX, scaleY: tr.scaleY, fontCache: tr.fontCache, dpi: tr.dpi, fontScale: tr.fontScale}
+					tmpR := tr.subRenderer(tmp)
 					tmpR.drawParagraphs(s.paragraphs, 0, 0, vtw, vth, s.textAnchor, true)
 					rotateAndComposite(tr.img, tmp, tx, ty, tw, th, vertRotation)
 				}
@@ -1329,13 +1510,25 @@ func (r *renderer) renderAutoShape(s *AutoShape) {
 				ety := oy + insetY
 				etw := w - 2*insetX
 				eth := h - 2*insetY
-				if etx > tx { tx = etx }
-				if ety > ty { ty = ety }
-				if etx+etw < ox+pxL+tw { tw = etx + etw - tx }
-				if ety+eth < oy+pxT+th { th = ety + eth - ty }
+				if etx > tx {
+					tx = etx
+				}
+				if ety > ty {
+					ty = ety
+				}
+				if etx+etw < ox+pxL+tw {
+					tw = etx + etw - tx
+				}
+				if ety+eth < oy+pxT+th {
+					th = ety + eth - ty
+				}
 			}
-			if tw < 1 { tw = w }
-			if th < 1 { th = h }
+			if tw < 1 {
+				tw = w
+			}
+			if th < 1 {
+				th = h
+			}
 			if !s.insetsSet {
 				textH := r.measureParagraphsHeight(s.paragraphs, tw, th, s.textAnchor, true)
 				if textH > th && th > 0 && (pxT+pxB) > 0 {
@@ -1352,7 +1545,9 @@ func (r *renderer) renderAutoShape(s *AutoShape) {
 					tx = ox + pxL
 					ty = oy + pxT
 					th = h - pxT - pxB
-					if th < 1 { th = h }
+					if th < 1 {
+						th = h
+					}
 				}
 			}
 			// Auto-shrink when text overflows
@@ -1397,7 +1592,7 @@ func (r *renderer) renderAutoShape(s *AutoShape) {
 				vtw, vth := th, tw
 				if vtw > 0 && vth > 0 {
 					tmp := image.NewRGBA(image.Rect(0, 0, vtw, vth))
-					tmpR := &renderer{img: tmp, scaleX: tr.scaleX, scaleY: tr.scaleY, fontCache: tr.fontCache, dpi: tr.dpi, fontScale: tr.fontScale}
+					tmpR := tr.subRenderer(tmp)
 					tmpR.drawParagraphs(s.paragraphs, 0, 0, vtw, vth, s.textAnchor, true)
 					rotateAndComposite(tr.img, tmp, tx, ty, tw, th, vertRotation)
 				}
@@ -2673,7 +2868,7 @@ func lerpColor(a, b color.RGBA, t float64) color.RGBA {
 // --- Shadow rendering ---
 
 func (r *renderer) renderShadow(shadow *Shadow, rect image.Rectangle) {
-	if shadow == nil || !shadow.Visible {
+	if r.draft || shadow == nil || !shadow.Visible {
 		return
 	}
 	rad := float64(shadow.Direction) * math.Pi / 180.0
@@ -2716,9 +2911,8 @@ func (r *renderer) renderShadow(shadow *Shadow, rect image.Rectangle) {
 	}
 }
 
-
 func (r *renderer) renderShadowRounded(shadow *Shadow, rect image.Rectangle, radius int) {
-	if shadow == nil || !shadow.Visible {
+	if r.draft || shadow == nil || !shadow.Visible {
 		return
 	}
 	rad := float64(shadow.Direction) * math.Pi / 180.0
@@ -2745,7 +2939,7 @@ func (r *renderer) renderShadowRounded(shadow *Shadow, rect image.Rectangle, rad
 		return
 	}
 	tmp := image.NewRGBA(image.Rect(0, 0, tmpW, tmpH))
-	tmpR := &renderer{img: tmp, scaleX: r.scaleX, scaleY: r.scaleY}
+	tmpR := r.subRenderer(tmp)
 
 	for i := steps; i >= 0; i-- {
 		t := float64(i) / float64(steps)
@@ -3546,12 +3740,12 @@ func flowChartPreparationPoints(x, y, w, h int) []fpoint {
 	inset := float64(w) / 5.0
 	fx, fy, fw, fh := float64(x), float64(y), float64(w), float64(h)
 	return []fpoint{
-		{fx, fy + fh/2},          // left point
-		{fx + inset, fy},          // top-left
-		{fx + fw - inset, fy},     // top-right
-		{fx + fw, fy + fh/2},     // right point
+		{fx, fy + fh/2},            // left point
+		{fx + inset, fy},           // top-left
+		{fx + fw - inset, fy},      // top-right
+		{fx + fw, fy + fh/2},       // right point
 		{fx + fw - inset, fy + fh}, // bottom-right
-		{fx + inset, fy + fh},     // bottom-left
+		{fx + inset, fy + fh},      // bottom-left
 	}
 }
 
@@ -3559,7 +3753,6 @@ func (r *renderer) fillFlowChartPreparation(x, y, w, h int, c color.RGBA) {
 	pts := flowChartPreparationPoints(x, y, w, h)
 	r.fillPolygon(pts, c)
 }
-
 
 func (r *renderer) fillStar(x, y, w, h, points int, c color.RGBA) {
 	cx := float64(x) + float64(w)/2
@@ -3723,11 +3916,13 @@ func (r *renderer) fillHomePlate(x, y, w, h int, c color.RGBA) {
 	}
 	r.fillPolygon(pts, c)
 }
+
 // fillWedgeRoundRectCallout draws a rounded-rectangle callout shape.
 // OOXML wedgeRoundRectCallout has three adjust values:
-//   adj1: X offset of callout tip from center (1/100000 of width, default -20833)
-//   adj2: Y offset of callout tip from center (1/100000 of height, default 62500)
-//   adj3: corner radius (1/100000 of min(w,h), default 16667)
+//
+//	adj1: X offset of callout tip from center (1/100000 of width, default -20833)
+//	adj2: Y offset of callout tip from center (1/100000 of height, default 62500)
+//	adj3: corner radius (1/100000 of min(w,h), default 16667)
 func (r *renderer) fillWedgeRoundRectCallout(x, y, w, h int, c color.RGBA, adj map[string]int) {
 	adj1v := -20833
 	adj2v := 62500
@@ -3851,7 +4046,7 @@ func (r *renderer) drawWedgeRoundRectCalloutBorder(x, y, w, h int, bc color.RGBA
 	// Determine wedge base position and which edge it's on
 	type wedgeInfo struct {
 		bx1, by1, bx2, by2 float64
-		edge                int // 0=bottom, 1=top, 2=right, 3=left
+		edge               int // 0=bottom, 1=top, 2=right, 3=left
 	}
 	var wi wedgeInfo
 	if math.Abs(dy)*fw >= math.Abs(dx)*fh {
@@ -3893,7 +4088,6 @@ func (r *renderer) drawWedgeRoundRectCalloutBorder(x, y, w, h int, bc color.RGBA
 	r.drawLineAA(int(tipX), int(tipY), int(wi.bx2), int(wi.by2), bc, pw)
 }
 
-
 // snip2SameRectPoints computes the polygon points for a snip2SameRect shape.
 // In OOXML snip2SameRect, adj1 controls the bottom-left and bottom-right snip,
 // adj2 controls the top-left and top-right snip.
@@ -3930,7 +4124,6 @@ func (r *renderer) fillSnip2SameRect(x, y, w, h int, c color.RGBA, adj map[strin
 	pts := r.snip2SameRectPoints(x, y, w, h, adj)
 	r.fillPolygon(pts, c)
 }
-
 
 func (r *renderer) fillBentArrow(x, y, w, h int, c color.RGBA, adj map[string]int) {
 	// OOXML bentArrow preset geometry.
@@ -4082,10 +4275,10 @@ func (r *renderer) fillUturnArrow(x, y, w, h int, c color.RGBA, adj map[string]i
 	th := ss * float64(adj1v) / 100000.0  // shaft thickness
 	aw2 := ss * float64(adj2v) / 100000.0 // arrowhead half-extra-width
 	th2 := th / 2.0
-	dh2 := aw2 - th2 // arrowhead extension beyond shaft edge
-	y5 := fh * float64(adj5v) / 100000.0  // total height
-	ah := ss * float64(adj3v) / 100000.0   // arrowhead height
-	y4 := y5 - ah                          // arrowhead base y
+	dh2 := aw2 - th2                     // arrowhead extension beyond shaft edge
+	y5 := fh * float64(adj5v) / 100000.0 // total height
+	ah := ss * float64(adj3v) / 100000.0 // arrowhead height
+	y4 := y5 - ah                        // arrowhead base y
 
 	x9 := fw - dh2
 	bw := x9 / 2.0
@@ -4095,9 +4288,9 @@ func (r *renderer) fillUturnArrow(x, y, w, h int, c color.RGBA, adj map[string]i
 	if a4 < 0 {
 		a4 = 0
 	}
-	bd := ss * a4 / 100000.0  // bend diameter (arc radius)
+	bd := ss * a4 / 100000.0 // bend diameter (arc radius)
 	bd3 := bd - th
-	bd2 := math.Max(bd3, 0)   // inner bend diameter
+	bd2 := math.Max(bd3, 0) // inner bend diameter
 
 	x3 := th + bd2
 	x8 := fw - aw2
@@ -4213,161 +4406,251 @@ func (r *renderer) fillUturnArrow(x, y, w, h int, c color.RGBA, adj map[string]i
 
 // --- Text rendering ---
 
-// getFace returns a font.Face for the given Font, falling back to basicfont.Face7x13.
+// fontSizePixels converts a Font's point size into pixels at the current render
+// scale, applying any normAutofit scaling. 1pt = 12700 EMU; scaleX converts
+// EMU to pixels.
+func (r *renderer) fontSizePixels(f *Font) float64 {
+	sizePt := float64(f.Size)
+	if sizePt <= 0 {
+		sizePt = 10
+	}
+	// Apply normAutofit font scale if set
+	if r.fontScale > 0 && r.fontScale != 1.0 {
+		sizePt *= r.fontScale
+	}
+	return sizePt * 12700.0 * r.scaleX
+}
+
+// fontFaceFor looks a face up in the font cache. measure selects the
+// HintingNone face used for text layout.
+func (r *renderer) fontFaceFor(name string, sizePixels float64, bold, italic, measure bool) font.Face {
+	if r.fontCache == nil || name == "" {
+		return nil
+	}
+	if measure {
+		return r.fontCache.GetMeasureFace(name, sizePixels, bold, italic)
+	}
+	return r.fontCache.GetFace(name, sizePixels, bold, italic)
+}
+
+// resolveFace finds a face for f: the requested font first, then the East Asian
+// font, then the configured fallback chain, then the built-in one. It reports
+// which name matched and how, so substitutions can be reported to the caller.
+func (r *renderer) resolveFace(f *Font, sizePixels float64, measure bool) (font.Face, string, FontFallbackKind) {
+	if face := r.fontFaceFor(f.Name, sizePixels, f.Bold, f.Italic, measure); face != nil {
+		return face, f.Name, FontResolved
+	}
+	if f.NameEA != "" {
+		if face := r.fontFaceFor(f.NameEA, sizePixels, f.Bold, f.Italic, measure); face != nil {
+			return face, f.NameEA, FontSubstituted
+		}
+	}
+	for _, name := range r.fontFallback {
+		if face := r.fontFaceFor(name, sizePixels, f.Bold, f.Italic, measure); face != nil {
+			return face, name, FontSubstituted
+		}
+	}
+	return nil, "", FontMissing
+}
+
+// resolveCJKFace finds a face that can actually draw the East Asian characters
+// in sample, for f. It returns the face and the name of the font that matched,
+// or nil and "" when nothing installed covers the text.
+//
+// "The name resolves" is not a strong enough test, and using it is what makes
+// tofu possible. A document whose generator copied one font-family list into
+// both <a:latin> and <a:ea> declares a Latin face as its East Asian font; that
+// face is installed, so the request looks satisfied, and every Chinese
+// character then renders as the font's .notdef box while the font diagnostics
+// report a perfect match. Each candidate is therefore checked against the
+// characters the run actually contains, so a Latin face is skipped in favour of
+// the East Asian fallback chain.
+func (r *renderer) resolveCJKFace(f *Font, sizePixels float64, measure bool, sample string) (font.Face, string) {
+	if r.fontCache == nil {
+		return nil, ""
+	}
+
+	// Preference order: the declared East Asian font, then the fallback chain.
+	candidates := make([]string, 0, len(r.cjkFallback)+1)
+	if f.NameEA != "" {
+		candidates = append(candidates, f.NameEA)
+	}
+	candidates = append(candidates, r.cjkFallback...)
+
+	// A font covering every CJK character in the sample is the answer, and the
+	// first such candidate wins.
+	bestName, bestCovered := "", 0
+	for _, name := range candidates {
+		covered, total := r.countCoveredCJK(name, f.Bold, f.Italic, sample)
+		if total == 0 {
+			continue
+		}
+		if covered == total {
+			if face := r.fontFaceFor(name, sizePixels, f.Bold, f.Italic, measure); face != nil {
+				return face, name
+			}
+			continue
+		}
+		if covered > bestCovered {
+			bestName, bestCovered = name, covered
+		}
+	}
+
+	// No font covers the whole sample. Surrendering here would return nil, and
+	// splitRunByCJK would then draw the entire run — including the characters
+	// that ARE drawable — with the Latin face. So take the font that covers the
+	// most, and let only the genuinely missing characters show a .notdef box.
+	if bestName != "" {
+		if face := r.fontFaceFor(bestName, sizePixels, f.Bold, f.Italic, measure); face != nil {
+			return face, bestName
+		}
+	}
+	return nil, ""
+}
+
+// countCoveredCJK reports how many of the sample's CJK characters the named
+// font can draw, and how many such characters the sample contains. A total of
+// zero means the sample holds no CJK, so the question does not apply.
+func (r *renderer) countCoveredCJK(name string, bold, italic bool, sample string) (covered, total int) {
+	if r.fontCache == nil || name == "" {
+		return 0, 0
+	}
+	for _, ch := range sample {
+		if !isCJK(ch) {
+			continue
+		}
+		total++
+		if r.fontCache.CoversRune(name, bold, italic, ch) {
+			covered++
+		}
+	}
+	return covered, total
+}
+
+// coversCJK reports whether the named font has a glyph for every East Asian
+// character in sample.
+//
+// A sample containing no East Asian characters cannot be answered by this
+// question, so it reports false: vouching for a font that was never tested is
+// how a Latin face ends up drawing East Asian text. Callers only reach here for
+// text that contains CJK.
+func (r *renderer) coversCJK(name string, bold, italic bool, sample string) bool {
+	covered, total := r.countCoveredCJK(name, bold, italic, sample)
+	return total > 0 && covered == total
+}
+
+// noteFontFallback reports a font request that was not satisfied exactly. Fully
+// resolved requests are skipped because they are not interesting.
+func (r *renderer) noteFontFallback(f *Font, used string, kind FontFallbackKind) {
+	if kind == FontResolved {
+		return
+	}
+	if f.Name == "" && kind == FontSubstituted {
+		// No font was requested, so a default face was picked. Not a
+		// substitution worth reporting.
+		return
+	}
+	r.recordFontUsage(f.Name, used, kind, f.Bold, f.Italic)
+}
+
+// recordFontUsage files one font resolution outcome with the diagnostics sink
+// and the fallback callback. Resolved requests are skipped because a caller
+// cannot act on them.
+func (r *renderer) recordFontUsage(requested, used string, kind FontFallbackKind, bold, italic bool) {
+	if kind == FontResolved || (r.fontDiag == nil && r.onFontFallback == nil) {
+		return
+	}
+	u := FontUsage{
+		Requested: requested,
+		Used:      used,
+		Kind:      kind,
+		Bold:      bold,
+		Italic:    italic,
+	}
+	r.fontDiag.record(u)
+	if r.onFontFallback != nil {
+		r.onFontFallback(u)
+	}
+}
+
+// noteCJKFont reports the outcome of choosing an East Asian font for f.
+//
+// A declared East Asian font that had to be replaced is the case worth
+// surfacing, and the one that used to pass unmentioned: the name resolves, so
+// nothing looks wrong, while the text is drawn as missing-glyph boxes. Silent
+// tofu is exactly the condition FontDiagnostics exists to expose.
+func (r *renderer) noteCJKFont(f *Font, used string) {
+	if r.fontDiag == nil && r.onFontFallback == nil {
+		return
+	}
+	if f.NameEA != "" && f.NameEA != used {
+		kind := FontSubstituted
+		if used == "" {
+			kind = FontMissing
+		}
+		r.recordFontUsage(f.NameEA, used, kind, f.Bold, f.Italic)
+		return
+	}
+	if used == "" {
+		// No East Asian font was declared and none installed can draw the text,
+		// so every East Asian character becomes a missing-glyph box.
+		r.recordFontUsage(f.Name, "", FontMissing, f.Bold, f.Italic)
+	}
+}
+
+// getFace returns a font.Face for the given Font. When no installed font can be
+// found it falls back to basicfont.Face7x13, which renders non-ASCII glyphs as
+// blank boxes; the miss is reported through FontDiagnostics / OnFontFallback.
 func (r *renderer) getFace(f *Font) font.Face {
 	if r.fontCache == nil {
 		return basicfont.Face7x13
 	}
-	sizePt := float64(f.Size)
-	if sizePt <= 0 {
-		sizePt = 10
+	face, used, kind := r.resolveFace(f, r.fontSizePixels(f), false)
+	if face == nil {
+		r.noteFontFallback(f, "", FontMissing)
+		return basicfont.Face7x13
 	}
-	// Apply normAutofit font scale if set
-	if r.fontScale > 0 && r.fontScale != 1.0 {
-		sizePt *= r.fontScale
-	}
-	// Convert point size to pixels using the rendering scale.
-	// 1pt = 12700 EMU; scaleX converts EMU to pixels.
-	sizePixels := sizePt * 12700.0 * r.scaleX
-
-	face := r.fontCache.GetFace(f.Name, sizePixels, f.Bold, f.Italic)
-	if face != nil {
-		return face
-	}
-	// Try East Asian font name if specified
-	if f.NameEA != "" {
-		face = r.fontCache.GetFace(f.NameEA, sizePixels, f.Bold, f.Italic)
-		if face != nil {
-			return face
-		}
-	}
-	// CJK fallback names
-	for _, fallback := range []string{
-		"Microsoft YaHei", "SimSun", "SimHei", "NSimSun",
-		"Yu Gothic", "Meiryo", "MS Gothic",
-		"Malgun Gothic", "Gulim",
-		"Noto Sans CJK SC", "Noto Sans SC", "WenQuanYi Micro Hei",
-		"Arial", "Helvetica", "DejaVu Sans",
-	} {
-		face = r.fontCache.GetFace(fallback, sizePixels, f.Bold, f.Italic)
-		if face != nil {
-			return face
-		}
-	}
-	return basicfont.Face7x13
+	r.noteFontFallback(f, used, kind)
+	return face
 }
 
-// getCJKFace returns a font face suitable for CJK characters.
-// It tries NameEA first, then common CJK fonts.
-func (r *renderer) getCJKFace(f *Font) font.Face {
+// getCJKFace returns a font face able to draw the East Asian text in sample,
+// plus the name of the font it came from, or nil and "" when no installed font
+// covers that text.
+func (r *renderer) getCJKFace(f *Font, sample string) (font.Face, string) {
 	if r.fontCache == nil {
-		return nil
+		return nil, ""
 	}
-	sizePt := float64(f.Size)
-	if sizePt <= 0 {
-		sizePt = 10
-	}
-	// Apply normAutofit font scale if set
-	if r.fontScale > 0 && r.fontScale != 1.0 {
-		sizePt *= r.fontScale
-	}
-	sizePixels := sizePt * 12700.0 * r.scaleX
-
-	// Try East Asian font name first
-	if f.NameEA != "" {
-		face := r.fontCache.GetFace(f.NameEA, sizePixels, f.Bold, f.Italic)
-		if face != nil {
-			return face
-		}
-	}
-	// CJK fallback
-	for _, name := range []string{
-		"Microsoft YaHei", "SimSun", "SimHei", "NSimSun",
-		"Yu Gothic", "Meiryo", "MS Gothic",
-		"Malgun Gothic", "Gulim",
-		"Noto Sans CJK SC", "Noto Sans SC", "WenQuanYi Micro Hei",
-	} {
-		face := r.fontCache.GetFace(name, sizePixels, f.Bold, f.Italic)
-		if face != nil {
-			return face
-		}
-	}
-	return nil
+	return r.resolveCJKFace(f, r.fontSizePixels(f), false, sample)
 }
 
 // getMeasureFace returns a font.Face with HintingNone for text measurement.
 // PowerPoint uses unhinted glyph metrics for text layout, so using HintingNone
-// produces glyph advances that match PowerPoint's wrapping positions.
+// produces glyph advances that match PowerPoint's wrapping positions. It
+// returns nil when no installed font matches, leaving the caller to fall back.
 func (r *renderer) getMeasureFace(f *Font) font.Face {
 	if r.fontCache == nil {
 		return nil
 	}
-	sizePt := float64(f.Size)
-	if sizePt <= 0 {
-		sizePt = 10
-	}
-	if r.fontScale > 0 && r.fontScale != 1.0 {
-		sizePt *= r.fontScale
-	}
-	sizePixels := sizePt * 12700.0 * r.scaleX
-
-	face := r.fontCache.GetMeasureFace(f.Name, sizePixels, f.Bold, f.Italic)
-	if face != nil {
-		return face
-	}
-	if f.NameEA != "" {
-		face = r.fontCache.GetMeasureFace(f.NameEA, sizePixels, f.Bold, f.Italic)
-		if face != nil {
-			return face
-		}
-	}
-	for _, fallback := range []string{
-		"Microsoft YaHei", "SimSun", "SimHei", "NSimSun",
-		"Yu Gothic", "Meiryo", "MS Gothic",
-		"Malgun Gothic", "Gulim",
-		"Noto Sans CJK SC", "Noto Sans SC", "WenQuanYi Micro Hei",
-		"Arial", "Helvetica", "DejaVu Sans",
-	} {
-		face = r.fontCache.GetMeasureFace(fallback, sizePixels, f.Bold, f.Italic)
-		if face != nil {
-			return face
-		}
-	}
-	return nil
-}
-
-// getCJKMeasureFace returns a HintingNone font.Face for CJK text measurement.
-func (r *renderer) getCJKMeasureFace(f *Font) font.Face {
-	if r.fontCache == nil {
+	face, used, kind := r.resolveFace(f, r.fontSizePixels(f), true)
+	if face == nil {
+		r.noteFontFallback(f, "", FontMissing)
 		return nil
 	}
-	sizePt := float64(f.Size)
-	if sizePt <= 0 {
-		sizePt = 10
-	}
-	if r.fontScale > 0 && r.fontScale != 1.0 {
-		sizePt *= r.fontScale
-	}
-	sizePixels := sizePt * 12700.0 * r.scaleX
+	r.noteFontFallback(f, used, kind)
+	return face
+}
 
-	if f.NameEA != "" {
-		face := r.fontCache.GetMeasureFace(f.NameEA, sizePixels, f.Bold, f.Italic)
-		if face != nil {
-			return face
-		}
+// getCJKMeasureFace returns a HintingNone font.Face for CJK text measurement,
+// plus the name of the font it came from. It is coverage-aware in exactly the
+// same way as getCJKFace, so measurement and drawing always agree on which font
+// a run uses — otherwise line wrapping would be computed against a different
+// face's advances than the one the glyphs are drawn with.
+func (r *renderer) getCJKMeasureFace(f *Font, sample string) (font.Face, string) {
+	if r.fontCache == nil {
+		return nil, ""
 	}
-	for _, name := range []string{
-		"Microsoft YaHei", "SimSun", "SimHei", "NSimSun",
-		"Yu Gothic", "Meiryo", "MS Gothic",
-		"Malgun Gothic", "Gulim",
-		"Noto Sans CJK SC", "Noto Sans SC", "WenQuanYi Micro Hei",
-	} {
-		face := r.fontCache.GetMeasureFace(name, sizePixels, f.Bold, f.Italic)
-		if face != nil {
-			return face
-		}
-	}
-	return nil
+	return r.resolveCJKFace(f, r.fontSizePixels(f), true, sample)
 }
 
 // containsCJK returns true if the string contains any CJK characters.
@@ -4410,9 +4693,13 @@ func (r *renderer) buildParaTextRuns(elements []ParagraphElement) []textRun {
 				if latinFace == nil {
 					latinFace = r.getFace(f)
 				}
-				cjkFace := r.getCJKFace(f)
+				// Face selection is driven by the characters in this run, not by
+				// the declared font names: a name that resolves can still lack
+				// the glyphs, and then the text draws as empty boxes.
+				cjkFace, cjkUsed := r.getCJKFace(f, e.text)
+				cjkMeasure, _ := r.getCJKMeasureFace(f, e.text)
+				r.noteCJKFont(f, cjkUsed)
 				latinMeasure := r.getMeasureFace(f)
-				cjkMeasure := r.getCJKMeasureFace(f)
 				subRuns := r.splitRunByCJK(e.text, f, latinFace, cjkFace, latinMeasure, cjkMeasure)
 				runs = append(runs, subRuns...)
 			} else {
@@ -4720,7 +5007,6 @@ func (r *renderer) measureMaxLineWidth(paragraphs []*Paragraph, w int, wordWrap 
 	return maxW
 }
 
-
 // drawParagraphs renders paragraphs within the given bounding box.
 func (r *renderer) drawParagraphs(paragraphs []*Paragraph, x, y, w, h int, anchor TextAnchorType, wordWrap bool) {
 	if len(paragraphs) == 0 {
@@ -4903,7 +5189,7 @@ func (r *renderer) drawParagraphs(paragraphs []*Paragraph, x, y, w, h int, ancho
 
 			d := &font.Drawer{
 				Dst:  r.img,
-				Src:  image.NewUniform(fc),
+				Src:  image.NewUniform(drawSrc(fc)),
 				Face: run.face,
 				Dot:  fixed.P(drawX, runBaseline),
 			}
@@ -4915,7 +5201,7 @@ func (r *renderer) drawParagraphs(paragraphs []*Paragraph, x, y, w, h int, ancho
 			if run.font != nil && run.font.Bold {
 				d2 := &font.Drawer{
 					Dst:  r.img,
-					Src:  image.NewUniform(fc),
+					Src:  image.NewUniform(drawSrc(fc)),
 					Face: run.face,
 					Dot:  fixed.P(drawX+1, runBaseline),
 				}
@@ -5206,14 +5492,31 @@ func toRoman(num int) string {
 
 // isCJK reports whether the rune is a CJK character that can be broken
 // at any position (no spaces between characters).
+//
+// The predicate answers a question about the *character*, not about the fonts
+// installed on this machine: "is this a CJK-typographic character, which should
+// be set full-width by, and take its glyph from, a CJK-capable face". The
+// enclosed symbol blocks below are included because they are used inside CJK
+// text and are drawn from CJK faces — a deck that writes ①②③ is writing CJK
+// typography even though the code points live in a symbol block.
+//
+// Classifying them here also hands them to the coverage-based font selection in
+// coversCJK. That is the point: every face-selection decision downstream is
+// gated on isCJK, so a character outside this set never gets a coverage check
+// at all. That is how ①②③ reached a Latin face and rendered as .notdef boxes
+// while the font diagnostics reported a perfect match.
 func isCJK(r rune) bool {
 	return unicode.Is(unicode.Han, r) ||
 		unicode.Is(unicode.Hangul, r) ||
 		unicode.Is(unicode.Hiragana, r) ||
 		unicode.Is(unicode.Katakana, r) ||
 		(r >= 0x3000 && r <= 0x303F) || // CJK Symbols and Punctuation
+		(r >= 0x3200 && r <= 0x32FF) || // Enclosed CJK Letters and Months (㈠ ㉑)
+		(r >= 0x3300 && r <= 0x33FF) || // CJK Compatibility (㎡ ㍿)
+		(r >= 0x2460 && r <= 0x24FF) || // Enclosed Alphanumerics (① ② ③)
 		(r >= 0xFF00 && r <= 0xFFEF) // Fullwidth Forms
 }
+
 // isCJKClosingPunct returns true for CJK closing punctuation that must not
 // start a new line (禁则処理 — line-start prohibited characters).
 func isCJKClosingPunct(r rune) bool {
@@ -5646,7 +5949,7 @@ func (r *renderer) drawStringCentered(text string, face font.Face, c color.RGBA,
 	cy := rect.Min.Y + (rect.Dy()-th)/2 + metrics.Ascent.Ceil()
 	d := &font.Drawer{
 		Dst:  r.img,
-		Src:  image.NewUniform(c),
+		Src:  image.NewUniform(drawSrc(c)),
 		Face: face,
 		Dot:  fixed.P(cx, cy),
 	}
@@ -5678,603 +5981,6 @@ func getSeriesColor(s *ChartSeries, idx int, palette []color.RGBA) color.RGBA {
 		return argbToRGBA(s.FillColor)
 	}
 	return palette[idx%len(palette)]
-}
-
-func (r *renderer) renderChart(s *ChartShape) {
-	x := r.emuToPixelX(s.offsetX)
-	y := r.emuToPixelY(s.offsetY)
-	w := r.emuToPixelX(s.width)
-	h := r.emuToPixelY(s.height)
-
-	// Background
-	r.fillRectFast(image.Rect(x, y, x+w, y+h), color.RGBA{R: 255, G: 255, B: 255, A: 255})
-	r.drawRect(image.Rect(x, y, x+w, y+h), color.RGBA{R: 200, G: 200, B: 200, A: 255}, 1)
-
-	// Title
-	titleH := 0
-	if s.title != nil && s.title.Visible && s.title.Text != "" {
-		face := r.getFace(s.title.Font)
-		fc := argbToRGBA(s.title.Font.Color)
-		titleH = face.Metrics().Height.Ceil() + 4
-		r.drawStringCentered(s.title.Text, face, fc, image.Rect(x, y, x+w, y+titleH))
-	}
-
-	// Legend height
-	legendH := 0
-	if s.legend != nil && s.legend.Visible {
-		legendH = 20
-	}
-
-	// Plot area
-	plotX := x + 40
-	plotY := y + titleH + 5
-	plotW := w - 50
-	plotH := h - titleH - legendH - 15
-	if plotW < 10 {
-		plotW = 10
-	}
-	if plotH < 10 {
-		plotH = 10
-	}
-
-	ct := s.plotArea.GetType()
-	if ct == nil {
-		return
-	}
-
-	switch c := ct.(type) {
-	case *BarChart:
-		r.renderBarChart(c, plotX, plotY, plotW, plotH)
-	case *Bar3DChart:
-		r.renderBarChart(&c.BarChart, plotX, plotY, plotW, plotH)
-	case *LineChart:
-		r.renderLineChart(c, plotX, plotY, plotW, plotH)
-	case *PieChart:
-		r.renderPieChart(c.Series, plotX, plotY, plotW, plotH)
-	case *Pie3DChart:
-		r.renderPieChart(c.Series, plotX, plotY, plotW, plotH)
-	case *DoughnutChart:
-		r.renderDoughnutChart(c, plotX, plotY, plotW, plotH)
-	case *AreaChart:
-		r.renderAreaChart(c, plotX, plotY, plotW, plotH)
-	case *ScatterChart:
-		r.renderScatterChart(c, plotX, plotY, plotW, plotH)
-	case *RadarChart:
-		r.renderRadarChart(c, plotX, plotY, plotW, plotH)
-	}
-
-	// Legend
-	if s.legend != nil && s.legend.Visible {
-		r.renderChartLegend(s, x, y+h-legendH, w, legendH)
-	}
-}
-
-func (r *renderer) renderBarChart(c *BarChart, px, py, pw, ph int) {
-	if len(c.Series) == 0 {
-		return
-	}
-	palette := chartColors()
-
-	// Collect all categories and find value range
-	cats := c.Series[0].Categories
-	minVal := 0.0
-	maxVal := 0.0
-	first := true
-	for _, s := range c.Series {
-		for _, cat := range s.Categories {
-			v := s.Values[cat]
-			if first {
-				minVal = v
-				maxVal = v
-				first = false
-			} else {
-				if v < minVal {
-					minVal = v
-				}
-				if v > maxVal {
-					maxVal = v
-				}
-			}
-		}
-	}
-	if minVal > 0 {
-		minVal = 0
-	}
-	if maxVal <= minVal {
-		maxVal = minVal + 1
-	}
-	valRange := maxVal - minVal
-
-	// Draw axes
-	axisColor := color.RGBA{R: 128, G: 128, B: 128, A: 255}
-	r.drawLine(px, py+ph, px+pw, py+ph, axisColor)
-	r.drawLine(px, py, px, py+ph, axisColor)
-
-	nCats := len(cats)
-	nSeries := len(c.Series)
-	if nCats == 0 {
-		return
-	}
-	catW := pw / nCats
-	barW := catW / (nSeries + 1)
-	if barW < 1 {
-		barW = 1
-	}
-
-	for ci, cat := range cats {
-		for si, s := range c.Series {
-			v := s.Values[cat]
-			barH := int(float64(ph) * (v - minVal) / valRange)
-			bx := px + ci*catW + (si+1)*barW - barW/2
-			by := py + ph - barH
-			sc := getSeriesColor(s, si, palette)
-			r.fillRectBlend(image.Rect(bx, by, bx+barW-1, py+ph), sc)
-		}
-	}
-}
-
-func (r *renderer) renderLineChart(c *LineChart, px, py, pw, ph int) {
-	if len(c.Series) == 0 {
-		return
-	}
-	palette := chartColors()
-
-	// Find value range
-	minVal := math.MaxFloat64
-	maxVal := -math.MaxFloat64
-	for _, s := range c.Series {
-		for _, v := range s.Values {
-			if v < minVal {
-				minVal = v
-			}
-			if v > maxVal {
-				maxVal = v
-			}
-		}
-	}
-	if minVal > 0 {
-		minVal = 0
-	}
-	if maxVal <= minVal {
-		maxVal = minVal + 1
-	}
-	valRange := maxVal - minVal
-
-	// Draw axes
-	axisColor := color.RGBA{R: 128, G: 128, B: 128, A: 255}
-	r.drawLine(px, py+ph, px+pw, py+ph, axisColor)
-	r.drawLine(px, py, px, py+ph, axisColor)
-
-	for si, s := range c.Series {
-		sc := getSeriesColor(s, si, palette)
-		cats := s.Categories
-		nPts := len(cats)
-		if nPts == 0 {
-			continue
-		}
-		prevX, prevY := 0, 0
-		for i, cat := range cats {
-			v := s.Values[cat]
-			ptX := px
-			if nPts > 1 {
-				ptX = px + i*pw/(nPts-1)
-			}
-			ptY := py + ph - int(float64(ph)*(v-minVal)/valRange)
-			if i > 0 {
-				r.drawLineAA(prevX, prevY, ptX, ptY, sc, 2)
-			}
-			// Draw marker
-			r.fillEllipseAA(ptX-2, ptY-2, 5, 5, sc)
-			prevX, prevY = ptX, ptY
-		}
-	}
-}
-
-func (r *renderer) renderPieChart(series []*ChartSeries, px, py, pw, ph int) {
-	if len(series) == 0 || len(series[0].Categories) == 0 {
-		return
-	}
-	palette := chartColors()
-	s := series[0]
-
-	// Sum values
-	total := 0.0
-	for _, cat := range s.Categories {
-		v := s.Values[cat]
-		if v > 0 {
-			total += v
-		}
-	}
-	if total == 0 {
-		return
-	}
-
-	cx := px + pw/2
-	cy := py + ph/2
-	radius := minInt(pw, ph) / 2
-	if radius < 5 {
-		return
-	}
-
-	startAngle := -math.Pi / 2
-	for i, cat := range s.Categories {
-		v := s.Values[cat]
-		if v <= 0 {
-			continue
-		}
-		sweep := 2 * math.Pi * v / total
-		endAngle := startAngle + sweep
-		sc := palette[i%len(palette)]
-		r.fillPieSlice(cx, cy, radius, startAngle, endAngle, sc)
-		startAngle = endAngle
-	}
-}
-
-// fillPieSlice fills a pie slice using scanline approach with row-level x-range.
-func (r *renderer) fillPieSlice(cx, cy, radius int, startAngle, endAngle float64, c color.RGBA) {
-	r2 := radius * radius
-	for dy := -radius; dy <= radius; dy++ {
-		dy2 := dy * dy
-		if dy2 > r2 {
-			continue
-		}
-		// Compute max dx for this row
-		maxDx := int(math.Sqrt(float64(r2 - dy2)))
-		for dx := -maxDx; dx <= maxDx; dx++ {
-			angle := math.Atan2(float64(dy), float64(dx))
-			if angleInSweep(angle, startAngle, endAngle) {
-				r.blendPixel(cx+dx, cy+dy, c)
-			}
-		}
-	}
-}
-
-// angleInSweep checks if angle is within the sweep from start to end (going clockwise).
-func angleInSweep(angle, start, end float64) bool {
-	// Normalize to [0, 2*pi)
-	norm := func(a float64) float64 {
-		for a < 0 {
-			a += 2 * math.Pi
-		}
-		for a >= 2*math.Pi {
-			a -= 2 * math.Pi
-		}
-		return a
-	}
-	a := norm(angle)
-	s := norm(start)
-	e := norm(end)
-	if s <= e {
-		return a >= s && a <= e
-	}
-	return a >= s || a <= e
-}
-
-func (r *renderer) renderDoughnutChart(c *DoughnutChart, px, py, pw, ph int) {
-	if len(c.Series) == 0 || len(c.Series[0].Categories) == 0 {
-		return
-	}
-	palette := chartColors()
-	s := c.Series[0]
-
-	total := 0.0
-	for _, cat := range s.Categories {
-		v := s.Values[cat]
-		if v > 0 {
-			total += v
-		}
-	}
-	if total == 0 {
-		return
-	}
-
-	cx := px + pw/2
-	cy := py + ph/2
-	outerR := minInt(pw, ph) / 2
-	innerR := outerR * c.HoleSize / 100
-	if outerR < 5 {
-		return
-	}
-
-	startAngle := -math.Pi / 2
-	for i, cat := range s.Categories {
-		v := s.Values[cat]
-		if v <= 0 {
-			continue
-		}
-		sweep := 2 * math.Pi * v / total
-		endAngle := startAngle + sweep
-		sc := palette[i%len(palette)]
-		r.fillDoughnutSlice(cx, cy, innerR, outerR, startAngle, endAngle, sc)
-		startAngle = endAngle
-	}
-}
-
-// fillDoughnutSlice fills a doughnut slice.
-func (r *renderer) fillDoughnutSlice(cx, cy, innerR, outerR int, startAngle, endAngle float64, c color.RGBA) {
-	or2 := outerR * outerR
-	ir2 := innerR * innerR
-	for dy := -outerR; dy <= outerR; dy++ {
-		dy2 := dy * dy
-		if dy2 > or2 {
-			continue
-		}
-		maxDx := int(math.Sqrt(float64(or2 - dy2)))
-		for dx := -maxDx; dx <= maxDx; dx++ {
-			d2 := dx*dx + dy2
-			if d2 < ir2 {
-				continue
-			}
-			angle := math.Atan2(float64(dy), float64(dx))
-			if angleInSweep(angle, startAngle, endAngle) {
-				r.blendPixel(cx+dx, cy+dy, c)
-			}
-		}
-	}
-}
-
-func (r *renderer) renderAreaChart(c *AreaChart, px, py, pw, ph int) {
-	if len(c.Series) == 0 {
-		return
-	}
-	palette := chartColors()
-
-	minVal := math.MaxFloat64
-	maxVal := -math.MaxFloat64
-	for _, s := range c.Series {
-		for _, v := range s.Values {
-			if v < minVal {
-				minVal = v
-			}
-			if v > maxVal {
-				maxVal = v
-			}
-		}
-	}
-	if minVal > 0 {
-		minVal = 0
-	}
-	if maxVal <= minVal {
-		maxVal = minVal + 1
-	}
-	valRange := maxVal - minVal
-
-	// Axes
-	axisColor := color.RGBA{R: 128, G: 128, B: 128, A: 255}
-	r.drawLine(px, py+ph, px+pw, py+ph, axisColor)
-	r.drawLine(px, py, px, py+ph, axisColor)
-
-	for si, s := range c.Series {
-		sc := getSeriesColor(s, si, palette)
-		// Semi-transparent fill
-		fillC := color.RGBA{R: sc.R, G: sc.G, B: sc.B, A: 128}
-		cats := s.Categories
-		nPts := len(cats)
-		if nPts == 0 {
-			continue
-		}
-
-		pts := make([]fpoint, 0, nPts+2)
-		for i, cat := range cats {
-			v := s.Values[cat]
-			ptX := float64(px)
-			if nPts > 1 {
-				ptX = float64(px) + float64(i)*float64(pw)/float64(nPts-1)
-			}
-			ptY := float64(py+ph) - float64(ph)*(v-minVal)/valRange
-			pts = append(pts, fpoint{ptX, ptY})
-		}
-		// Close polygon along baseline
-		pts = append(pts, fpoint{pts[len(pts)-1].x, float64(py + ph)})
-		pts = append(pts, fpoint{pts[0].x, float64(py + ph)})
-		r.fillPolygon(pts, fillC)
-
-		// Draw line on top
-		for i := 0; i < nPts-1; i++ {
-			r.drawLineAA(int(pts[i].x), int(pts[i].y), int(pts[i+1].x), int(pts[i+1].y), sc, 2)
-		}
-	}
-}
-
-func (r *renderer) renderScatterChart(c *ScatterChart, px, py, pw, ph int) {
-	if len(c.Series) == 0 {
-		return
-	}
-	palette := chartColors()
-
-	// For scatter, categories are X values (parsed as indices), values are Y
-	minVal := math.MaxFloat64
-	maxVal := -math.MaxFloat64
-	for _, s := range c.Series {
-		for _, v := range s.Values {
-			if v < minVal {
-				minVal = v
-			}
-			if v > maxVal {
-				maxVal = v
-			}
-		}
-	}
-	if minVal > 0 {
-		minVal = 0
-	}
-	if maxVal <= minVal {
-		maxVal = minVal + 1
-	}
-	valRange := maxVal - minVal
-
-	axisColor := color.RGBA{R: 128, G: 128, B: 128, A: 255}
-	r.drawLine(px, py+ph, px+pw, py+ph, axisColor)
-	r.drawLine(px, py, px, py+ph, axisColor)
-
-	for si, s := range c.Series {
-		sc := getSeriesColor(s, si, palette)
-		cats := s.Categories
-		nPts := len(cats)
-		if nPts == 0 {
-			continue
-		}
-		for i, cat := range cats {
-			v := s.Values[cat]
-			ptX := px + (i * pw / maxInt(nPts-1, 1))
-			ptY := py + ph - int(float64(ph)*(v-minVal)/valRange)
-			r.fillEllipseAA(ptX-3, ptY-3, 7, 7, sc)
-		}
-	}
-}
-
-func (r *renderer) renderRadarChart(c *RadarChart, px, py, pw, ph int) {
-	if len(c.Series) == 0 {
-		return
-	}
-	palette := chartColors()
-
-	// Find max value
-	maxVal := 0.0
-	for _, s := range c.Series {
-		for _, v := range s.Values {
-			if v > maxVal {
-				maxVal = v
-			}
-		}
-	}
-	if maxVal == 0 {
-		maxVal = 1
-	}
-
-	cx := px + pw/2
-	cy := py + ph/2
-	radius := minInt(pw, ph) / 2
-
-	// Draw radar grid
-	gridColor := color.RGBA{R: 200, G: 200, B: 200, A: 255}
-	nCats := len(c.Series[0].Categories)
-	if nCats == 0 {
-		return
-	}
-	for i := 0; i < nCats; i++ {
-		angle := 2*math.Pi*float64(i)/float64(nCats) - math.Pi/2
-		ex := cx + int(float64(radius)*math.Cos(angle))
-		ey := cy + int(float64(radius)*math.Sin(angle))
-		r.drawLine(cx, cy, ex, ey, gridColor)
-	}
-
-	// Draw series
-	for si, s := range c.Series {
-		sc := getSeriesColor(s, si, palette)
-		cats := s.Categories
-		nPts := len(cats)
-		if nPts == 0 {
-			continue
-		}
-		pts := make([]fpoint, nPts)
-		for i, cat := range cats {
-			v := s.Values[cat]
-			angle := 2*math.Pi*float64(i)/float64(nPts) - math.Pi/2
-			dist := float64(radius) * v / maxVal
-			pts[i] = fpoint{
-				x: float64(cx) + dist*math.Cos(angle),
-				y: float64(cy) + dist*math.Sin(angle),
-			}
-		}
-		// Draw polygon
-		for i := 0; i < nPts; i++ {
-			j := (i + 1) % nPts
-			r.drawLineAA(int(pts[i].x), int(pts[i].y), int(pts[j].x), int(pts[j].y), sc, 2)
-		}
-		// Fill with semi-transparent
-		fillC := color.RGBA{R: sc.R, G: sc.G, B: sc.B, A: 64}
-		r.fillPolygon(pts, fillC)
-	}
-}
-
-func (r *renderer) renderChartLegend(s *ChartShape, lx, ly, lw, lh int) {
-	ct := s.plotArea.GetType()
-	if ct == nil {
-		return
-	}
-	palette := chartColors()
-	face := r.getFace(s.legend.Font)
-
-	var names []string
-	var colors []color.RGBA
-
-	switch c := ct.(type) {
-	case *BarChart:
-		for i, ser := range c.Series {
-			names = append(names, ser.Title)
-			colors = append(colors, getSeriesColor(ser, i, palette))
-		}
-	case *Bar3DChart:
-		for i, ser := range c.Series {
-			names = append(names, ser.Title)
-			colors = append(colors, getSeriesColor(ser, i, palette))
-		}
-	case *LineChart:
-		for i, ser := range c.Series {
-			names = append(names, ser.Title)
-			colors = append(colors, getSeriesColor(ser, i, palette))
-		}
-	case *PieChart:
-		if len(c.Series) > 0 {
-			for i, cat := range c.Series[0].Categories {
-				names = append(names, cat)
-				colors = append(colors, palette[i%len(palette)])
-			}
-		}
-	case *Pie3DChart:
-		if len(c.Series) > 0 {
-			for i, cat := range c.Series[0].Categories {
-				names = append(names, cat)
-				colors = append(colors, palette[i%len(palette)])
-			}
-		}
-	case *DoughnutChart:
-		if len(c.Series) > 0 {
-			for i, cat := range c.Series[0].Categories {
-				names = append(names, cat)
-				colors = append(colors, palette[i%len(palette)])
-			}
-		}
-	case *AreaChart:
-		for i, ser := range c.Series {
-			names = append(names, ser.Title)
-			colors = append(colors, getSeriesColor(ser, i, palette))
-		}
-	case *ScatterChart:
-		for i, ser := range c.Series {
-			names = append(names, ser.Title)
-			colors = append(colors, getSeriesColor(ser, i, palette))
-		}
-	case *RadarChart:
-		for i, ser := range c.Series {
-			names = append(names, ser.Title)
-			colors = append(colors, getSeriesColor(ser, i, palette))
-		}
-	}
-
-	if len(names) == 0 {
-		return
-	}
-
-	// Draw legend entries horizontally centered
-	entryW := lw / len(names)
-	for i, name := range names {
-		ex := lx + i*entryW
-		// Color box
-		boxSize := 10
-		bx := ex + 4
-		by := ly + (lh-boxSize)/2
-		r.fillRectFast(image.Rect(bx, by, bx+boxSize, by+boxSize), colors[i])
-		// Text
-		d := &font.Drawer{
-			Dst:  r.img,
-			Src:  image.NewUniform(color.RGBA{A: 255}),
-			Face: face,
-			Dot:  fixed.P(bx+boxSize+4, ly+lh/2+4),
-		}
-		d.DrawString(name)
-	}
 }
 
 // --- Image scaling ---
@@ -6384,6 +6090,72 @@ func scaleImageBilinear(src image.Image, dstW, dstH int) *image.RGBA {
 
 // scaleImage scales an image using nearest-neighbor (fast fallback).
 func scaleImage(src image.Image, dstW, dstH int) *image.RGBA {
+	return scaleImageNearest(src, dstW, dstH)
+}
+
+// scaleImageNearest resizes with nearest-neighbour sampling: one source pixel
+// per destination pixel, no interpolation. It is the cheap alternative to
+// scaleImageBilinear and is used by draft renders.
+func scaleImageNearest(src image.Image, dstW, dstH int) *image.RGBA {
+	if dstW <= 0 || dstH <= 0 {
+		return image.NewRGBA(image.Rect(0, 0, 1, 1))
+	}
+	bounds := src.Bounds()
+	srcW, srcH := bounds.Dx(), bounds.Dy()
+	if srcW <= 0 || srcH <= 0 {
+		return image.NewRGBA(image.Rect(0, 0, dstW, dstH))
+	}
+
+	// Work from an *image.RGBA addressed from (0,0) so the sampling loop can copy
+	// whole pixels out of Pix. Calling image.Image.At per pixel boxes a colour
+	// and allocates on every call, which made this slower than the bilinear
+	// filter it is meant to replace on JPEG (YCbCr) and paletted sources.
+	s := normalizeToRGBA(src)
+
+	dst := image.NewRGBA(image.Rect(0, 0, dstW, dstH))
+	for dy := 0; dy < dstH; dy++ {
+		sy := dy * srcH / dstH
+		if sy >= srcH {
+			sy = srcH - 1
+		}
+		srcRow := sy * s.Stride
+		dstRow := dy * dst.Stride
+		for dx := 0; dx < dstW; dx++ {
+			sx := dx * srcW / dstW
+			if sx >= srcW {
+				sx = srcW - 1
+			}
+			so := srcRow + sx*4
+			do := dstRow + dx*4
+			dst.Pix[do] = s.Pix[so]
+			dst.Pix[do+1] = s.Pix[so+1]
+			dst.Pix[do+2] = s.Pix[so+2]
+			dst.Pix[do+3] = s.Pix[so+3]
+		}
+	}
+	return dst
+}
+
+// normalizeToRGBA returns src as an *image.RGBA whose pixels are addressed from
+// (0,0). The input is returned unchanged when it already has that shape, so the
+// common case costs nothing; other formats are converted once with image/draw,
+// which is far cheaper than converting per sampled pixel.
+func normalizeToRGBA(src image.Image) *image.RGBA {
+	if s, ok := src.(*image.RGBA); ok && s.Rect.Min.X == 0 && s.Rect.Min.Y == 0 {
+		return s
+	}
+	b := src.Bounds()
+	out := image.NewRGBA(image.Rect(0, 0, b.Dx(), b.Dy()))
+	draw.Draw(out, out.Bounds(), src, b.Min, draw.Src)
+	return out
+}
+
+// scaleForRender resizes a decoded image for compositing, choosing the cheapest
+// filter that the current quality mode allows.
+func (r *renderer) scaleForRender(src image.Image, dstW, dstH int) *image.RGBA {
+	if r.draft {
+		return scaleImageNearest(src, dstW, dstH)
+	}
 	return scaleImageBilinear(src, dstW, dstH)
 }
 

@@ -5,10 +5,10 @@ import "sort"
 // ChartShape represents a chart embedded in a slide.
 type ChartShape struct {
 	BaseShape
-	title       *ChartTitle
-	plotArea    *PlotArea
-	legend      *ChartLegend
-	view3D      *View3D
+	title          *ChartTitle
+	plotArea       *PlotArea
+	legend         *ChartLegend
+	view3D         *View3D
 	displayBlankAs string
 }
 
@@ -106,16 +106,16 @@ func (pa *PlotArea) GetAxisY() *ChartAxis { return pa.axisY }
 
 // ChartAxis represents a chart axis.
 type ChartAxis struct {
-	Title         string
-	TitleRotation int
-	Visible       bool
-	MinBounds     *float64
-	MaxBounds     *float64
-	MinorUnit     *float64
-	MajorUnit     *float64
-	CrossesAt     string
-	ReversedOrder bool
-	Font          *Font
+	Title          string
+	TitleRotation  int
+	Visible        bool
+	MinBounds      *float64
+	MaxBounds      *float64
+	MinorUnit      *float64
+	MajorUnit      *float64
+	CrossesAt      string
+	ReversedOrder  bool
+	Font           *Font
 	MajorGridlines *Gridlines
 	MinorGridlines *Gridlines
 	MajorTickMark  string
@@ -280,10 +280,10 @@ type ChartLegend struct {
 type LegendPosition string
 
 const (
-	LegendBottom LegendPosition = "b"
-	LegendTop    LegendPosition = "t"
-	LegendLeft   LegendPosition = "l"
-	LegendRight  LegendPosition = "r"
+	LegendBottom   LegendPosition = "b"
+	LegendTop      LegendPosition = "t"
+	LegendLeft     LegendPosition = "l"
+	LegendRight    LegendPosition = "r"
 	LegendTopRight LegendPosition = "tr"
 )
 
@@ -298,10 +298,10 @@ func NewChartLegend() *ChartLegend {
 
 // View3D represents 3D view settings.
 type View3D struct {
-	RotX          int
-	RotY          int
-	DepthPercent  int
-	HeightPercent *int
+	RotX           int
+	RotY           int
+	DepthPercent   int
+	HeightPercent  *int
 	RightAngleAxes bool
 }
 
@@ -329,20 +329,20 @@ type ChartType interface {
 
 // ChartSeries represents a data series in a chart.
 type ChartSeries struct {
-	Title             string
-	Values            map[string]float64 // category -> value
-	Categories        []string           // ordered category names
-	FillColor         Color
-	ShowCategoryName  bool
-	ShowLegendKey     bool
-	ShowPercentage    bool
-	ShowSeriesName    bool
-	ShowValue         bool
-	Separator         string
-	LabelPosition     string
-	Font              *Font
-	Outline           *SeriesOutline
-	Marker            *SeriesMarker
+	Title            string
+	Values           map[string]float64 // category -> value
+	Categories       []string           // ordered category names
+	FillColor        Color
+	ShowCategoryName bool
+	ShowLegendKey    bool
+	ShowPercentage   bool
+	ShowSeriesName   bool
+	ShowValue        bool
+	Separator        string
+	LabelPosition    string
+	Font             *Font
+	Outline          *SeriesOutline
+	Marker           *SeriesMarker
 }
 
 // Series label position constants.
@@ -599,8 +599,8 @@ func NewPie3DChart() *Pie3DChart {
 
 // DoughnutChart represents a doughnut chart.
 type DoughnutChart struct {
-	Series    []*ChartSeries
-	HoleSize  int // percentage 10-90
+	Series   []*ChartSeries
+	HoleSize int // percentage 10-90
 }
 
 func (d *DoughnutChart) GetChartTypeName() string { return "doughnut" }

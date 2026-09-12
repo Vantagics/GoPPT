@@ -15,7 +15,7 @@ type PresentationProperties struct {
 type ViewType int
 
 const (
-	ViewSlide         ViewType = iota
+	ViewSlide ViewType = iota
 	ViewNotes
 	ViewHandout
 	ViewOutline
@@ -132,8 +132,8 @@ type DocumentLayout struct {
 
 // Standard layout constants (in EMU: 1 inch = 914400 EMU).
 const (
-	LayoutScreen4x3  = "screen4x3"
-	LayoutScreen16x9 = "screen16x9"
+	LayoutScreen4x3   = "screen4x3"
+	LayoutScreen16x9  = "screen16x9"
 	LayoutScreen16x10 = "screen16x10"
 	LayoutA4          = "A4"
 	LayoutLetter      = "letter"
@@ -143,8 +143,8 @@ const (
 // NewDocumentLayout creates a default 4:3 layout.
 func NewDocumentLayout() *DocumentLayout {
 	return &DocumentLayout{
-		CX:   9144000,  // 10 inches
-		CY:   6858000,  // 7.5 inches
+		CX:   9144000, // 10 inches
+		CY:   6858000, // 7.5 inches
 		Name: LayoutScreen4x3,
 	}
 }

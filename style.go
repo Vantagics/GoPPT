@@ -11,12 +11,12 @@ type Color struct {
 
 // Predefined colors.
 var (
-	ColorBlack   = Color{ARGB: "FF000000"}
-	ColorWhite   = Color{ARGB: "FFFFFFFF"}
-	ColorRed     = Color{ARGB: "FFFF0000"}
-	ColorGreen   = Color{ARGB: "FF00FF00"}
-	ColorBlue    = Color{ARGB: "FF0000FF"}
-	ColorYellow  = Color{ARGB: "FFFFFF00"}
+	ColorBlack  = Color{ARGB: "FF000000"}
+	ColorWhite  = Color{ARGB: "FFFFFFFF"}
+	ColorRed    = Color{ARGB: "FFFF0000"}
+	ColorGreen  = Color{ARGB: "FF00FF00"}
+	ColorBlue   = Color{ARGB: "FF0000FF"}
+	ColorYellow = Color{ARGB: "FFFFFF00"}
 )
 
 // NewColor creates a new Color from an ARGB hex string.
@@ -182,24 +182,24 @@ func (f *Font) SetStrikethrough(s bool) *Font {
 
 // Alignment represents text alignment properties.
 type Alignment struct {
-	Horizontal HorizontalAlignment
-	Vertical   VerticalAlignment
-	MarginLeft int64 // in EMU
-	MarginRight int64
-	MarginTop  int64
+	Horizontal   HorizontalAlignment
+	Vertical     VerticalAlignment
+	MarginLeft   int64 // in EMU
+	MarginRight  int64
+	MarginTop    int64
 	MarginBottom int64
-	Indent     int64
-	Level      int
+	Indent       int64
+	Level        int
 }
 
 // HorizontalAlignment represents horizontal text alignment.
 type HorizontalAlignment string
 
 const (
-	HorizontalLeft      HorizontalAlignment = "l"
-	HorizontalCenter    HorizontalAlignment = "ctr"
-	HorizontalRight     HorizontalAlignment = "r"
-	HorizontalJustify   HorizontalAlignment = "just"
+	HorizontalLeft        HorizontalAlignment = "l"
+	HorizontalCenter      HorizontalAlignment = "ctr"
+	HorizontalRight       HorizontalAlignment = "r"
+	HorizontalJustify     HorizontalAlignment = "just"
 	HorizontalDistributed HorizontalAlignment = "dist"
 )
 
@@ -234,10 +234,10 @@ func (a *Alignment) SetVertical(v VerticalAlignment) *Alignment {
 
 // Fill represents a shape fill.
 type Fill struct {
-	Type      FillType
-	Color     Color
-	EndColor  Color // for gradient fills
-	Rotation  int   // gradient rotation in degrees
+	Type     FillType
+	Color    Color
+	EndColor Color // for gradient fills
+	Rotation int   // gradient rotation in degrees
 }
 
 // FillType represents the type of fill.
@@ -334,7 +334,9 @@ func (b *Border) SetSolidFill(c Color) *Border {
 	return b
 }
 
-// SetWidth sets the border width in EMU.
+// SetWidth sets the border width in points. It is stored in points, not EMU:
+// the reader converts the EMU value found in the file (v/12700) and the writer
+// converts back, so a value of 1 means a 1pt line.
 func (b *Border) SetWidth(w int) *Border {
 	b.Width = w
 	return b
@@ -348,12 +350,12 @@ func (b *Border) SetNoFill() *Border {
 
 // Shadow represents a shape shadow.
 type Shadow struct {
-	Visible   bool
-	Direction int // in degrees
-	Distance  int // in points
+	Visible    bool
+	Direction  int // in degrees
+	Distance   int // in points
 	BlurRadius int
-	Color     Color
-	Alpha     int // 0-100
+	Color      Color
+	Alpha      int // 0-100
 }
 
 // NewShadow creates a new Shadow.
@@ -390,9 +392,9 @@ func (s *Shadow) SetDistance(d int) *Shadow {
 
 // Hyperlink represents a hyperlink.
 type Hyperlink struct {
-	URL     string
-	Tooltip string
-	IsInternal bool
+	URL         string
+	Tooltip     string
+	IsInternal  bool
 	SlideNumber int
 }
 

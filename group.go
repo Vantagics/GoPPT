@@ -38,6 +38,7 @@ func (g *GroupShape) AddShape(s Shape) *GroupShape {
 func (g *GroupShape) GetShapes() []Shape {
 	return g.shapes
 }
+
 // GetGroupFill returns the group-level fill (from grpSpPr), if any.
 func (g *GroupShape) GetGroupFill() *Fill {
 	return g.groupFill

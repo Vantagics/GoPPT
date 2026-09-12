@@ -10,17 +10,17 @@ import (
 
 // XML namespace constants
 const (
-	nsRelationships    = "http://schemas.openxmlformats.org/package/2006/relationships"
-	nsContentTypes     = "http://schemas.openxmlformats.org/package/2006/content-types"
-	nsPresentationML   = "http://schemas.openxmlformats.org/presentationml/2006/main"
-	nsDrawingML        = "http://schemas.openxmlformats.org/drawingml/2006/main"
-	nsOfficeDocRels    = "http://schemas.openxmlformats.org/officeDocument/2006/relationships"
-	nsPackageRels      = "http://schemas.openxmlformats.org/package/2006/relationships"
-	nsDCTerms          = "http://purl.org/dc/terms/"
-	nsDC               = "http://purl.org/dc/elements/1.1/"
-	nsCoreProperties   = "http://schemas.openxmlformats.org/package/2006/metadata/core-properties"
-	nsExtProperties    = "http://schemas.openxmlformats.org/officeDocument/2006/extended-properties"
-	nsXSI              = "http://www.w3.org/2001/XMLSchema-instance"
+	nsRelationships  = "http://schemas.openxmlformats.org/package/2006/relationships"
+	nsContentTypes   = "http://schemas.openxmlformats.org/package/2006/content-types"
+	nsPresentationML = "http://schemas.openxmlformats.org/presentationml/2006/main"
+	nsDrawingML      = "http://schemas.openxmlformats.org/drawingml/2006/main"
+	nsOfficeDocRels  = "http://schemas.openxmlformats.org/officeDocument/2006/relationships"
+	nsPackageRels    = "http://schemas.openxmlformats.org/package/2006/relationships"
+	nsDCTerms        = "http://purl.org/dc/terms/"
+	nsDC             = "http://purl.org/dc/elements/1.1/"
+	nsCoreProperties = "http://schemas.openxmlformats.org/package/2006/metadata/core-properties"
+	nsExtProperties  = "http://schemas.openxmlformats.org/officeDocument/2006/extended-properties"
+	nsXSI            = "http://www.w3.org/2001/XMLSchema-instance"
 
 	relTypeSlide       = "http://schemas.openxmlformats.org/officeDocument/2006/relationships/slide"
 	relTypeSlideMaster = "http://schemas.openxmlformats.org/officeDocument/2006/relationships/slideMaster"
@@ -40,21 +40,21 @@ const (
 	relTypeNotesSlide  = "http://schemas.openxmlformats.org/officeDocument/2006/relationships/notesSlide"
 	relTypeNotesMaster = "http://schemas.openxmlformats.org/officeDocument/2006/relationships/notesMaster"
 
-	ctPresentation     = "application/vnd.openxmlformats-officedocument.presentationml.presentation.main+xml"
-	ctSlide            = "application/vnd.openxmlformats-officedocument.presentationml.slide+xml"
-	ctSlideMaster      = "application/vnd.openxmlformats-officedocument.presentationml.slideMaster+xml"
-	ctSlideLayout      = "application/vnd.openxmlformats-officedocument.presentationml.slideLayout+xml"
-	ctTheme            = "application/vnd.openxmlformats-officedocument.theme+xml"
-	ctPresProps        = "application/vnd.openxmlformats-officedocument.presentationml.presProps+xml"
-	ctViewProps        = "application/vnd.openxmlformats-officedocument.presentationml.viewProps+xml"
-	ctTableStyles      = "application/vnd.openxmlformats-officedocument.presentationml.tableStyles+xml"
-	ctCoreProps        = "application/vnd.openxmlformats-package.core-properties+xml"
-	ctExtProps         = "application/vnd.openxmlformats-officedocument.extended-properties+xml"
-	ctRels             = "application/vnd.openxmlformats-package.relationships+xml"
-	ctChart            = "application/vnd.openxmlformats-officedocument.drawingml.chart+xml"
-	ctComments         = "application/vnd.openxmlformats-officedocument.presentationml.comments+xml"
-	ctCommentAuthors   = "application/vnd.openxmlformats-officedocument.presentationml.commentAuthors+xml"
-	ctNotesSlide       = "application/vnd.openxmlformats-officedocument.presentationml.notesSlide+xml"
+	ctPresentation   = "application/vnd.openxmlformats-officedocument.presentationml.presentation.main+xml"
+	ctSlide          = "application/vnd.openxmlformats-officedocument.presentationml.slide+xml"
+	ctSlideMaster    = "application/vnd.openxmlformats-officedocument.presentationml.slideMaster+xml"
+	ctSlideLayout    = "application/vnd.openxmlformats-officedocument.presentationml.slideLayout+xml"
+	ctTheme          = "application/vnd.openxmlformats-officedocument.theme+xml"
+	ctPresProps      = "application/vnd.openxmlformats-officedocument.presentationml.presProps+xml"
+	ctViewProps      = "application/vnd.openxmlformats-officedocument.presentationml.viewProps+xml"
+	ctTableStyles    = "application/vnd.openxmlformats-officedocument.presentationml.tableStyles+xml"
+	ctCoreProps      = "application/vnd.openxmlformats-package.core-properties+xml"
+	ctExtProps       = "application/vnd.openxmlformats-officedocument.extended-properties+xml"
+	ctRels           = "application/vnd.openxmlformats-package.relationships+xml"
+	ctChart          = "application/vnd.openxmlformats-officedocument.drawingml.chart+xml"
+	ctComments       = "application/vnd.openxmlformats-officedocument.presentationml.comments+xml"
+	ctCommentAuthors = "application/vnd.openxmlformats-officedocument.presentationml.commentAuthors+xml"
+	ctNotesSlide     = "application/vnd.openxmlformats-officedocument.presentationml.notesSlide+xml"
 )
 
 func writeXMLToZip(zw *zip.Writer, path string, v interface{}) error {
@@ -85,10 +85,10 @@ func writeRawXMLToZip(zw *zip.Writer, path string, content string) error {
 // --- Content Types ---
 
 type xmlContentTypes struct {
-	XMLName   xml.Name          `xml:"Types"`
-	Xmlns     string            `xml:"xmlns,attr"`
-	Defaults  []xmlDefault      `xml:"Default"`
-	Overrides []xmlOverride     `xml:"Override"`
+	XMLName   xml.Name      `xml:"Types"`
+	Xmlns     string        `xml:"xmlns,attr"`
+	Defaults  []xmlDefault  `xml:"Default"`
+	Overrides []xmlOverride `xml:"Override"`
 }
 
 type xmlDefault struct {
@@ -241,8 +241,8 @@ func (w *PPTXWriter) getImageContentType(ds *DrawingShape) string {
 // --- Relationships ---
 
 type xmlRelationships struct {
-	XMLName       xml.Name        `xml:"Relationships"`
-	Xmlns         string          `xml:"xmlns,attr"`
+	XMLName       xml.Name          `xml:"Relationships"`
+	Xmlns         string            `xml:"xmlns,attr"`
 	Relationships []xmlRelationship `xml:"Relationship"`
 }
 
@@ -273,8 +273,8 @@ func (w *PPTXWriter) writePresentationRels(zw *zip.Writer) error {
 	relIdx := 1
 	// Slide master
 	rels.Relationships = append(rels.Relationships, xmlRelationship{
-		ID:   fmt.Sprintf("rId%d", relIdx),
-		Type: relTypeSlideMaster,
+		ID:     fmt.Sprintf("rId%d", relIdx),
+		Type:   relTypeSlideMaster,
 		Target: "slideMasters/slideMaster1.xml",
 	})
 	relIdx++
@@ -282,8 +282,8 @@ func (w *PPTXWriter) writePresentationRels(zw *zip.Writer) error {
 	// Slides
 	for i := range w.presentation.slides {
 		rels.Relationships = append(rels.Relationships, xmlRelationship{
-			ID:   fmt.Sprintf("rId%d", relIdx),
-			Type: relTypeSlide,
+			ID:     fmt.Sprintf("rId%d", relIdx),
+			Type:   relTypeSlide,
 			Target: fmt.Sprintf("slides/slide%d.xml", i+1),
 		})
 		relIdx++
@@ -291,32 +291,32 @@ func (w *PPTXWriter) writePresentationRels(zw *zip.Writer) error {
 
 	// PresProps
 	rels.Relationships = append(rels.Relationships, xmlRelationship{
-		ID:   fmt.Sprintf("rId%d", relIdx),
-		Type: relTypePresProps,
+		ID:     fmt.Sprintf("rId%d", relIdx),
+		Type:   relTypePresProps,
 		Target: "presProps.xml",
 	})
 	relIdx++
 
 	// ViewProps
 	rels.Relationships = append(rels.Relationships, xmlRelationship{
-		ID:   fmt.Sprintf("rId%d", relIdx),
-		Type: relTypeViewProps,
+		ID:     fmt.Sprintf("rId%d", relIdx),
+		Type:   relTypeViewProps,
 		Target: "viewProps.xml",
 	})
 	relIdx++
 
 	// TableStyles
 	rels.Relationships = append(rels.Relationships, xmlRelationship{
-		ID:   fmt.Sprintf("rId%d", relIdx),
-		Type: relTypeTableStyles,
+		ID:     fmt.Sprintf("rId%d", relIdx),
+		Type:   relTypeTableStyles,
 		Target: "tableStyles.xml",
 	})
 	relIdx++
 
 	// Theme
 	rels.Relationships = append(rels.Relationships, xmlRelationship{
-		ID:   fmt.Sprintf("rId%d", relIdx),
-		Type: relTypeTheme,
+		ID:     fmt.Sprintf("rId%d", relIdx),
+		Type:   relTypeTheme,
 		Target: "theme/theme1.xml",
 	})
 	relIdx++
@@ -324,8 +324,8 @@ func (w *PPTXWriter) writePresentationRels(zw *zip.Writer) error {
 	// Comment authors
 	if w.hasComments() {
 		rels.Relationships = append(rels.Relationships, xmlRelationship{
-			ID:   fmt.Sprintf("rId%d", relIdx),
-			Type: relTypeCommentAuth,
+			ID:     fmt.Sprintf("rId%d", relIdx),
+			Type:   relTypeCommentAuth,
 			Target: "commentAuthors.xml",
 		})
 	}

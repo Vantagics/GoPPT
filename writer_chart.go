@@ -114,23 +114,43 @@ func (w *PPTXWriter) writeChartPart(zw *zip.Writer, chart *ChartShape, chartIdx 
 		axisXML = w.writeAxesXML(chart)
 	}
 
+	// Chart-area fill and outline. The reader fills chart.fill/chart.border
+	// from <c:chartSpace><c:spPr> and the rasteriser draws them, but the writer
+	// had no counterpart, so an author's chart-area shading was silently gone
+	// the next time the deck was opened.
+	chartSpPrXML := w.writeChartAreaSpPrXML(chart)
+
 	content := fmt.Sprintf(`<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
 <c:chartSpace xmlns:c="http://schemas.openxmlformats.org/drawingml/2006/chart" xmlns:a="%s" xmlns:r="%s">
   <c:chart>
-%s%s    <c:plotArea>
+%s    <c:plotArea>
       <c:layout/>
 %s%s    </c:plotArea>
 %s    <c:plotVisOnly val="1"/>
     <c:dispBlanksAs val="%s"/>
   </c:chart>
-</c:chartSpace>`,
+%s</c:chartSpace>`,
 		nsDrawingML, nsOfficeDocRels,
-		titleXML, "",
+		titleXML,
 		chartTypeXML.String(), axisXML,
 		legendXML,
-		chart.displayBlankAs)
+		chart.displayBlankAs,
+		chartSpPrXML)
 
 	return writeRawXMLToZip(zw, fmt.Sprintf("ppt/charts/chart%d.xml", chartIdx), content)
+}
+
+// writeChartAreaSpPrXML renders the chart area's <c:spPr>.
+//
+// Element order matters: in CT_ChartSpace, <c:spPr> is a sibling that follows
+// <c:chart>, not a child of it, so it cannot share the slot the title uses.
+func (w *PPTXWriter) writeChartAreaSpPrXML(chart *ChartShape) string {
+	fillXML := w.writeFillXML(chart.fill)
+	borderXML := w.writeBorderXML(chart.border)
+	if fillXML == "" && borderXML == "" {
+		return ""
+	}
+	return "  <c:spPr>\n" + fillXML + borderXML + "  </c:spPr>\n"
 }
 
 func boolToXML(v bool) string {
@@ -235,20 +255,87 @@ func (w *PPTXWriter) writeGridlinesXML(tag string, gl *Gridlines) string {
 `, tag, gl.Width*12700, colorRGB(gl.Color), tag)
 }
 
-func (w *PPTXWriter) writeSeriesXML(series []*ChartSeries, categories []string, withMarker bool) string {
+// writeSeriesSpPrXML renders a series' <c:spPr>, carrying its fill and/or its
+// outline.
+//
+// Where a series' colour lives depends on the chart type. A line or scatter
+// series is stroked, so PowerPoint reads its colour from <c:spPr><a:ln> and
+// ignores a bare <a:solidFill> there; the reader agrees, mapping that element
+// to Outline and the fill element to FillColor. Writing a line series' colour
+// as a fill therefore only looked correct because the reader falls back to
+// FillColor when no outline colour is present, while PowerPoint silently
+// dropped it. Other chart types fill their series markers and may additionally
+// carry an outline, so both elements can appear.
+func (w *PPTXWriter) writeSeriesSpPrXML(s *ChartSeries, lineSeries bool) string {
+	if s == nil {
+		return ""
+	}
+	// A line series' colour is authored on the outline, so an outline colour
+	// wins over any fill colour the model also happens to hold.
+	lineColor := s.FillColor
+	if s.Outline != nil && s.Outline.Color.ARGB != "" {
+		lineColor = s.Outline.Color
+	}
+
+	var b strings.Builder
+	if lineSeries {
+		if lineColor.ARGB != "" {
+			b.WriteString(lineElementXML(lineColor, outlineWidthPt(s)))
+		}
+	} else {
+		if s.FillColor.ARGB != "" {
+			b.WriteString(fmt.Sprintf(`<a:solidFill><a:srgbClr val="%s"/></a:solidFill>`, colorRGB(s.FillColor)))
+		}
+		if s.Outline != nil && lineColor.ARGB != "" {
+			b.WriteString(lineElementXML(lineColor, outlineWidthPt(s)))
+		}
+	}
+	if b.Len() == 0 {
+		return ""
+	}
+	return "          <c:spPr>" + b.String() + "</c:spPr>\n"
+}
+
+// outlineWidthPt returns a series outline width in points, or 0 when the
+// document never stated one.
+func outlineWidthPt(s *ChartSeries) int {
+	if s == nil || s.Outline == nil || s.Outline.Width <= 0 {
+		return 0
+	}
+	return s.Outline.Width
+}
+
+// lineElementXML renders an <a:ln> stroke.
+//
+// widthPt is in points, matching Border.Width and the reader's v/12700
+// conversion, so it becomes EMU with the same 12700 factor. An unstated width
+// omits the attribute entirely rather than inventing one, leaving PowerPoint to
+// apply its own default.
+func lineElementXML(c Color, widthPt int) string {
+	wAttr := ""
+	if widthPt > 0 {
+		wAttr = fmt.Sprintf(` w="%d"`, widthPt*12700)
+	}
+	return fmt.Sprintf(`<a:ln%s><a:solidFill><a:srgbClr val="%s"/></a:solidFill></a:ln>`, wAttr, colorRGB(c))
+}
+
+// writeSeriesXML renders the <c:ser> elements shared by every chart type.
+//
+// withMarker emits the series marker; lineSeries selects the stroked-series
+// shape, putting the series colour on the outline instead of a fill. They are
+// separate because a radar chart has markers but colours its polygons with a
+// fill, while a line chart stroked from the outline is the only type whose
+// colour belongs in <a:ln>.
+func (w *PPTXWriter) writeSeriesXML(series []*ChartSeries, categories []string, withMarker, lineSeries bool) string {
 	var sb strings.Builder
 	for idx, s := range series {
-		fillXML := ""
-		if s.FillColor.ARGB != "" {
-			fillXML = fmt.Sprintf(`          <c:spPr><a:solidFill><a:srgbClr val="%s"/></a:solidFill></c:spPr>
-`, colorRGB(s.FillColor))
-		}
+		spPrXML := w.writeSeriesSpPrXML(s, lineSeries)
 
 		sb.WriteString(fmt.Sprintf(`        <c:ser>
           <c:idx val="%d"/>
           <c:order val="%d"/>
           <c:tx><c:strRef><c:f>Sheet1!$B$1</c:f><c:strCache><c:ptCount val="1"/><c:pt idx="0"><c:v>%s</c:v></c:pt></c:strCache></c:strRef></c:tx>
-%s`, idx, idx, xmlEscape(s.Title), fillXML))
+%s`, idx, idx, xmlEscape(s.Title), spPrXML))
 
 		// Data labels
 		if s.ShowValue || s.ShowCategoryName || s.ShowPercentage || s.ShowSeriesName {
@@ -313,7 +400,7 @@ func (w *PPTXWriter) writeBarChartXML(c *BarChart, cats []string) string {
         <c:axId val="1"/>
         <c:axId val="2"/>
       </c:barChart>
-`, c.BarDirection, c.BarGrouping, w.writeSeriesXML(c.Series, cats, false),
+`, c.BarDirection, c.BarGrouping, w.writeSeriesXML(c.Series, cats, false, false),
 		c.GapWidthPercent, c.OverlapPercent)
 }
 
@@ -326,7 +413,7 @@ func (w *PPTXWriter) writeBar3DChartXML(c *Bar3DChart, cats []string) string {
         <c:axId val="1"/>
         <c:axId val="2"/>
       </c:bar3DChart>
-`, c.BarDirection, c.BarGrouping, w.writeSeriesXML(c.Series, cats, false),
+`, c.BarDirection, c.BarGrouping, w.writeSeriesXML(c.Series, cats, false, false),
 		c.GapWidthPercent)
 }
 
@@ -335,7 +422,7 @@ func (w *PPTXWriter) writeLineChartXML(c *LineChart, cats []string) string {
 	if c.IsSmooth {
 		smooth = "1"
 	}
-	seriesXML := w.writeSeriesXML(c.Series, cats, true)
+	seriesXML := w.writeSeriesXML(c.Series, cats, true, true)
 	// Add smooth to each series
 	seriesXML = strings.ReplaceAll(seriesXML, "</c:ser>",
 		fmt.Sprintf("          <c:smooth val=\"%s\"/>\n        </c:ser>", smooth))
@@ -356,21 +443,21 @@ func (w *PPTXWriter) writeAreaChartXML(c *AreaChart, cats []string) string {
 %s        <c:axId val="1"/>
         <c:axId val="2"/>
       </c:areaChart>
-`, w.writeSeriesXML(c.Series, cats, false))
+`, w.writeSeriesXML(c.Series, cats, false, false))
 }
 
 func (w *PPTXWriter) writePieChartXML(c *PieChart, cats []string) string {
 	return fmt.Sprintf(`      <c:pieChart>
         <c:varyColors val="1"/>
 %s      </c:pieChart>
-`, w.writeSeriesXML(c.Series, cats, false))
+`, w.writeSeriesXML(c.Series, cats, false, false))
 }
 
 func (w *PPTXWriter) writePie3DChartXML(c *Pie3DChart, cats []string) string {
 	return fmt.Sprintf(`      <c:pie3DChart>
         <c:varyColors val="1"/>
 %s      </c:pie3DChart>
-`, w.writeSeriesXML(c.Series, cats, false))
+`, w.writeSeriesXML(c.Series, cats, false, false))
 }
 
 func (w *PPTXWriter) writeDoughnutChartXML(c *DoughnutChart, cats []string) string {
@@ -378,7 +465,7 @@ func (w *PPTXWriter) writeDoughnutChartXML(c *DoughnutChart, cats []string) stri
         <c:varyColors val="1"/>
 %s        <c:holeSize val="%d"/>
       </c:doughnutChart>
-`, w.writeSeriesXML(c.Series, cats, false), c.HoleSize)
+`, w.writeSeriesXML(c.Series, cats, false, false), c.HoleSize)
 }
 
 func (w *PPTXWriter) writeScatterChartXML(c *ScatterChart, cats []string) string {
@@ -389,16 +476,14 @@ func (w *PPTXWriter) writeScatterChartXML(c *ScatterChart, cats []string) string
 
 	var sb strings.Builder
 	for idx, s := range c.Series {
-		fillXML := ""
-		if s.FillColor.ARGB != "" {
-			fillXML = fmt.Sprintf(`          <c:spPr><a:solidFill><a:srgbClr val="%s"/></a:solidFill></c:spPr>
-`, colorRGB(s.FillColor))
-		}
+		// A scatter series is plotted as a stroked line with markers, so its
+		// colour belongs on the outline, like a line chart's.
+		spPrXML := w.writeSeriesSpPrXML(s, true)
 		sb.WriteString(fmt.Sprintf(`        <c:ser>
           <c:idx val="%d"/>
           <c:order val="%d"/>
           <c:tx><c:strRef><c:f>Sheet1!$B$1</c:f><c:strCache><c:ptCount val="1"/><c:pt idx="0"><c:v>%s</c:v></c:pt></c:strCache></c:strRef></c:tx>
-%s`, idx, idx, xmlEscape(s.Title), fillXML))
+%s`, idx, idx, xmlEscape(s.Title), spPrXML))
 
 		// X values
 		sb.WriteString("          <c:xVal>\n            <c:numRef><c:f>Sheet1!$A$2</c:f><c:numCache>\n")
@@ -437,5 +522,5 @@ func (w *PPTXWriter) writeRadarChartXML(c *RadarChart, cats []string) string {
 %s        <c:axId val="1"/>
         <c:axId val="2"/>
       </c:radarChart>
-`, w.writeSeriesXML(c.Series, cats, true))
+`, w.writeSeriesXML(c.Series, cats, true, false))
 }

@@ -23,13 +23,13 @@ const (
 
 // Numeric format constants.
 const (
-	NumFormatArabicPeriod    = "arabicPeriod"
-	NumFormatArabicParen     = "arabicParenR"
-	NumFormatRomanUcPeriod   = "romanUcPeriod"
-	NumFormatRomanLcPeriod   = "romanLcPeriod"
-	NumFormatAlphaUcPeriod   = "alphaUcPeriod"
-	NumFormatAlphaLcPeriod   = "alphaLcPeriod"
-	NumFormatAlphaLcParen    = "alphaLcParenR"
+	NumFormatArabicPeriod  = "arabicPeriod"
+	NumFormatArabicParen   = "arabicParenR"
+	NumFormatRomanUcPeriod = "romanUcPeriod"
+	NumFormatRomanLcPeriod = "romanLcPeriod"
+	NumFormatAlphaUcPeriod = "alphaUcPeriod"
+	NumFormatAlphaLcPeriod = "alphaLcPeriod"
+	NumFormatAlphaLcParen  = "alphaLcParenR"
 )
 
 // NewBullet creates a new bullet with no bullet type.

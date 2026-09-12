@@ -2,3 +2,8 @@
 *.png
 *.pptx
 cmd/debug_*/
+
+# Golden images for the rendering regression tests are deliberately tracked.
+!testdata/render/*.png
+# ...but freshly rendered output that failed a golden comparison is not.
+testdata/render/*.actual.png
