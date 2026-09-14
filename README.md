@@ -73,13 +73,24 @@ so the write side of the same constructs is stated separately:
 | arrow ends (`a:headEnd` / `a:tailEnd`) | yes | yes | on the shape's own `a:ln` |
 | placeholder `type` and `idx` | yes | yes | `type` is omitted when the placeholder has none, since `ST_PlaceholderType` has no empty value |
 | body text properties (`a:bodyPr`) | yes | yes | text insets (`lIns`/`tIns`/`rIns`/`bIns`), text direction (`vert`), `anchor`, `wrap`, `numCol` and the auto-fit choice, on a text box, an AutoShape and a placeholder alike |
+| paragraph properties (`a:pPr`) | yes | yes | left, right and first-line indents (`marL`/`marR`/`indent`), outline level (`lvl`), alignment, line and paragraph spacing, bullets; a table cell shares the shape's emitter, so all four carriers agree |
 
 The known gaps, so they are not mistaken for support: an unsupported construct
 keeps its frame but not its original XML, the SVG extension (`asvg:svgBlip`) is
 not written, multi-column text is carried and written but laid out by the
-renderer as a single column, and a layout background given as a theme reference
+renderer as a single column, a layout background given as a theme reference
 (`p:bgRef`) is not resolved — it falls back to the renderer's white, which is
-what such a reference normally means.
+what such a reference normally means, and a table's style flags (`firstRow` and
+`bandRow` on `a:tblPr`) are always written as `1`, with no `a:tableStyleId`.
+
+Two further gaps are on the **reading** side, both in the layout direction. A
+non-placeholder text box on a layout is read by a second scanner, which now reads
+its indentation and its `<a:br/>` but still not the **bullets and line spacing**
+inside its paragraphs; and a placeholder inherits only position, insets and fonts
+from its layout — the **bullets and indents of the layout's list style
+(`a:lstStyle`, one `lvlNpPr` per level) are not applied at all**, and only
+`lvl1pPr` is considered. A placeholder whose bullets come from the layout
+therefore has none in the preview.
 
 #### SVG pictures
 
@@ -320,8 +331,11 @@ if bad := pres.UnsupportedShapes(); len(bad) > 0 {
 | 箭头端（`a:headEnd` / `a:tailEnd`） | 支持 | 支持 | 写在形状自己的 `a:ln` 上 |
 | 占位符 `type` 与 `idx` | 支持 | 支持 | 占位符没有类型时**省略** `type` 属性，因为 `ST_PlaceholderType` 没有空值成员 |
 | 文字体属性（`a:bodyPr`） | 支持 | 支持 | 文字内边距（`lIns`/`tIns`/`rIns`/`bIns`）、文字方向（`vert`）、`anchor`、`wrap`、`numCol` 与自动调整方式；文本框、AutoShape、占位符三者一致 |
+| 段落属性（`a:pPr`） | 支持 | 支持 | 左右缩进与首行缩进（`marL`/`marR`/`indent`）、大纲级别（`lvl`）、对齐、行距与段间距、项目符号；**表格单元格与形状共用同一个发射器**，四种载具一致 |
 
-已知的写出缺口（列出来是为了不被误当成已支持）：不支持形状只保留框体、不保留原 XML；微软的 SVG 扩展（`asvg:svgBlip`）不写出；多列文字（`numCol`）能读能写，但 renderer 仍按单列排版；版式背景若以主题引用（`p:bgRef`）给出，则不被解析——退回 renderer 的白色，而这通常正是该引用的含义。
+已知的写出缺口（列出来是为了不被误当成已支持）：不支持形状只保留框体、不保留原 XML；微软的 SVG 扩展（`asvg:svgBlip`）不写出；多列文字（`numCol`）能读能写，但 renderer 仍按单列排版；版式背景若以主题引用（`p:bgRef`）给出，则不被解析——退回 renderer 的白色，而这通常正是该引用的含义；表格的样式标志（`a:tblPr` 上的 `firstRow`/`bandRow`）**始终写成 `1`**，`a:tableStyleId` 也不写出。
+
+**读取**一侧另有两处缺口，都在版式方向：版式上的非占位符文本框由第二个扫描器读取，它现在也读缩进与 `<a:br/>`，但段落里的**项目符号与行距仍不读**；占位符从版式继承到的只有位置、内边距与字体，**列表样式（`a:lstStyle` 各级 `lvlNpPr`）里的项目符号与缩进不会应用**（且只认 `lvl1pPr`）。所以「项目符号来自版式」的占位符在预览里没有项目符号。
 
 #### SVG 图片
 

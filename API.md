@@ -149,6 +149,17 @@ para2.SetLineSpacing(200)
 para2.SetSpaceBefore(100)
 para2.SetSpaceAfter(50)
 
+// Indentation and the outline level live on the same Alignment, written as
+// marL/marR/indent/lvl. A positive MarginLeft together with an equal negative
+// Indent is the hanging indent every bulleted list is built from: the bullet
+// sits at MarginLeft, the wrapped lines fall back to the text margin.
+para2.GetAlignment().MarginLeft = 342900 // 0.375in, in EMU
+para2.GetAlignment().Indent = -342900     // wrapped lines align with the text
+para2.GetAlignment().Level = 1            // outline level, 0-based
+
+// A nil Alignment is legal: SetAlignment(nil) clears it and the paragraph is
+// saved flush left with no indent. Every emitter tolerates the nil.
+
 // A freeform shape: a custom geometry path replaces the rectangle. The path's
 // Width and Height are its coordinate space, scaled onto the shape's frame.
 path := &ppt.CustomGeomPath{
@@ -952,6 +963,18 @@ para.CreateTextRun("第二行")
 para2 := rt.CreateParagraph()
 para2.GetAlignment().SetHorizontal(ppt.HorizontalCenter)
 para2.SetLineSpacing(200)
+para2.SetSpaceBefore(100)
+para2.SetSpaceAfter(50)
+
+// 缩进与大纲级别也在同一个 Alignment 上，写出为 marL/marR/indent/lvl。
+// MarginLeft 为正、Indent 取等量负值，就是所有项目符号列表用的悬挂缩进：
+// 项目符号落在 MarginLeft 处，折行退回正文边距。
+para2.GetAlignment().MarginLeft = 342900 // 0.375 英寸，单位 EMU
+para2.GetAlignment().Indent = -342900     // 折行与正文对齐
+para2.GetAlignment().Level = 1            // 大纲级别，从 0 起
+
+// Alignment 允许为 nil：SetAlignment(nil) 会清掉它，段落按无缩进左对齐
+// 保存，所有写出路径都容忍这个 nil。
 
 // 自由曲线形状：自定义几何会取代矩形。路径的 Width/Height 是它自己的
 // 坐标系，渲染时按形状框体缩放。
