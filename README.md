@@ -72,11 +72,14 @@ so the write side of the same constructs is stated separately:
 | custom geometry (`a:custGeom`) | yes | yes | freeform shapes and freeform connectors, with their arrow ends |
 | arrow ends (`a:headEnd` / `a:tailEnd`) | yes | yes | on the shape's own `a:ln` |
 | placeholder `type` and `idx` | yes | yes | `type` is omitted when the placeholder has none, since `ST_PlaceholderType` has no empty value |
+| body text properties (`a:bodyPr`) | yes | yes | text insets (`lIns`/`tIns`/`rIns`/`bIns`), text direction (`vert`), `anchor`, `wrap`, `numCol` and the auto-fit choice, on a text box, an AutoShape and a placeholder alike |
 
 The known gaps, so they are not mistaken for support: an unsupported construct
 keeps its frame but not its original XML, the SVG extension (`asvg:svgBlip`) is
-not written, a shape's text insets (`lIns`/`tIns`/`rIns`/`bIns`) are not
-written, and neither is text direction.
+not written, multi-column text is carried and written but laid out by the
+renderer as a single column, and a layout background given as a theme reference
+(`p:bgRef`) is not resolved — it falls back to the renderer's white, which is
+what such a reference normally means.
 
 #### SVG pictures
 
@@ -316,8 +319,9 @@ if bad := pres.UnsupportedShapes(); len(bad) > 0 {
 | 自定义几何（`a:custGeom`） | 支持 | 支持 | 任意多边形与自由曲线连接线，含其箭头端 |
 | 箭头端（`a:headEnd` / `a:tailEnd`） | 支持 | 支持 | 写在形状自己的 `a:ln` 上 |
 | 占位符 `type` 与 `idx` | 支持 | 支持 | 占位符没有类型时**省略** `type` 属性，因为 `ST_PlaceholderType` 没有空值成员 |
+| 文字体属性（`a:bodyPr`） | 支持 | 支持 | 文字内边距（`lIns`/`tIns`/`rIns`/`bIns`）、文字方向（`vert`）、`anchor`、`wrap`、`numCol` 与自动调整方式；文本框、AutoShape、占位符三者一致 |
 
-已知的写出缺口（列出来是为了不被误当成已支持）：不支持形状只保留框体、不保留原 XML；微软的 SVG 扩展（`asvg:svgBlip`）不写出；形状的文字内边距（`lIns`/`tIns`/`rIns`/`bIns`）不写出；文字方向也不写出。
+已知的写出缺口（列出来是为了不被误当成已支持）：不支持形状只保留框体、不保留原 XML；微软的 SVG 扩展（`asvg:svgBlip`）不写出；多列文字（`numCol`）能读能写，但 renderer 仍按单列排版；版式背景若以主题引用（`p:bgRef`）给出，则不被解析——退回 renderer 的白色，而这通常正是该引用的含义。
 
 #### SVG 图片
 
