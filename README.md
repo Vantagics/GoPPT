@@ -155,6 +155,7 @@ When rendering unattended, pass a `FontDiagnostics` to `RenderOptions` to get th
 - Comments with authors — name, initials, timestamp and position survive a write → read round trip
 - Speaker notes, one paragraph per line, in both directions
 - Slide backgrounds (solid and gradient)
+- Slide transitions: the 21 effect elements of `pml-animationInfo.xsd` (`fade`, `push`, `wipe`, `split`, `cover`, `pull`, `dissolve`, the eight-direction and corner variants, `wheel` with its spoke count, `cut` and `fade` through black), plus speed, direction, orientation and the advance timing. `TransitionUncover` is what the schema calls `<p:pull>` — there is no `<p:uncover>`, and `pull` is the eight-direction counterpart of `cover`. A duration has no place in the base schema, being the p14 attribute `p14:dur`, so a transition that carries one is written inside `mc:AlternateContent`: `mc:Choice` requires `p14` and states the duration, `mc:Fallback` repeats the transition without it, exactly as PowerPoint writes it. Two gaps remain: the PowerPoint 2010 effects that live in the p14 namespace (`p14:ripple` and its kin) are outside the model, so a slide carrying one reads back as having no transition, and a transition on `p:sldLayout` or `p:sldMaster` is not supported either — both parts are written from a fixed template, with no content model to set one on
 - Animations (basic grouping)
 - Document properties and custom properties
 - Multiple slide layouts (4:3, 16:9, 16:10, A4, Letter, custom)
@@ -396,6 +397,13 @@ Draft 是画质取舍，而不是另一个渲染器：输出尺寸与内容都�
 - 批注（含作者信息）——作者姓名、缩写、时间戳与位置均可完整走通「写入 → 读取」往返
 - 演讲者备注
 - 幻灯片背景（纯色和渐变）
+- 幻灯片转场：`pml-animationInfo.xsd` 里全部 21 个效果元素（`fade`、`push`、`wipe`、`split`、`cover`、`pull`、
+  `dissolve`、八方向与四角变体、带辐条数的 `wheel`、可穿黑的 `cut` / `fade`），另有速度、方向、朝向与推进时序。
+  `TransitionUncover` 就是 schema 里的 `<p:pull>` —— 格式中**没有** `<p:uncover>`，`pull` 是 `cover` 的八方向对偶。
+  时长在基础 schema 里无处安放（它是 p14 属性 `p14:dur`），所以带时长的转场写在 `mc:AlternateContent` 里：
+  `mc:Choice` 声明 `Requires="p14"` 并给出时长，`mc:Fallback` 重复一份不含时长的——与 PowerPoint 的写法一致。
+  仍有两处缺口：Office 2010 起放在 p14 命名空间里的效果（`p14:ripple` 等）不在模型内，带这类效果的幻灯片读进来
+  视为无转场；`p:sldLayout` / `p:sldMaster` 上的转场也不支持——这两个部件本库都写成固定模板，没有可供设置的内容模型
 - 动画（基础分组）
 - 文档属性和自定义属性
 - 多种幻灯片布局（4:3、16:9、16:10、A4、Letter、自定义）

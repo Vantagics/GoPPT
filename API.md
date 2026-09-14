@@ -82,6 +82,29 @@ slide.SetBackground(ppt.NewFill().SetSolid(ppt.ColorWhite))
 
 ---
 
+#### Slide transitions
+
+```go
+slide.SetTransition(&ppt.Transition{
+    Type:      ppt.TransitionFade,
+    Speed:     ppt.TransitionSpeedSlow,
+    Duration:  2000,                        // milliseconds
+    Direction: ppt.TransitionDirectionLeft, // push, wipe, cover, pull, strips, split, zoom
+})
+
+tr := slide.GetTransition()
+```
+
+`<p:transition>` is a child of `<p:sld>`, after `<p:clrMapOvr>` and before `<p:timing>`. `TransitionType` names the 21 effect elements of `CT_SlideTransition` and the writer emits the one you choose; `Speed`, `Direction`, `Orientation`, `ThroughBlack`, `Spokes`, `AdvanceOnClick` and `AdvanceAfterTime` are the attributes and children those effects accept. Attributes the schema already defaults are left out rather than stated, because stating them claims the document's author chose the default on purpose — so a transition with nothing set adds `<p:transition><p:fade/></p:transition>` and nothing more.
+
+Two things are worth knowing. **`TransitionUncover` is `<p:pull>`**: the schema has no `uncover` element, and `pull` — which moves the previous slide off-screen, continually revealing more of the new one — is the eight-direction counterpart of `cover`. The two constants are one value, so either name round-trips as the other.
+
+**A duration is written as an `mc:AlternateContent` pair.** `p14:dur` belongs to the PowerPoint 2010 namespace and has no home in the base schema's `CT_SlideTransition`, so a transition carrying one goes inside `mc:AlternateContent`: `mc:Choice` requires `p14` and states the duration, `mc:Fallback` repeats the transition without it. That is PowerPoint's own shape, and the reader prefers the choice, taking the plain element only when there is no choice to prefer.
+
+Not covered: the PowerPoint 2010 effects that live in the p14 namespace (`p14:ripple`, `p14:vortex` and the rest) are a separate content model, and a slide whose transition is one of them reads back as having no transition. A transition on a slide layout or master is not supported either — `p:sldLayout` and `p:sldMaster` are written from a fixed template, so there is no content model to set one on.
+
+---
+
 ### Shapes
 
 All shapes share a common `BaseShape` with position, size, fill, border, shadow, and hyperlink.
@@ -854,6 +877,38 @@ slide.SetNotes("演讲者备注")
 slide.SetVisible(true)
 slide.SetBackground(ppt.NewFill().SetSolid(ppt.ColorWhite))
 ```
+
+---
+
+#### 幻灯片转场 (Slide transitions)
+
+```go
+slide.SetTransition(&ppt.Transition{
+    Type:      ppt.TransitionFade,
+    Speed:     ppt.TransitionSpeedSlow,
+    Duration:  2000,                        // 毫秒
+    Direction: ppt.TransitionDirectionLeft, // 适用于 push、wipe、cover、pull、strips、split、zoom
+})
+
+tr := slide.GetTransition()
+```
+
+`<p:transition>` 是 `<p:sld>` 的子元素，位于 `<p:clrMapOvr>` 之后、`<p:timing>` 之前。`TransitionType` 对应
+`CT_SlideTransition` 的 21 个效果元素，你选哪个就写哪个；`Speed`、`Direction`、`Orientation`、`ThroughBlack`、
+`Spokes`、`AdvanceOnClick`、`AdvanceAfterTime` 是这些效果各自接受的属性与子元素。schema 已有默认值的属性**不写**——
+写出来等于宣称文档作者有意选了默认值。所以什么都没设的转场只多出 `<p:transition><p:fade/></p:transition>` 一行。
+
+有两点值得知道。**`TransitionUncover` 就是 `<p:pull>`**：schema 里没有 `uncover` 元素，而 `pull`——把上一张幻灯片
+移出屏幕、不断露出新幻灯片——正是 `cover` 的八方向对偶。两个常量是同一个值，用哪个名字往返回来都一样。
+
+**时长写成一对 `mc:AlternateContent`。** `p14:dur` 属于 PowerPoint 2010 命名空间，在基础 schema 的
+`CT_SlideTransition` 里无处安放，所以带时长的转场包在 `mc:AlternateContent` 中：`mc:Choice` 声明 `Requires="p14"`
+并给出时长，`mc:Fallback` 重复一份不含时长的。这就是 PowerPoint 自己的写法；读端优先取 choice，只有在没有 choice
+可优先时才退回普通元素。
+
+未覆盖：Office 2010 起放在 p14 命名空间里的效果（`p14:ripple`、`p14:vortex` 等）是另一套内容模型，转场为这类效果的
+幻灯片读进来会被视为无转场。`p:sldLayout` / `p:sldMaster` 上的转场同样不支持——这两个部件本库写成固定模板，
+没有可供设置的内容模型。
 
 ---
 
