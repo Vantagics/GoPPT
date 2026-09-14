@@ -53,6 +53,10 @@ func probeCover(args []string) {
 		"Malgun Gothic", "Gulim",
 		"Noto Sans CJK SC", "Noto Sans SC", "WenQuanYi Micro Hei",
 		"Arial", "Calibri", "Segoe UI", "DengXian",
+		// The symbol/emoji chain, in production order.
+		"Segoe UI Emoji", "Apple Color Emoji", "Noto Color Emoji",
+		"Segoe UI Symbol", "Noto Sans Symbols 2", "Noto Sans Symbols",
+		"DejaVu Sans",
 	}
 
 	// Establish each font's .notdef signature before judging any of the samples.

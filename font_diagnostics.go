@@ -220,6 +220,26 @@ var defaultCJKFallbackChain = []string{
 	"Noto Sans CJK SC", "Noto Sans SC", "WenQuanYi Micro Hei",
 }
 
+// defaultSymbolFallbackChain covers pictographs — emoji, dingbats, the
+// miscellaneous symbol blocks.
+//
+// It is a third chain because neither of the other two can serve: the text face
+// a document declares is a *text* face, and the CJK chain is made of text faces
+// too. None of them carries a glyph for 💙 or 🐱, so a symbol that reaches
+// either one is drawn as that font's .notdef box — the hollow rectangle that
+// reads as a white square on the slide. That is what a deck full of emoji
+// bullets renders as until this chain exists.
+//
+// The colour emoji faces come first, then the monochrome symbol faces, because
+// the renderer draws outlines: a colour font's base glyph is still an outline
+// here, and where a platform ships only the colour face (Windows) the
+// monochrome fallback is what keeps the character visible at all.
+var defaultSymbolFallbackChain = []string{
+	"Segoe UI Emoji", "Apple Color Emoji", "Noto Color Emoji",
+	"Segoe UI Symbol", "Noto Sans Symbols 2", "Noto Sans Symbols",
+	"DejaVu Sans",
+}
+
 // mergeFallbackChain puts the caller-supplied fonts in front of the built-in
 // list, skipping duplicates and empty entries.
 func mergeFallbackChain(configured, builtin []string) []string {

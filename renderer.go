@@ -160,6 +160,7 @@ func (p *Presentation) SlideToImage(slideIndex int, opts *RenderOptions) (img im
 		overlayOpacityScale: opts.OverlayOpacityScale,
 		fontFallback:        mergeFallbackChain(opts.FontFallback, defaultFontFallbackChain),
 		cjkFallback:         mergeFallbackChain(opts.FontFallback, defaultCJKFallbackChain),
+		symbolFallback:      mergeFallbackChain(opts.FontFallback, defaultSymbolFallbackChain),
 		fontDiag:            opts.FontDiagnostics,
 		onFontFallback:      opts.OnFontFallback,
 		draft:               opts.Draft,
@@ -310,6 +311,7 @@ type renderer struct {
 	fontScale           float64 // normAutofit font scale factor (0 or 1.0 = no scaling)
 	fontFallback        []string
 	cjkFallback         []string
+	symbolFallback      []string
 	fontDiag            *FontDiagnostics
 	onFontFallback      func(FontUsage)
 	// draft skips anti-aliasing, shadows and image smoothing. See
@@ -4453,9 +4455,29 @@ func (r *renderer) resolveFace(f *Font, sizePixels float64, measure bool) (font.
 	return nil, "", FontMissing
 }
 
-// resolveCJKFace finds a face that can actually draw the East Asian characters
-// in sample, for f. It returns the face and the name of the font that matched,
-// or nil and "" when nothing installed covers the text.
+// textClass says which kind of face a character has to be drawn with. A run is
+// split wherever the class changes, because one face cannot serve all three.
+type textClass uint8
+
+const (
+	// textClassLatin covers everything the declared text face owns: Latin,
+	// Greek, Cyrillic, digits, spaces, ordinary punctuation.
+	textClassLatin textClass = iota
+	// textClassCJK covers Han, Kana, Hangul, CJK punctuation and the enclosed
+	// forms — the characters a CJK face has to supply.
+	textClassCJK
+	// textClassSymbol covers pictographs: emoji, dingbats, the miscellaneous
+	// symbol blocks. No text face carries glyphs for these.
+	textClassSymbol
+	numTextClasses = 3
+)
+
+// classOrder lists the classes in the order a fallback is considered.
+var classOrder = [numTextClasses]textClass{textClassLatin, textClassCJK, textClassSymbol}
+
+// resolveClassFace finds a face that can actually draw the characters of the
+// given class in sample, for f. It returns the face and the name of the font
+// that matched, or nil and "" when nothing installed covers the text.
 //
 // "The name resolves" is not a strong enough test, and using it is what makes
 // tofu possible. A document whose generator copied one font-family list into
@@ -4465,23 +4487,23 @@ func (r *renderer) resolveFace(f *Font, sizePixels float64, measure bool) (font.
 // report a perfect match. Each candidate is therefore checked against the
 // characters the run actually contains, so a Latin face is skipped in favour of
 // the East Asian fallback chain.
-func (r *renderer) resolveCJKFace(f *Font, sizePixels float64, measure bool, sample string) (font.Face, string) {
+//
+// The same argument applies to a symbol face, which is why the class is a
+// parameter: an emoji is no more drawable by the declared text face than a
+// Chinese character is by a Latin-only one, and it used to be drawn with the
+// declared face for exactly the same reason — nothing asked the question.
+func (r *renderer) resolveClassFace(f *Font, sizePixels float64, measure bool, sample string, class textClass) (font.Face, string) {
 	if r.fontCache == nil {
 		return nil, ""
 	}
 
-	// Preference order: the declared East Asian font, then the fallback chain.
-	candidates := make([]string, 0, len(r.cjkFallback)+1)
-	if f.NameEA != "" {
-		candidates = append(candidates, f.NameEA)
-	}
-	candidates = append(candidates, r.cjkFallback...)
+	candidates := r.classCandidates(f, class)
 
-	// A font covering every CJK character in the sample is the answer, and the
-	// first such candidate wins.
+	// A font covering every character of the sample in this class is the
+	// answer, and the first such candidate wins.
 	bestName, bestCovered := "", 0
 	for _, name := range candidates {
-		covered, total := r.countCoveredCJK(name, f.Bold, f.Italic, sample)
+		covered, total := r.countCoveredClass(name, f.Bold, f.Italic, sample, class)
 		if total == 0 {
 			continue
 		}
@@ -4497,7 +4519,7 @@ func (r *renderer) resolveCJKFace(f *Font, sizePixels float64, measure bool, sam
 	}
 
 	// No font covers the whole sample. Surrendering here would return nil, and
-	// splitRunByCJK would then draw the entire run — including the characters
+	// splitRunByClass would then draw the entire run — including the characters
 	// that ARE drawable — with the Latin face. So take the font that covers the
 	// most, and let only the genuinely missing characters show a .notdef box.
 	if bestName != "" {
@@ -4508,15 +4530,65 @@ func (r *renderer) resolveCJKFace(f *Font, sizePixels float64, measure bool, sam
 	return nil, ""
 }
 
-// countCoveredCJK reports how many of the sample's CJK characters the named
-// font can draw, and how many such characters the sample contains. A total of
-// zero means the sample holds no CJK, so the question does not apply.
-func (r *renderer) countCoveredCJK(name string, bold, italic bool, sample string) (covered, total int) {
+// classCandidates returns the font names to try for a class, in preference
+// order: the font the document declared for this kind of text first, then that
+// class's fallback chain.
+//
+// Declaration first is what keeps a run's typeface stable. A document that
+// declares a face able to draw its symbols — or its Chinese — is honoured, and
+// the coverage check is what rejects a declaration that cannot: a text face that
+// merely looks resolved never wins a class it has no glyphs for.
+func (r *renderer) classCandidates(f *Font, class textClass) []string {
+	declared := make([]string, 0, 2)
+	switch class {
+	case textClassCJK:
+		// East Asian text is declared by <a:ea> alone.
+		declared = append(declared, f.NameEA)
+	case textClassSymbol:
+		// A symbol has no declaration of its own in OOXML, so either of the
+		// run's two font names may be the one that carries the glyphs.
+		declared = append(declared, f.NameEA, f.Name)
+	}
+
+	var chain []string
+	switch class {
+	case textClassCJK:
+		chain = r.cjkFallback
+	case textClassSymbol:
+		chain = r.symbolFallback
+	}
+	if len(declared) == 0 && len(chain) == 0 {
+		return nil
+	}
+
+	out := make([]string, 0, len(declared)+len(chain))
+	seen := make(map[string]struct{}, len(declared)+len(chain))
+	for _, list := range [][]string{declared, chain} {
+		for _, name := range list {
+			if name == "" {
+				continue
+			}
+			key := lowerFontName(name)
+			if _, dup := seen[key]; dup {
+				continue
+			}
+			seen[key] = struct{}{}
+			out = append(out, name)
+		}
+	}
+	return out
+}
+
+// countCoveredClass reports how many of the sample's characters of the given
+// class the named font can draw, and how many such characters the sample
+// contains. A total of zero means the sample holds none of that class, so the
+// question does not apply.
+func (r *renderer) countCoveredClass(name string, bold, italic bool, sample string, class textClass) (covered, total int) {
 	if r.fontCache == nil || name == "" {
 		return 0, 0
 	}
 	for _, ch := range sample {
-		if !isCJK(ch) {
+		if classOf(ch) != class {
 			continue
 		}
 		total++
@@ -4525,6 +4597,24 @@ func (r *renderer) countCoveredCJK(name string, bold, italic bool, sample string
 		}
 	}
 	return covered, total
+}
+
+// resolveCJKFace finds a face for the East Asian characters of sample.
+func (r *renderer) resolveCJKFace(f *Font, sizePixels float64, measure bool, sample string) (font.Face, string) {
+	return r.resolveClassFace(f, sizePixels, measure, sample, textClassCJK)
+}
+
+// resolveSymbolFace finds a face for the pictographs of sample — the emoji and
+// dingbats a text face has no glyphs for. Without it those characters are drawn
+// by whatever face the name resolves to, which is a .notdef box on the slide.
+func (r *renderer) resolveSymbolFace(f *Font, sizePixels float64, measure bool, sample string) (font.Face, string) {
+	return r.resolveClassFace(f, sizePixels, measure, sample, textClassSymbol)
+}
+
+// countCoveredCJK reports how many of the sample's CJK characters the named
+// font can draw, and how many such characters the sample contains.
+func (r *renderer) countCoveredCJK(name string, bold, italic bool, sample string) (covered, total int) {
+	return r.countCoveredClass(name, bold, italic, sample, textClassCJK)
 }
 
 // coversCJK reports whether the named font has a glyph for every East Asian
@@ -4598,6 +4688,28 @@ func (r *renderer) noteCJKFont(f *Font, used string) {
 	}
 }
 
+// noteSymbolFont reports the outcome of choosing a face for the pictographs in
+// a run, so an emoji that had to be drawn from a symbol face — or could not be
+// drawn at all — is visible in the diagnostics instead of only on the slide.
+//
+// It is reported against the run's text font, because that is the face the
+// document asked for and the one the reader can do something about: the cure is
+// to install a symbol font, or to write the character in a font that has it.
+func (r *renderer) noteSymbolFont(f *Font, used string) {
+	if r.fontDiag == nil && r.onFontFallback == nil {
+		return
+	}
+	if used == "" {
+		// Nothing installed can draw the pictographs, so they become
+		// missing-glyph boxes.
+		r.recordFontUsage(f.Name, "", FontMissing, f.Bold, f.Italic)
+		return
+	}
+	if f.Name != "" && !strings.EqualFold(f.Name, used) && !strings.EqualFold(f.NameEA, used) {
+		r.recordFontUsage(f.Name, used, FontSubstituted, f.Bold, f.Italic)
+	}
+}
+
 // getFace returns a font.Face for the given Font. When no installed font can be
 // found it falls back to basicfont.Face7x13, which renders non-ASCII glyphs as
 // blank boxes; the miss is reported through FontDiagnostics / OnFontFallback.
@@ -4653,10 +4765,40 @@ func (r *renderer) getCJKMeasureFace(f *Font, sample string) (font.Face, string)
 	return r.resolveCJKFace(f, r.fontSizePixels(f), true, sample)
 }
 
+// getSymbolFace returns a font face able to draw the pictographs in sample —
+// the emoji and dingbats — plus the name of the font it came from, or nil and
+// "" when no installed font covers them.
+func (r *renderer) getSymbolFace(f *Font, sample string) (font.Face, string) {
+	if r.fontCache == nil {
+		return nil, ""
+	}
+	return r.resolveSymbolFace(f, r.fontSizePixels(f), false, sample)
+}
+
+// getSymbolMeasureFace is getSymbolFace with the HintingNone face used for
+// layout, so measurement and drawing agree on which font a run uses.
+func (r *renderer) getSymbolMeasureFace(f *Font, sample string) (font.Face, string) {
+	if r.fontCache == nil {
+		return nil, ""
+	}
+	return r.resolveSymbolFace(f, r.fontSizePixels(f), true, sample)
+}
+
 // containsCJK returns true if the string contains any CJK characters.
 func containsCJK(s string) bool {
 	for _, r := range s {
 		if isCJK(r) {
+			return true
+		}
+	}
+	return false
+}
+
+// containsSymbol returns true if the string contains any pictographs, i.e. any
+// character that has to be drawn from a symbol face.
+func containsSymbol(s string) bool {
+	for _, r := range s {
+		if isSymbolRune(r) {
 			return true
 		}
 	}
@@ -4680,7 +4822,7 @@ func (r *renderer) buildParaTextRuns(elements []ParagraphElement) []textRun {
 			if f == nil {
 				f = NewFont()
 			}
-			if containsCJK(e.text) && r.fontCache != nil {
+			if (containsCJK(e.text) || containsSymbol(e.text)) && r.fontCache != nil {
 				sizePt := float64(f.Size)
 				if sizePt <= 0 {
 					sizePt = 10
@@ -4689,19 +4831,28 @@ func (r *renderer) buildParaTextRuns(elements []ParagraphElement) []textRun {
 					sizePt *= r.fontScale
 				}
 				scaledPt := sizePt * 12700.0 * r.scaleX
-				latinFace := r.fontCache.GetFace(f.Name, scaledPt, f.Bold, f.Italic)
-				if latinFace == nil {
-					latinFace = r.getFace(f)
+				var faces, measures [numTextClasses]font.Face
+				faces[textClassLatin] = r.fontCache.GetFace(f.Name, scaledPt, f.Bold, f.Italic)
+				if faces[textClassLatin] == nil {
+					faces[textClassLatin] = r.getFace(f)
 				}
+				measures[textClassLatin] = r.getMeasureFace(f)
 				// Face selection is driven by the characters in this run, not by
 				// the declared font names: a name that resolves can still lack
 				// the glyphs, and then the text draws as empty boxes.
-				cjkFace, cjkUsed := r.getCJKFace(f, e.text)
-				cjkMeasure, _ := r.getCJKMeasureFace(f, e.text)
-				r.noteCJKFont(f, cjkUsed)
-				latinMeasure := r.getMeasureFace(f)
-				subRuns := r.splitRunByCJK(e.text, f, latinFace, cjkFace, latinMeasure, cjkMeasure)
-				runs = append(runs, subRuns...)
+				if containsCJK(e.text) {
+					var used string
+					faces[textClassCJK], used = r.getCJKFace(f, e.text)
+					measures[textClassCJK], _ = r.getCJKMeasureFace(f, e.text)
+					r.noteCJKFont(f, used)
+				}
+				if containsSymbol(e.text) {
+					var used string
+					faces[textClassSymbol], used = r.getSymbolFace(f, e.text)
+					measures[textClassSymbol], _ = r.getSymbolMeasureFace(f, e.text)
+					r.noteSymbolFont(f, used)
+				}
+				runs = append(runs, r.splitRunByClass(e.text, f, faces, measures)...)
 			} else {
 				face := r.getFace(f)
 				mf := r.getMeasureFace(f)
@@ -4720,77 +4871,77 @@ func (r *renderer) buildParaTextRuns(elements []ParagraphElement) []textRun {
 	return runs
 }
 
-// splitRunByCJK splits a text run into sub-runs where CJK and non-CJK
-// segments use different font faces. This ensures CJK characters are
-// rendered with a CJK-capable font even when the primary font is Latin-only.
-func (r *renderer) splitRunByCJK(text string, f *Font, latinFace, cjkFace, latinMeasure, cjkMeasure font.Face) []textRun {
-	if cjkFace == nil || latinFace == nil {
-		// Can't split, return single run
-		face := latinFace
-		if face == nil {
-			face = cjkFace
+// splitRunByClass splits a text run wherever the character class changes, so
+// each segment is drawn with a face that has glyphs for it. This is what keeps
+// CJK text off a Latin face, and pictographs off both.
+//
+// faces and measures are indexed by textClass and are supplied by the caller,
+// which resolves one face per class for the whole run — so the sample every
+// face was chosen against is the same one the segments are cut from.
+func (r *renderer) splitRunByClass(text string, f *Font, faces, measures [numTextClasses]font.Face) []textRun {
+	// A class with no face of its own — no installed font covers its
+	// characters — is drawn with the Latin face, which the caller always
+	// supplies. Normalising here is also what keeps the split conservative:
+	// below, a class whose face IS the Latin face is not a boundary, so text
+	// that used to be drawn in one piece still is.
+	if faces[textClassLatin] == nil {
+		for _, c := range classOrder {
+			if faces[c] != nil {
+				faces[textClassLatin], measures[textClassLatin] = faces[c], measures[c]
+				break
+			}
 		}
-		if face == nil {
-			face = basicfont.Face7x13
+	}
+	if faces[textClassLatin] == nil {
+		faces[textClassLatin], measures[textClassLatin] = basicfont.Face7x13, basicfont.Face7x13
+	}
+	for _, c := range classOrder {
+		if faces[c] == nil {
+			faces[c], measures[c] = faces[textClassLatin], measures[textClassLatin]
 		}
-		mf := latinMeasure
-		if mf == nil {
-			mf = cjkMeasure
-		}
-		return []textRun{{
-			text:        text,
-			font:        f,
-			face:        face,
-			measureFace: mf,
-			width:       measureStringWithKern(face, text).Ceil(),
-		}}
 	}
 
-	var runs []textRun
+	runs := make([]textRun, 0, 3)
 	var buf strings.Builder
-	wasCJK := false
+	cur := textClassLatin
 	first := true
 
-	for _, ch := range text {
-		nowCJK := isCJK(ch)
-		if !first && nowCJK != wasCJK {
-			// Flush buffer
-			seg := buf.String()
-			face := latinFace
-			mf := latinMeasure
-			if wasCJK {
-				face = cjkFace
-				mf = cjkMeasure
-			}
-			runs = append(runs, textRun{
-				text:        seg,
-				font:        f,
-				face:        face,
-				measureFace: mf,
-				width:       measureStringWithKern(face, seg).Ceil(),
-			})
-			buf.Reset()
+	flush := func(class textClass) {
+		if buf.Len() == 0 {
+			return
 		}
-		buf.WriteRune(ch)
-		wasCJK = nowCJK
-		first = false
-	}
-	if buf.Len() > 0 {
 		seg := buf.String()
-		face := latinFace
-		mf := latinMeasure
-		if wasCJK {
-			face = cjkFace
-			mf = cjkMeasure
-		}
+		face := faces[class]
 		runs = append(runs, textRun{
 			text:        seg,
 			font:        f,
 			face:        face,
-			measureFace: mf,
+			measureFace: measures[class],
 			width:       measureStringWithKern(face, seg).Ceil(),
 		})
 	}
+
+	for _, ch := range text {
+		next := classOf(ch)
+		if faces[next] == faces[textClassLatin] {
+			// This class has no face but the text face, so drawing the
+			// character where it is drawn now is the whole of the change.
+			next = textClassLatin
+		}
+		if isEmojiJoiner(ch) {
+			// A joiner has no glyph of its own: it belongs to whichever
+			// segment it is modifying, or a sequence would be cut in half.
+			next = cur
+		}
+		if !first && next != cur {
+			flush(cur)
+			buf.Reset()
+		}
+		buf.WriteRune(ch)
+		cur = next
+		first = false
+	}
+	flush(cur)
 	return runs
 }
 
@@ -5575,6 +5726,10 @@ func toRoman(num int) string {
 // gated on isCJK, so a character outside this set never gets a coverage check
 // at all. That is how ①②③ reached a Latin face and rendered as .notdef boxes
 // while the font diagnostics reported a perfect match.
+//
+// Pictographs are in the same position and are classified by isSymbolRune, not
+// here: they are drawn from a symbol face, not from a CJK one, and merging the
+// two would send an emoji to a face that has no glyph for it either.
 func isCJK(r rune) bool {
 	return unicode.Is(unicode.Han, r) ||
 		unicode.Is(unicode.Hangul, r) ||
@@ -5585,6 +5740,62 @@ func isCJK(r rune) bool {
 		(r >= 0x3300 && r <= 0x33FF) || // CJK Compatibility (㎡ ㍿)
 		(r >= 0x2460 && r <= 0x24FF) || // Enclosed Alphanumerics (① ② ③)
 		(r >= 0xFF00 && r <= 0xFFEF) // Fullwidth Forms
+}
+
+// isSymbolRune reports whether r is a pictograph — an emoji, a dingbat, one of
+// the miscellaneous symbols — which has to be drawn from a symbol face.
+//
+// These are the characters a deck uses as bullet markers and icons, and no text
+// face carries them: the face a document declares for body text is a text face,
+// and the CJK chain the fallback supplies is made of text faces too. So an emoji
+// classified as ordinary Latin text reaches the declared face, finds no glyph,
+// and is drawn as that face's .notdef box — the hollow rectangle that reads as a
+// white square on the slide. Classifying it here is what routes it to the
+// symbol chain, where the coverage check can find a face that has it.
+//
+// The enclosed forms (① ② ③, ㈠, ㎡) are deliberately absent: those are CJK
+// typography drawn from CJK faces, and isCJK owns them.
+func isSymbolRune(r rune) bool {
+	switch {
+	case r >= 0x1F000 && r <= 0x1FAFF:
+		return true // Mahjong … Symbols and Pictographs Extended-A (🐱 💙 🏆 🧶 🐾)
+	case r >= 0x2600 && r <= 0x27BF:
+		return true // Miscellaneous Symbols (⚖ ☀) and Dingbats (✂ ➔)
+	case r >= 0x2B00 && r <= 0x2BFF:
+		return true // Miscellaneous Symbols and Arrows (⬛ ⬅ ⭐)
+	case r >= 0x2300 && r <= 0x23FF:
+		return true // Miscellaneous Technical (⌚ ⏰ ⏳), drawn as emoji
+	}
+	return false
+}
+
+// isEmojiJoiner reports whether r is a zero-width character that carries no
+// glyph of its own and only has meaning inside a sequence: the zero-width
+// joiner, the variation selectors, and the enclosing keycap.
+//
+// The splitter keeps such a character in the segment it is modifying. Cut out
+// on its own it would be drawn by whichever face its class resolved to, and a
+// sequence like 👩👩👧 would be broken where the joiner sits.
+func isEmojiJoiner(r rune) bool {
+	switch r {
+	case 0x200D, // zero-width joiner
+		0xFE0E, 0xFE0F, // variation selectors 15/16
+		0x20E3: // combining enclosing keycap
+		return true
+	}
+	return false
+}
+
+// classOf classifies a character by the face that has to draw it.
+func classOf(r rune) textClass {
+	switch {
+	case isCJK(r):
+		return textClassCJK
+	case isSymbolRune(r):
+		return textClassSymbol
+	default:
+		return textClassLatin
+	}
 }
 
 // isCJKClosingPunct returns true for CJK closing punctuation that must not
