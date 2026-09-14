@@ -629,8 +629,14 @@ type AutoShape struct {
 	paragraphs    []*Paragraph
 	textAnchor    TextAnchorType
 	textDirection string
-	adjustValues  map[string]int // avLst adjustment values (e.g. "adj1" -> 10690)
-	fontScale     int            // normAutofit fontScale in thousandths of a percent (e.g. 62500 = 62.5%), 0 means 100%
+	// wordWrap, columns and autoFit describe the shape's <a:bodyPr>. They are
+	// read for every <p:sp> and the renderer honours all three, so a shape
+	// converted from the reader's temporary text body has to carry them too.
+	wordWrap     bool
+	columns      int
+	autoFit      AutoFitType
+	adjustValues map[string]int // avLst adjustment values (e.g. "adj1" -> 10690)
+	fontScale    int            // normAutofit fontScale in thousandths of a percent (e.g. 62500 = 62.5%), 0 means 100%
 	// Text insets (padding) in EMU.
 	insetLeft   int64
 	insetRight  int64
@@ -708,6 +714,10 @@ func (a *AutoShape) GetType() ShapeType { return ShapeTypeAutoShape }
 func NewAutoShape() *AutoShape {
 	return &AutoShape{
 		shapeType: AutoShapeRectangle,
+		// The schema default for <a:bodyPr wrap> is "square", so a shape that
+		// was never told otherwise must wrap. Leaving the field at its zero
+		// value would write wrap="none" and stop text wrapping.
+		wordWrap: true,
 	}
 }
 

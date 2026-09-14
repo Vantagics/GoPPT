@@ -463,7 +463,7 @@ func (w *PPTXWriter) writeRichTextShapeXML(s *RichTextShape, shapeID *int) strin
 %s
 %s%s        </p:spPr>
         <p:txBody>
-          <a:bodyPr wrap="%s" numCol="%d"%s>%s</a:bodyPr>
+          %s
           <a:lstStyle/>
 %s        </p:txBody>
       </p:sp>
@@ -471,11 +471,23 @@ func (w *PPTXWriter) writeRichTextShapeXML(s *RichTextShape, shapeID *int) strin
 		s.offsetX, s.offsetY, s.width, s.height,
 		shapeGeomXML("rect", nil, s.customPath, "          "),
 		fillXML, borderXML,
-		boolToWrap(s.wordWrap), s.columns, textAnchorAttr(s.textAnchor),
-		normAutofitXML(s.fontScale),
+		bodyPrXML(bodyPrAttrs{
+			wrap:      boolToWrap(s.wordWrap),
+			columns:   s.columns,
+			anchor:    s.textAnchor,
+			textDir:   s.textDirection,
+			fontScale: s.fontScale,
+			autoFit:   s.autoFit,
+			insetsSet: s.insetsSet,
+			lIns:      s.insetLeft,
+			rIns:      s.insetRight,
+			tIns:      s.insetTop,
+			bIns:      s.insetBottom,
+		}),
 		paragraphsXML.String())
 }
 
+// boolToWrap converts a wordWrap flag to the <a:bodyPr wrap> attribute value.
 func boolToWrap(wrap bool) string {
 	if wrap {
 		return "square"
@@ -483,17 +495,84 @@ func boolToWrap(wrap bool) string {
 	return "none"
 }
 
-// textAnchorAttr returns the anchor attribute string for <a:bodyPr>.
-func textAnchorAttr(anchor TextAnchorType) string {
-	if anchor == "" || anchor == TextAnchorNone {
-		return ""
-	}
-	return fmt.Sprintf(` anchor="%s"`, string(anchor))
+// bodyPrAttrs carries the values that go into a shape's <a:bodyPr>.
+type bodyPrAttrs struct {
+	wrap      string // "square" or "none", as boolToWrap produces; "" omits it
+	columns   int    // numCol
+	anchor    TextAnchorType
+	textDir   string // vert; "horz" is the schema default and is omitted
+	fontScale int    // normAutofit fontScale, in thousandths of a percent
+	autoFit   AutoFitType
+	insetsSet bool
+	lIns      int64
+	rIns      int64
+	tIns      int64
+	bIns      int64
 }
 
-// normAutofitXML returns the <a:normAutofit> child element for <a:bodyPr> if fontScale is set.
-func normAutofitXML(fontScale int) string {
-	if fontScale > 0 && fontScale != 100000 {
+// bodyPrXML serialises a shape's <a:bodyPr>.
+//
+// Three shape kinds carry a text body, and each used to build this element its
+// own way: RichTextShape wrote the wrap, column and anchor attributes, while
+// AutoShape and PlaceholderShape wrote a bare <a:bodyPr/>. The reader parses the
+// same attributes for all three and the renderer honours them for all three, so
+// the bespoke emitters were a second implementation that had drifted: a shape
+// read from a deck and written back lost its text insets, its text direction and
+// its auto-fit mode, and an AutoShape lost its anchor, after which PowerPoint
+// re-anchored its text to the top of the shape.
+//
+// Attributes the model holds no value for are left out. That matters for a
+// placeholder, which has to keep inheriting from its layout: writing a value it
+// never carried would pin it.
+func bodyPrXML(a bodyPrAttrs) string {
+	var b strings.Builder
+	b.WriteString("<a:bodyPr")
+	if a.textDir != "" && a.textDir != "horz" {
+		fmt.Fprintf(&b, ` vert="%s"`, xmlEscape(a.textDir))
+	}
+	if a.wrap != "" {
+		fmt.Fprintf(&b, ` wrap="%s"`, a.wrap)
+	}
+	if a.insetsSet {
+		fmt.Fprintf(&b, ` lIns="%d" tIns="%d" rIns="%d" bIns="%d"`, a.lIns, a.tIns, a.rIns, a.bIns)
+	}
+	if a.columns > 0 {
+		fmt.Fprintf(&b, ` numCol="%d"`, a.columns)
+	}
+	if a.anchor != "" && a.anchor != TextAnchorNone {
+		fmt.Fprintf(&b, ` anchor="%s"`, xmlEscape(string(a.anchor)))
+	}
+
+	child := autoFitXML(a.autoFit, a.fontScale)
+	if child == "" {
+		b.WriteString("/>")
+		return b.String()
+	}
+	b.WriteString(">")
+	b.WriteString(child)
+	b.WriteString("</a:bodyPr>")
+	return b.String()
+}
+
+// autoFitXML returns the auto-fit child of <a:bodyPr>, or "" when the model
+// states no mode.
+//
+// AutoFitType's zero value is AutoFitNone, which is also what an unset field
+// holds, so it writes nothing: <a:noAutofit/> would claim a decision the model
+// never made. A recorded fontScale still produces <a:normAutofit>, because the
+// attribute is meaningless without the element that carries it.
+func autoFitXML(mode AutoFitType, fontScale int) string {
+	scaled := fontScale > 0 && fontScale != 100000
+	switch mode {
+	case AutoFitShape:
+		return "<a:spAutoFit/>"
+	case AutoFitNormal:
+		if scaled {
+			return fmt.Sprintf(`<a:normAutofit fontScale="%d"/>`, fontScale)
+		}
+		return "<a:normAutofit/>"
+	}
+	if scaled {
 		return fmt.Sprintf(`<a:normAutofit fontScale="%d"/>`, fontScale)
 	}
 	return ""
@@ -884,11 +963,27 @@ func (w *PPTXWriter) writeAutoShapeXML(s *AutoShape, shapeID *int) string {
 	fillXML := w.writeFillXML(s.GetFill())
 	borderXML := w.writeBorderXMLWithEnds(s.GetBorder(), s.headEnd, s.tailEnd)
 
+	// Paragraphs win over the flat text, exactly as in the renderer: a shape
+	// read from a deck keeps its runs, each with its own font, while a shape
+	// built through SetText carries only the plain string. Writing s.text for
+	// both is what made the bold, size and colour of a shape's text disappear
+	// on save.
 	textXML := ""
-	if s.text != "" {
+	switch {
+	case len(s.paragraphs) > 0:
+		var paragraphsXML strings.Builder
+		for _, para := range s.paragraphs {
+			paragraphsXML.WriteString(w.writeParagraphXML(para))
+		}
 		textXML = fmt.Sprintf(`
         <p:txBody>
-          <a:bodyPr/>
+          %s
+          <a:lstStyle/>
+%s        </p:txBody>`, autoShapeBodyPr(s), paragraphsXML.String())
+	case s.text != "":
+		textXML = fmt.Sprintf(`
+        <p:txBody>
+          %s
           <a:lstStyle/>
           <a:p>
             <a:r>
@@ -896,7 +991,7 @@ func (w *PPTXWriter) writeAutoShapeXML(s *AutoShape, shapeID *int) string {
               <a:t>%s</a:t>
             </a:r>
           </a:p>
-        </p:txBody>`, xmlEscape(s.text))
+        </p:txBody>`, autoShapeBodyPr(s), xmlEscape(s.text))
 	}
 
 	descrAttr := ""
@@ -923,6 +1018,25 @@ func (w *PPTXWriter) writeAutoShapeXML(s *AutoShape, shapeID *int) string {
 		s.offsetX, s.offsetY, s.width, s.height,
 		shapeGeomXML(string(s.shapeType), s.adjustValues, nil, "          "),
 		fillXML, borderXML, textXML)
+}
+
+// autoShapeBodyPr gathers the <a:bodyPr> values an AutoShape carries. The
+// element is emitted from two branches — one for the kept runs, one for the flat
+// text — so the argument list lives here rather than being repeated.
+func autoShapeBodyPr(s *AutoShape) string {
+	return bodyPrXML(bodyPrAttrs{
+		wrap:      boolToWrap(s.wordWrap),
+		columns:   s.columns,
+		anchor:    s.textAnchor,
+		textDir:   s.textDirection,
+		fontScale: s.fontScale,
+		autoFit:   s.autoFit,
+		insetsSet: s.insetsSet,
+		lIns:      s.insetLeft,
+		rIns:      s.insetRight,
+		tIns:      s.insetTop,
+		bIns:      s.insetBottom,
+	})
 }
 
 // --- Line Shape XML ---
@@ -1500,7 +1614,7 @@ func (w *PPTXWriter) writePlaceholderShapeXML(s *PlaceholderShape, shapeID *int)
           </a:xfrm>
         </p:spPr>
         <p:txBody>
-          <a:bodyPr/>
+          %s
           <a:lstStyle/>
 %s        </p:txBody>
       </p:sp>
@@ -1508,6 +1622,19 @@ func (w *PPTXWriter) writePlaceholderShapeXML(s *PlaceholderShape, shapeID *int)
 		placeholderAttrsXML(s.phType, s.phIdx),
 		xfrmAttrs(&s.BaseShape),
 		s.offsetX, s.offsetY, s.width, s.height,
+		bodyPrXML(bodyPrAttrs{
+			wrap:      boolToWrap(s.wordWrap),
+			columns:   s.columns,
+			anchor:    s.textAnchor,
+			textDir:   s.textDirection,
+			fontScale: s.fontScale,
+			autoFit:   s.autoFit,
+			insetsSet: s.insetsSet,
+			lIns:      s.insetLeft,
+			rIns:      s.insetRight,
+			tIns:      s.insetTop,
+			bIns:      s.insetBottom,
+		}),
 		paragraphsXML.String())
 }
 

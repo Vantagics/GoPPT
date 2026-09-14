@@ -1034,7 +1034,17 @@ func (r *PPTXReader) parseSlideXML(decoder *xml.Decoder, slide *Slide, rels []xm
 					for _, attr := range t.Attr {
 						switch attr.Name.Local {
 						case "anchor":
+							// The anchor belongs to the shape, not only to the
+							// local that the RichTextShape branch copies out.
+							// A placeholder never read it back, so its text was
+							// re-anchored to the top of the shape on save.
 							textAnchor = TextAnchorType(attr.Value)
+							if currentRichText != nil {
+								currentRichText.textAnchor = textAnchor
+							}
+							if currentPlaceholder != nil {
+								currentPlaceholder.textAnchor = textAnchor
+							}
 						case "vert":
 							textDir = attr.Value
 							if currentRichText != nil {
@@ -2681,6 +2691,14 @@ func (r *PPTXReader) parseSlideXML(decoder *xml.Decoder, slide *Slide, rels []xm
 							autoShape.textAnchor = textAnchor
 							autoShape.textDirection = textDir
 							autoShape.fontScale = currentRichText.fontScale
+							// The body properties are read into the temporary
+							// text body whatever the shape turns out to be, so
+							// they have to travel with it: a shape whose wrap
+							// or auto-fit was dropped here wrapped its text in
+							// the renderer however the deck said not to.
+							autoShape.wordWrap = currentRichText.wordWrap
+							autoShape.columns = currentRichText.columns
+							autoShape.autoFit = currentRichText.autoFit
 							// Copy text insets from richtext body properties
 							if currentRichText.insetsSet {
 								autoShape.insetLeft = currentRichText.insetLeft

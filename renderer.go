@@ -1233,6 +1233,10 @@ func (r *renderer) renderAutoShape(s *AutoShape) {
 		vertRotation = 90
 	}
 
+	// The shape's own <a:bodyPr wrap>, not a hard-coded true: a deck that says
+	// wrap="none" must not have its shape text wrapped for it.
+	wordWrap := s.wordWrap
+
 	drawContent := func(tr *renderer) {
 		ox, oy := x, y
 		if tr != r {
@@ -1332,7 +1336,7 @@ func (r *renderer) renderAutoShape(s *AutoShape) {
 			// When default insets are used and text overflows, reduce insets
 			// to make room. This handles font metric differences between systems.
 			if !s.insetsSet {
-				textH := r.measureParagraphsHeight(s.paragraphs, tw, th, s.textAnchor, true)
+				textH := r.measureParagraphsHeight(s.paragraphs, tw, th, s.textAnchor, wordWrap)
 				if textH > th && th > 0 && (pxT+pxB) > 0 {
 					needed := textH - th
 					avail := pxT + pxB
@@ -1357,13 +1361,13 @@ func (r *renderer) renderAutoShape(s *AutoShape) {
 			// CJK font metrics in Go are often larger than PowerPoint's.
 			// Use a conservative floor to avoid making text too small.
 			if s.fontScale == 0 || s.fontScale == 100000 {
-				atextH := r.measureParagraphsHeight(s.paragraphs, tw, th, s.textAnchor, true)
+				atextH := r.measureParagraphsHeight(s.paragraphs, tw, th, s.textAnchor, wordWrap)
 				if atextH > h && h > 0 && atextH > th && th > 0 {
 					lo, hi := 0.65, 1.0
 					for i := 0; i < 10; i++ {
 						mid := (lo + hi) / 2
 						r.fontScale = mid
-						mh := r.measureParagraphsHeight(s.paragraphs, tw, th, s.textAnchor, true)
+						mh := r.measureParagraphsHeight(s.paragraphs, tw, th, s.textAnchor, wordWrap)
 						if mh > th {
 							hi = mid
 						} else {
@@ -1379,7 +1383,7 @@ func (r *renderer) renderAutoShape(s *AutoShape) {
 			// Apply the same 3% tolerance used by wrapRunLine.
 			if tw > 0 && (s.fontScale == 0 || s.fontScale == 100000) {
 				hTol := tw * 103 / 100
-				maxLW := r.measureMaxLineWidth(s.paragraphs, tw, true)
+				maxLW := r.measureMaxLineWidth(s.paragraphs, tw, wordWrap)
 				if maxLW > hTol {
 					lo, hi := 0.5, r.fontScale
 					if hi <= 0 {
@@ -1388,7 +1392,7 @@ func (r *renderer) renderAutoShape(s *AutoShape) {
 					for i := 0; i < 12; i++ {
 						mid := (lo + hi) / 2
 						r.fontScale = mid
-						mw := r.measureMaxLineWidth(s.paragraphs, tw, true)
+						mw := r.measureMaxLineWidth(s.paragraphs, tw, wordWrap)
 						if mw > hTol {
 							hi = mid
 						} else {
@@ -1404,11 +1408,11 @@ func (r *renderer) renderAutoShape(s *AutoShape) {
 				if vtw > 0 && vth > 0 {
 					tmp := image.NewRGBA(image.Rect(0, 0, vtw, vth))
 					tmpR := tr.subRenderer(tmp)
-					tmpR.drawParagraphs(s.paragraphs, 0, 0, vtw, vth, s.textAnchor, true)
+					tmpR.drawParagraphs(s.paragraphs, 0, 0, vtw, vth, s.textAnchor, wordWrap)
 					rotateAndComposite(tr.img, tmp, tx, ty, tw, th, vertRotation)
 				}
 			} else {
-				tr.drawParagraphs(s.paragraphs, tx, ty, tw, th, s.textAnchor, true)
+				tr.drawParagraphs(s.paragraphs, tx, ty, tw, th, s.textAnchor, wordWrap)
 			}
 		} else if s.text != "" {
 			tr.drawStringCentered(s.text, tr.getFace(NewFont()), color.RGBA{A: 255}, rect)
@@ -1532,7 +1536,7 @@ func (r *renderer) renderAutoShape(s *AutoShape) {
 				th = h
 			}
 			if !s.insetsSet {
-				textH := r.measureParagraphsHeight(s.paragraphs, tw, th, s.textAnchor, true)
+				textH := r.measureParagraphsHeight(s.paragraphs, tw, th, s.textAnchor, wordWrap)
 				if textH > th && th > 0 && (pxT+pxB) > 0 {
 					needed := textH - th
 					avail := pxT + pxB
@@ -1554,13 +1558,13 @@ func (r *renderer) renderAutoShape(s *AutoShape) {
 			}
 			// Auto-shrink when text overflows
 			if s.fontScale == 0 || s.fontScale == 100000 {
-				atextH := r.measureParagraphsHeight(s.paragraphs, tw, th, s.textAnchor, true)
+				atextH := r.measureParagraphsHeight(s.paragraphs, tw, th, s.textAnchor, wordWrap)
 				if atextH > h && h > 0 && atextH > th && th > 0 {
 					lo, hi := 0.65, 1.0
 					for i := 0; i < 10; i++ {
 						mid := (lo + hi) / 2
 						r.fontScale = mid
-						mh := r.measureParagraphsHeight(s.paragraphs, tw, th, s.textAnchor, true)
+						mh := r.measureParagraphsHeight(s.paragraphs, tw, th, s.textAnchor, wordWrap)
 						if mh > th {
 							hi = mid
 						} else {
@@ -1571,7 +1575,7 @@ func (r *renderer) renderAutoShape(s *AutoShape) {
 				}
 				// Horizontal overflow — apply 3% tolerance matching wrapRunLine
 				hTol := tw * 103 / 100
-				maxLW := r.measureMaxLineWidth(s.paragraphs, tw, true)
+				maxLW := r.measureMaxLineWidth(s.paragraphs, tw, wordWrap)
 				if maxLW > hTol && tw > 0 {
 					lo, hi := 0.5, r.fontScale
 					if hi <= 0 {
@@ -1580,7 +1584,7 @@ func (r *renderer) renderAutoShape(s *AutoShape) {
 					for i := 0; i < 12; i++ {
 						mid := (lo + hi) / 2
 						r.fontScale = mid
-						mw := r.measureMaxLineWidth(s.paragraphs, tw, true)
+						mw := r.measureMaxLineWidth(s.paragraphs, tw, wordWrap)
 						if mw > hTol {
 							hi = mid
 						} else {
@@ -1595,11 +1599,11 @@ func (r *renderer) renderAutoShape(s *AutoShape) {
 				if vtw > 0 && vth > 0 {
 					tmp := image.NewRGBA(image.Rect(0, 0, vtw, vth))
 					tmpR := tr.subRenderer(tmp)
-					tmpR.drawParagraphs(s.paragraphs, 0, 0, vtw, vth, s.textAnchor, true)
+					tmpR.drawParagraphs(s.paragraphs, 0, 0, vtw, vth, s.textAnchor, wordWrap)
 					rotateAndComposite(tr.img, tmp, tx, ty, tw, th, vertRotation)
 				}
 			} else {
-				tr.drawParagraphs(s.paragraphs, tx, ty, tw, th, s.textAnchor, true)
+				tr.drawParagraphs(s.paragraphs, tx, ty, tw, th, s.textAnchor, wordWrap)
 			}
 		}
 		if rotation != 0 {
