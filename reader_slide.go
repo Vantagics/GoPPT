@@ -306,6 +306,51 @@ func setCellBorderStyle(cell *TableCell, side string, style BorderStyle) {
 	}
 }
 
+// applyPPrAttrs folds the attributes of an <a:pPr> into a paragraph.
+//
+// Two slide readers walk this markup — parseSlideXML for a slide and
+// parseLayoutImages for the text shapes a layout contributes — and both have to
+// understand the same attribute set. The layout reader knew only algn, so a text
+// shape on a layout kept its alignment and quietly lost its hanging indent, its
+// margins and its outline level. The renderer indents by marL/marR/indent, so
+// the preview drew such a paragraph flush against the shape's left edge.
+//
+// lvl is read here for the first time: the writer has always emitted it, and
+// nothing consumed it, so a paragraph's outline level could not survive a load.
+func applyPPrAttrs(p *Paragraph, attrs []xml.Attr) {
+	if p == nil {
+		return
+	}
+	if p.alignment == nil {
+		// The attribute block below needs somewhere to put the values, and the
+		// renderer treats a missing Alignment the same way it treats a default
+		// one, so building it here keeps a hand-built paragraph readable.
+		p.alignment = NewAlignment()
+	}
+	for _, attr := range attrs {
+		switch attr.Name.Local {
+		case "algn":
+			p.alignment.Horizontal = HorizontalAlignment(attr.Value)
+		case "marL":
+			if v, err := strconv.ParseInt(attr.Value, 10, 64); err == nil {
+				p.alignment.MarginLeft = v
+			}
+		case "marR":
+			if v, err := strconv.ParseInt(attr.Value, 10, 64); err == nil {
+				p.alignment.MarginRight = v
+			}
+		case "indent":
+			if v, err := strconv.ParseInt(attr.Value, 10, 64); err == nil {
+				p.alignment.Indent = v
+			}
+		case "lvl":
+			if v, err := strconv.Atoi(attr.Value); err == nil {
+				p.alignment.Level = v
+			}
+		}
+	}
+}
+
 // parseNotesXML reads the notes text out of a notes slide part.
 //
 // The text of a note is a text body like any other: one <a:p> per paragraph,
@@ -1173,24 +1218,7 @@ func (r *PPTXReader) parseSlideXML(decoder *xml.Decoder, slide *Slide, rels []xm
 			case "pPr":
 				if (state.inParagraph || state.inTcParagraph) && currentParagraph != nil {
 					state.inPPr = true
-					for _, attr := range t.Attr {
-						switch attr.Name.Local {
-						case "algn":
-							currentParagraph.alignment.Horizontal = HorizontalAlignment(attr.Value)
-						case "marL":
-							if v, err := strconv.ParseInt(attr.Value, 10, 64); err == nil {
-								currentParagraph.alignment.MarginLeft = v
-							}
-						case "marR":
-							if v, err := strconv.ParseInt(attr.Value, 10, 64); err == nil {
-								currentParagraph.alignment.MarginRight = v
-							}
-						case "indent":
-							if v, err := strconv.ParseInt(attr.Value, 10, 64); err == nil {
-								currentParagraph.alignment.Indent = v
-							}
-						}
-					}
+					applyPPrAttrs(currentParagraph, t.Attr)
 				}
 			case "buNone":
 				if state.inPPr && currentParagraph != nil {
@@ -2100,7 +2128,11 @@ func (r *PPTXReader) parseSlideXML(decoder *xml.Decoder, slide *Slide, rels []xm
 					state.inText = true
 				}
 			case "br":
-				if state.inParagraph && currentParagraph != nil {
+				// A break belongs to a paragraph wherever that paragraph lives.
+				// Gating it on "inside a shape" alone meant a cell's <a:br/> was
+				// never read at all: the cell branch sets inTcParagraph, and
+				// inParagraph is only set for a shape's own text body.
+				if (state.inParagraph || state.inTcParagraph) && currentParagraph != nil {
 					currentParagraph.CreateBreak()
 				}
 			case "xfrm":
@@ -4460,6 +4492,13 @@ func (r *PPTXReader) parseLayoutImages(data []byte, rels []xmlRelForRead, zr *zi
 						}
 					}
 				}
+			case "br":
+				// A manual line break is a paragraph element and the renderer
+				// draws one, but this reader never looked for it, so a text
+				// shape contributed by a layout was drawn as a single long line.
+				if inParagraph && currentParagraph != nil {
+					currentParagraph.CreateBreak()
+				}
 			case "p":
 				if inTxBody && currentRichText != nil {
 					inParagraph = true
@@ -4467,13 +4506,9 @@ func (r *PPTXReader) parseLayoutImages(data []byte, rels []xmlRelForRead, zr *zi
 					currentRichText.paragraphs = append(currentRichText.paragraphs, currentParagraph)
 				}
 			case "pPr":
-				if inParagraph {
+				if inParagraph && currentParagraph != nil {
 					inPPr = true
-					for _, attr := range t.Attr {
-						if attr.Name.Local == "algn" && currentParagraph != nil {
-							currentParagraph.alignment.Horizontal = HorizontalAlignment(attr.Value)
-						}
-					}
+					applyPPrAttrs(currentParagraph, t.Attr)
 				}
 			case "r":
 				if inParagraph {

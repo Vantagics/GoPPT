@@ -578,57 +578,94 @@ func autoFitXML(mode AutoFitType, fontScale int) string {
 	return ""
 }
 
+// writeParagraphXML renders a paragraph inside a shape's <p:txBody>.
 func (w *PPTXWriter) writeParagraphXML(para *Paragraph) string {
-	align := para.alignment
-	algn := ""
-	if align.Horizontal != "" {
-		algn = fmt.Sprintf(` algn="%s"`, align.Horizontal)
-	}
+	return w.writeParagraphXMLAt(para, "          ")
+}
 
-	// Indentation level
-	if align.Level > 0 {
-		algn += fmt.Sprintf(` lvl="%d"`, align.Level)
+// writeParagraphXMLAt renders a paragraph at a caller-chosen indentation, so one
+// emitter serves a shape's <p:txBody> and a table cell's <a:txBody>.
+//
+// A cell used to build its own <a:p> by hand and put nothing in it but the runs:
+// no <a:pPr>, so the alignment, the outline level, the line spacing and the
+// bullet were all dropped, and no <a:br/> either, because only *TextRun was
+// matched. The reader parses every one of those for a cell — it gates them on
+// "inside a text body or inside a cell" — and drawParagraphs draws them, so a
+// cell read from a deck was laid out one way in the preview and saved another.
+func (w *PPTXWriter) writeParagraphXMLAt(para *Paragraph, indent string) string {
+	inner := indent + "  "
+
+	attrs := ""
+	// A paragraph whose alignment was never set is one the renderer draws to the
+	// left with no margins. SetAlignment takes nil, so this has to be a question
+	// rather than an assumption: dereferencing it made WriteTo panic out of the
+	// library instead of saving the deck.
+	if align := para.alignment; align != nil {
+		if align.Horizontal != "" {
+			attrs = fmt.Sprintf(` algn="%s"`, align.Horizontal)
+		}
+
+		// Indentation level
+		if align.Level > 0 {
+			attrs += fmt.Sprintf(` lvl="%d"`, align.Level)
+		}
+
+		// The reader parses marL/marR/indent and the renderer indents the text by
+		// all three — marL with a negative indent is the hanging indent every
+		// bulleted list uses. No emitter wrote them, so a paragraph indented in
+		// the source deck came back flush against the shape's left edge. Zero is
+		// the schema default, so a value the paragraph was never given is left
+		// out rather than stated.
+		if align.MarginLeft != 0 {
+			attrs += fmt.Sprintf(` marL="%d"`, align.MarginLeft)
+		}
+		if align.MarginRight != 0 {
+			attrs += fmt.Sprintf(` marR="%d"`, align.MarginRight)
+		}
+		if align.Indent != 0 {
+			attrs += fmt.Sprintf(` indent="%d"`, align.Indent)
+		}
 	}
 
 	var elementsXML strings.Builder
 	for _, elem := range para.elements {
 		switch e := elem.(type) {
 		case *TextRun:
-			elementsXML.WriteString(w.writeTextRunXML(e))
+			elementsXML.WriteString(w.writeTextRunXMLAt(e, inner))
 		case *BreakElement:
-			elementsXML.WriteString("          <a:br/>\n")
+			elementsXML.WriteString(inner + "<a:br/>\n")
 		}
 	}
 
+	// One indented line per spacing element the schema allows, in its order.
 	spacing := ""
+	line := func(xml string) {
+		spacing += "\n" + inner + xml
+	}
 	if para.lineSpacing < 0 {
 		// spcPct: stored as negative percentage * 1000
-		spacing = fmt.Sprintf(`
-            <a:lnSpc><a:spcPct val="%d"/></a:lnSpc>`, -para.lineSpacing)
+		line(fmt.Sprintf(`<a:lnSpc><a:spcPct val="%d"/></a:lnSpc>`, -para.lineSpacing))
 	} else if para.lineSpacing > 0 {
-		spacing = fmt.Sprintf(`
-            <a:lnSpc><a:spcPts val="%d"/></a:lnSpc>`, para.lineSpacing)
+		line(fmt.Sprintf(`<a:lnSpc><a:spcPts val="%d"/></a:lnSpc>`, para.lineSpacing))
 	}
 	if para.spaceBefore > 0 {
-		spacing += fmt.Sprintf(`
-            <a:spcBef><a:spcPts val="%d"/></a:spcBef>`, para.spaceBefore)
+		line(fmt.Sprintf(`<a:spcBef><a:spcPts val="%d"/></a:spcBef>`, para.spaceBefore))
 	}
 	if para.spaceAfter > 0 {
-		spacing += fmt.Sprintf(`
-            <a:spcAft><a:spcPts val="%d"/></a:spcAft>`, para.spaceAfter)
+		line(fmt.Sprintf(`<a:spcAft><a:spcPts val="%d"/></a:spcAft>`, para.spaceAfter))
 	}
 
 	// Bullet XML
 	bulletXML := ""
 	if para.bullet != nil {
-		bulletXML = w.writeBulletXML(para.bullet)
+		bulletXML = w.writeBulletXMLAt(para.bullet, inner)
 	}
 
-	return fmt.Sprintf(`          <a:p>
-            <a:pPr%s>%s%s
-            </a:pPr>
-%s          </a:p>
-`, algn, spacing, bulletXML, elementsXML.String())
+	return fmt.Sprintf(`%s<a:p>
+%s<a:pPr%s>%s%s
+%s</a:pPr>
+%s%s</a:p>
+`, indent, inner, attrs, spacing, bulletXML, inner, elementsXML.String(), indent)
 }
 
 // writeTextRunXML renders a text run inside a shape's <p:txBody>.
@@ -1313,15 +1350,10 @@ func (w *PPTXWriter) writeTableShapeXML(s *TableShape, shapeID *int) string {
 
 			var cellText strings.Builder
 			for _, para := range cell.paragraphs {
-				cellText.WriteString("                <a:p>\n")
-				for _, elem := range para.elements {
-					if tr, ok := elem.(*TextRun); ok {
-						// The same emitter a shape's text body uses, so a cell
-						// run keeps its font, weight, colour and hyperlink.
-						cellText.WriteString(w.writeTextRunXMLAt(tr, "                  "))
-					}
-				}
-				cellText.WriteString("                </a:p>\n")
+				// The same paragraph emitter a shape's text body uses, so a cell
+				// paragraph keeps its alignment, level, spacing, bullet and line
+				// breaks as well as the runs themselves.
+				cellText.WriteString(w.writeParagraphXMLAt(para, "                "))
 			}
 			if cellText.Len() == 0 {
 				// <a:txBody> requires at least one paragraph. A cell the reader
@@ -1737,28 +1769,38 @@ func notesBodyXML(notes string) string {
 
 // --- Bullet XML ---
 
+// writeBulletXML renders a paragraph's bullet inside its <a:pPr>.
 func (w *PPTXWriter) writeBulletXML(b *Bullet) string {
+	return w.writeBulletXMLAt(b, "            ")
+}
+
+// writeBulletXMLAt is writeBulletXML for a caller-chosen indentation, matching
+// the paragraph that carries it: a table cell's <a:pPr> sits two levels deeper
+// than a shape's, and the bullet follows the paragraph it belongs to.
+func (w *PPTXWriter) writeBulletXMLAt(b *Bullet, inner string) string {
+	ind := "\n" + inner + "  "
+
 	if b.Type == BulletTypeNone {
-		return "\n              <a:buNone/>"
+		return ind + "<a:buNone/>"
 	}
 
 	var sb strings.Builder
 
 	// Bullet color
 	if b.Color != nil {
-		sb.WriteString(fmt.Sprintf("\n              <a:buClr><a:srgbClr val=\"%s\"/></a:buClr>", colorRGB(*b.Color)))
+		sb.WriteString(fmt.Sprintf("%s<a:buClr><a:srgbClr val=\"%s\"/></a:buClr>", ind, colorRGB(*b.Color)))
 	}
 
 	// Bullet size
 	if b.Size > 0 && b.Size != 100 {
-		sb.WriteString(fmt.Sprintf("\n              <a:buSzPct val=\"%d000\"/>", b.Size))
+		sb.WriteString(fmt.Sprintf("%s<a:buSzPct val=\"%d000\"/>", ind, b.Size))
 	}
 
 	switch b.Type {
 	case BulletTypeChar:
 		fontAttr := ""
 		if b.Font != "" {
-			fontAttr = fmt.Sprintf("\n              <a:buFont typeface=\"%s\"/>", xmlEscape(b.Font))
+			fontAttr = fmt.Sprintf("%s<a:buFont typeface=\"%s\"/>", ind, xmlEscape(b.Font))
 		}
 		sb.WriteString(fontAttr)
 		// <a:buChar> without a character is not a bullet, and an empty
@@ -1767,7 +1809,7 @@ func (w *PPTXWriter) writeBulletXML(b *Bullet) string {
 		if char == "" {
 			char = defaultBulletChar
 		}
-		sb.WriteString(fmt.Sprintf("\n              <a:buChar char=\"%s\"/>", xmlEscape(char)))
+		sb.WriteString(fmt.Sprintf("%s<a:buChar char=\"%s\"/>", ind, xmlEscape(char)))
 	case BulletTypeNumeric, BulletTypeAutoNum:
 		// The two constants describe the same thing to PowerPoint — there is
 		// one element for a numbered bullet and no automatic/manual split — so
@@ -1782,7 +1824,7 @@ func (w *PPTXWriter) writeBulletXML(b *Bullet) string {
 		if startAt < defaultBulletStart {
 			startAt = defaultBulletStart
 		}
-		sb.WriteString(fmt.Sprintf("\n              <a:buAutoNum type=\"%s\" startAt=\"%d\"/>", xmlEscape(format), startAt))
+		sb.WriteString(fmt.Sprintf("%s<a:buAutoNum type=\"%s\" startAt=\"%d\"/>", ind, xmlEscape(format), startAt))
 	}
 
 	return sb.String()
