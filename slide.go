@@ -3,13 +3,56 @@ package gopresentation
 import "errors"
 
 // Transition represents a slide transition.
+//
+// It maps onto <p:transition>, the child of <p:sld> that says how the
+// presentation moves into this slide. Only the effect elements of
+// pml-animationInfo.xsd are modelled; the PowerPoint 2010 transitions that live
+// in the p14 namespace (p14:flash, p14:ripple, p14:vortex and the rest) are a
+// separate content model and are not represented here.
 type Transition struct {
 	Type     TransitionType
 	Speed    TransitionSpeed
-	Duration int // in milliseconds
+	Duration int // milliseconds; see the field's note under Transition
+
+	// Direction is the dir attribute of the effects that take one. Which
+	// tokens are legal depends on Type: push and wipe take l/r/u/d; cover, pull
+	// and strips take ld/lu/rd/ru/l/r/u/d; blinds, checker, comb and randomBar
+	// take horz/vert; split and zoom take in/out. The writer emits the token as
+	// given and omits the attribute for the effects that have no dir at all.
+	Direction TransitionDirection
+
+	// Orientation is split's orient attribute: horz or vert. Other effects
+	// state their orientation through Direction instead, because their
+	// attribute happens to be called dir.
+	Orientation TransitionOrientation
+
+	// ThroughBlack is thruBlk on cut and fade, which holds the previous slide
+	// on screen while the new one comes in through black. False is the schema
+	// default and is therefore not written.
+	ThroughBlack bool
+
+	// Spokes is wheel's spoke count. Zero means the schema default of four.
+	Spokes int
+
+	// AdvanceOnClick is advClick. Nil omits the attribute, and omitting it
+	// means the same as true, so only a false is worth stating.
+	AdvanceOnClick *bool
+
+	// AdvanceAfterTime is advTm: the delay in milliseconds before the
+	// transition starts. Zero omits it, which means no auto-advance.
+	AdvanceAfterTime int
 }
 
+// Duration is written as p14:dur, which has no home in the base schema's
+// CT_SlideTransition — so a transition that carries one is wrapped in
+// mc:AlternateContent, with the plain element repeated in mc:Fallback for
+// consumers that do not know the p14 namespace.
+
 // TransitionType represents the type of slide transition.
+//
+// The constants below TransitionDissolve were added when the writer learned to
+// emit <p:transition>; the earlier eight keep the numeric values they have
+// always had, so nothing that stored one as an integer changes meaning.
 type TransitionType int
 
 const (
@@ -21,6 +64,56 @@ const (
 	TransitionCover
 	TransitionUncover
 	TransitionDissolve
+
+	TransitionBlinds
+	TransitionChecker
+	TransitionCircle
+	TransitionComb
+	TransitionCut
+	TransitionDiamond
+	TransitionNewsflash
+	TransitionPlus
+	TransitionRandom
+	TransitionRandomBar
+	TransitionStrips
+	TransitionWedge
+	TransitionWheel
+	TransitionZoom
+)
+
+// TransitionPull is the name the format uses for what TransitionUncover was
+// named after. The schema has no <p:uncover>: the element that moves the
+// previous slide off-screen, continually revealing more of the new one, is
+// <p:pull>, and it is the eight-direction counterpart of <p:cover> — same
+// CT_EightDirectionTransition, same l default. The two constants are therefore
+// one value, and either name round-trips.
+const TransitionPull = TransitionUncover
+
+// TransitionDirection is a transition effect's dir attribute. The token is the
+// XML token, so the type doubles as the string the attribute is written with.
+type TransitionDirection string
+
+const (
+	TransitionDirectionLeft       TransitionDirection = "l"
+	TransitionDirectionRight      TransitionDirection = "r"
+	TransitionDirectionUp         TransitionDirection = "u"
+	TransitionDirectionDown       TransitionDirection = "d"
+	TransitionDirectionLeftDown   TransitionDirection = "ld"
+	TransitionDirectionLeftUp     TransitionDirection = "lu"
+	TransitionDirectionRightDown  TransitionDirection = "rd"
+	TransitionDirectionRightUp    TransitionDirection = "ru"
+	TransitionDirectionHorizontal TransitionDirection = "horz"
+	TransitionDirectionVertical   TransitionDirection = "vert"
+	TransitionDirectionIn         TransitionDirection = "in"
+	TransitionDirectionOut        TransitionDirection = "out"
+)
+
+// TransitionOrientation is split's orient attribute.
+type TransitionOrientation string
+
+const (
+	TransitionOrientationHorizontal TransitionOrientation = "horz"
+	TransitionOrientationVertical   TransitionOrientation = "vert"
 )
 
 // TransitionSpeed represents the speed of a transition.
@@ -31,6 +124,72 @@ const (
 	TransitionSpeedMedium TransitionSpeed = "med"
 	TransitionSpeedFast   TransitionSpeed = "fast"
 )
+
+// transitionDirSet is the value set an effect's dir attribute accepts. The sets
+// differ per effect, which is why the reader keeps the raw token: a document can
+// hold a combination this writer would not have chosen, and dropping it would
+// lose the transition.
+type transitionDirSet int
+
+const (
+	dirNone        transitionDirSet = iota
+	dirOrientation                  // horz, vert
+	dirSide                         // l, r, u, d
+	dirEight                        // ld, lu, rd, ru, l, r, u, d
+	dirCorner                       // ld, lu, rd, ru
+	dirInOut                        // in, out
+)
+
+// transitionEffect is one effect element of CT_SlideTransition: its name, and
+// the value set its dir attribute accepts.
+type transitionEffect struct {
+	name string
+	dir  transitionDirSet
+}
+
+// transitionEffects maps each type to its element. The names and types are the
+// ones in pml-animationInfo.xsd's CT_SlideTransition. TransitionUncover is absent
+// because it and TransitionPull are one value.
+var transitionEffects = map[TransitionType]transitionEffect{
+	TransitionBlinds:    {"blinds", dirOrientation},
+	TransitionChecker:   {"checker", dirOrientation},
+	TransitionCircle:    {"circle", dirNone},
+	TransitionComb:      {"comb", dirOrientation},
+	TransitionCover:     {"cover", dirEight},
+	TransitionCut:       {"cut", dirNone},
+	TransitionDiamond:   {"diamond", dirNone},
+	TransitionDissolve:  {"dissolve", dirNone},
+	TransitionFade:      {"fade", dirNone},
+	TransitionNewsflash: {"newsflash", dirNone},
+	TransitionPlus:      {"plus", dirNone},
+	TransitionPull:      {"pull", dirEight},
+	TransitionPush:      {"push", dirSide},
+	TransitionRandom:    {"random", dirNone},
+	TransitionRandomBar: {"randomBar", dirOrientation},
+	TransitionSplit:     {"split", dirInOut},
+	TransitionStrips:    {"strips", dirCorner},
+	TransitionWedge:     {"wedge", dirNone},
+	TransitionWheel:     {"wheel", dirNone},
+	TransitionWipe:      {"wipe", dirSide},
+	TransitionZoom:      {"zoom", dirInOut},
+}
+
+// transitionElement returns the effect element for a type, and whether the type
+// is one this package models. TransitionNone is not.
+func transitionElement(t TransitionType) (transitionEffect, bool) {
+	e, ok := transitionEffects[t]
+	return e, ok
+}
+
+// transitionTypeForElement is the inverse of transitionEffects, for the reader.
+func transitionTypeForElement(name string) (TransitionType, bool) {
+	for t, e := range transitionEffects {
+		if e.name == name {
+			return t, true
+		}
+	}
+	return TransitionNone, false
+}
 
 // Slide represents a single slide in a presentation.
 type Slide struct {

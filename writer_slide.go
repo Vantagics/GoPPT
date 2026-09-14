@@ -194,9 +194,89 @@ func (w *PPTXWriter) writeSlide(zw *zip.Writer, slide *Slide, slideNum int, hlin
   <p:clrMapOvr>
     <a:masterClrMapping/>
   </p:clrMapOvr>
-</p:sld>`, nsDrawingML, nsOfficeDocRels, nsPresentationML, bgXML, result)
+%s</p:sld>`, nsDrawingML, nsOfficeDocRels, nsPresentationML, bgXML, result, transitionXML(slide.transition))
 
 	return writeRawXMLToZip(zw, fmt.Sprintf("ppt/slides/slide%d.xml", slideNum), content)
+}
+
+// transitionXML renders the slide's transition as the text that goes between
+// </p:clrMapOvr> and </p:sld>, ending in a newline; "" when the slide has none.
+//
+// <p:transition> is a child of CT_Slide, after clrMapOvr and before timing. A
+// duration has no place in that content model — it is the p14:dur attribute — so
+// the element gets wrapped in mc:AlternateContent, with the copy that requires
+// the p14 namespace in mc:Choice and the plain copy in mc:Fallback. That is what
+// PowerPoint writes, and it means a consumer that does not know p14 still gets
+// the transition, just without its duration.
+func transitionXML(t *Transition) string {
+	if t == nil {
+		return ""
+	}
+	effect, ok := transitionElement(t.Type)
+	if !ok {
+		// TransitionNone is no transition at all, and any other value has no
+		// element to be written as.
+		return ""
+	}
+
+	plain := transitionElementXML(t, effect, false)
+	if t.Duration <= 0 {
+		return "  " + plain + "\n"
+	}
+
+	var b strings.Builder
+	fmt.Fprintf(&b, "  <mc:AlternateContent xmlns:mc=\"%s\" xmlns:p14=\"%s\">\n", nsMarkupCompat, nsPowerPoint2010)
+	b.WriteString("    <mc:Choice Requires=\"p14\">\n")
+	fmt.Fprintf(&b, "      %s\n", transitionElementXML(t, effect, true))
+	b.WriteString("    </mc:Choice>\n")
+	b.WriteString("    <mc:Fallback>\n")
+	fmt.Fprintf(&b, "      %s\n", plain)
+	b.WriteString("    </mc:Fallback>\n")
+	b.WriteString("  </mc:AlternateContent>\n")
+	return b.String()
+}
+
+// transitionElementXML renders one <p:transition> on a single line. The element
+// name carries its p: prefix: a reader that matches on local name alone accepts
+// a bare name, but PowerPoint does not.
+//
+// withDuration separates the mc:Choice copy from the mc:Fallback one. Attributes
+// the schema defaults already cover are left out rather than stated: thruBlk
+// false, spokes absent, advClick true, advTm zero.
+func transitionElementXML(t *Transition, effect transitionEffect, withDuration bool) string {
+	var attrs string
+	if t.Speed != "" {
+		attrs += fmt.Sprintf(" spd=\"%s\"", xmlEscape(string(t.Speed)))
+	}
+	if withDuration && t.Duration > 0 {
+		attrs += fmt.Sprintf(" p14:dur=\"%d\"", t.Duration)
+	}
+	if t.AdvanceOnClick != nil {
+		advClick := "0"
+		if *t.AdvanceOnClick {
+			advClick = "1"
+		}
+		attrs += fmt.Sprintf(" advClick=\"%s\"", advClick)
+	}
+	if t.AdvanceAfterTime > 0 {
+		attrs += fmt.Sprintf(" advTm=\"%d\"", t.AdvanceAfterTime)
+	}
+
+	var inner string
+	if effect.dir != dirNone && t.Direction != "" {
+		inner += fmt.Sprintf(" dir=\"%s\"", xmlEscape(string(t.Direction)))
+	}
+	if t.Type == TransitionSplit && t.Orientation != "" {
+		inner += fmt.Sprintf(" orient=\"%s\"", xmlEscape(string(t.Orientation)))
+	}
+	if (t.Type == TransitionCut || t.Type == TransitionFade) && t.ThroughBlack {
+		inner += ` thruBlk="1"`
+	}
+	if t.Type == TransitionWheel && t.Spokes > 0 {
+		inner += fmt.Sprintf(" spokes=\"%d\"", t.Spokes)
+	}
+
+	return fmt.Sprintf("<p:transition%s><p:%s%s/></p:transition>", attrs, effect.name, inner)
 }
 
 func (w *PPTXWriter) writeSlideRels(zw *zip.Writer, slide *Slide, slideNum int, hlinkRelMap map[*TextRun]string) error {

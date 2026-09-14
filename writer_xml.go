@@ -25,6 +25,13 @@ const (
 	nsExtProperties  = "http://schemas.openxmlformats.org/officeDocument/2006/extended-properties"
 	nsXSI            = "http://www.w3.org/2001/XMLSchema-instance"
 
+	// nsMarkupCompat is the namespace of mc:AlternateContent, which carries the
+	// p14 version of an element alongside a plain fallback.
+	nsMarkupCompat = "http://schemas.openxmlformats.org/markup-compatibility/2006"
+	// nsPowerPoint2010 is the p14 namespace. A slide transition's duration
+	// (p14:dur) lives here rather than in the base schema.
+	nsPowerPoint2010 = "http://schemas.microsoft.com/office/powerpoint/2010/main"
+
 	relTypeSlide       = "http://schemas.openxmlformats.org/officeDocument/2006/relationships/slide"
 	relTypeSlideMaster = "http://schemas.openxmlformats.org/officeDocument/2006/relationships/slideMaster"
 	relTypeSlideLayout = "http://schemas.openxmlformats.org/officeDocument/2006/relationships/slideLayout"

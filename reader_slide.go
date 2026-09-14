@@ -404,6 +404,83 @@ func (r *PPTXReader) parseNotesXML(data []byte) string {
 // input that is malformed or hostile.
 const maxGroupDepth = 64
 
+// readTransition consumes <p:transition> from its start element through its
+// matching end tag and returns what it describes, or nil when it names no effect
+// this package models — an empty element, or one of the PowerPoint 2010 effects
+// that live in the p14 namespace rather than in CT_SlideTransition.
+//
+// It reads its own subtree instead of going through the slide parser's switch
+// because the effect is a child element and there are twenty-one possible
+// children. Attributes are kept as the document states them; only the ones the
+// schema gives a default are left nil, so a caller can tell "unstated" from
+// "stated as the default".
+func (r *PPTXReader) readTransition(decoder *xml.Decoder, start xml.StartElement) *Transition {
+	tr := &Transition{}
+	for _, a := range start.Attr {
+		switch {
+		case a.Name.Space == "" && a.Name.Local == "spd":
+			tr.Speed = TransitionSpeed(a.Value)
+		case a.Name.Space == "" && a.Name.Local == "advClick":
+			advClick := a.Value == "1" || a.Value == "true"
+			tr.AdvanceOnClick = &advClick
+		case a.Name.Space == "" && a.Name.Local == "advTm":
+			if n, err := strconv.Atoi(a.Value); err == nil {
+				tr.AdvanceAfterTime = n
+			}
+		case a.Name.Space == nsPowerPoint2010 && a.Name.Local == "dur":
+			if n, err := strconv.Atoi(a.Value); err == nil {
+				tr.Duration = n
+			}
+		}
+	}
+
+	depth := 0
+	for {
+		token, err := decoder.Token()
+		if err != nil {
+			break
+		}
+		switch tok := token.(type) {
+		case xml.StartElement:
+			if depth == 0 {
+				if typ, ok := transitionTypeForElement(tok.Name.Local); ok {
+					tr.Type = typ
+					for _, a := range tok.Attr {
+						switch a.Name.Local {
+						case "dir":
+							// One field holds both meanings: horz/vert for
+							// blinds, checker, comb and randomBar, a side or
+							// corner for the rest, in/out for split and zoom.
+							tr.Direction = TransitionDirection(a.Value)
+						case "orient":
+							tr.Orientation = TransitionOrientation(a.Value)
+						case "thruBlk":
+							tr.ThroughBlack = a.Value == "1" || a.Value == "true"
+						case "spokes":
+							if n, err := strconv.Atoi(a.Value); err == nil {
+								tr.Spokes = n
+							}
+						}
+					}
+				}
+			}
+			depth++
+		case xml.EndElement:
+			if depth == 0 && tok.Name.Local == start.Name.Local {
+				if tr.Type == TransitionNone {
+					return nil
+				}
+				return tr
+			}
+			depth--
+		}
+	}
+	if tr.Type == TransitionNone {
+		return nil
+	}
+	return tr
+}
+
 func (r *PPTXReader) parseSlideXML(decoder *xml.Decoder, slide *Slide, rels []xmlRelForRead, zr *zip.Reader, slidePath string, pres *Presentation) error {
 	type parseState struct {
 		inSpTree        bool
@@ -437,6 +514,15 @@ func (r *PPTXReader) parseSlideXML(decoder *xml.Decoder, slide *Slide, rels []xm
 		inBgPr          bool
 		inBgSolidFill   bool
 		inBuClr         bool
+
+		// Markup compatibility. A slide transition with a duration is wrapped
+		// in mc:AlternateContent, whose mc:Choice carries the p14:dur attribute
+		// and whose mc:Fallback repeats the transition without it. The Choice
+		// copy is the one to keep, so the reader has to know which branch it is
+		// inside.
+		inAltContent  bool
+		inAltChoice   bool
+		inAltFallback bool
 
 		// Spacing context tracking
 		inSpcBef bool
@@ -610,6 +696,34 @@ func (r *PPTXReader) parseSlideXML(decoder *xml.Decoder, slide *Slide, rels []xm
 		switch t := token.(type) {
 		case xml.StartElement:
 			switch t.Name.Local {
+			case "AlternateContent":
+				if !state.inSpTree && !state.inGrpSp {
+					state.inAltContent = true
+					state.inAltChoice = false
+					state.inAltFallback = false
+				}
+			case "Choice":
+				if state.inAltContent {
+					state.inAltChoice = true
+				}
+			case "Fallback":
+				if state.inAltContent {
+					state.inAltFallback = true
+				}
+			case "transition":
+				// <p:transition> is a direct child of <p:sld>. It is read as a
+				// whole subtree rather than through this switch, because the
+				// effect it names is one of its children and there are twenty-one
+				// of them.
+				if !state.inSpTree && !state.inGrpSp {
+					if tr := r.readTransition(decoder, t); tr != nil && !state.inAltFallback {
+						slide.transition = tr
+					} else if tr != nil && slide.transition == nil {
+						// An mc:Fallback with no mc:Choice before it is all the
+						// document has; take it.
+						slide.transition = tr
+					}
+				}
 			case "bg":
 				state.inBg = true
 			case "bgPr":
@@ -2439,6 +2553,14 @@ func (r *PPTXReader) parseSlideXML(decoder *xml.Decoder, slide *Slide, rels []xm
 
 		case xml.EndElement:
 			switch t.Name.Local {
+			case "AlternateContent":
+				state.inAltContent = false
+				state.inAltChoice = false
+				state.inAltFallback = false
+			case "Choice":
+				state.inAltChoice = false
+			case "Fallback":
+				state.inAltFallback = false
 			case "bg":
 				state.inBg = false
 			case "bgPr":
