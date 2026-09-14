@@ -146,6 +146,7 @@ When rendering unattended, pass a `FontDiagnostics` to `RenderOptions` to get th
 - Charts: Bar, Bar3D, Line, Area, Pie, Pie3D, Doughnut, Scatter, Radar
 - Configurable font fallback chain, plus diagnostics that report every font that was substituted or not found during a render
 - East Asian text is matched to a font by **glyph coverage, not by name**. A document whose generator copies one font-family list into both `<a:latin>` and `<a:ea>` declares a Latin face as its East Asian font; the name resolves, so a name-based lookup reports a perfect match while every Chinese character is drawn as that font's `.notdef` box. Each candidate is therefore checked against the characters the run actually contains, and a Latin face is skipped in favour of the fallback chain. Enclosed symbols used inside CJK text (`①`, `㈠`, `㎡`) are classified with it, so they reach the same check instead of going straight to a Latin face
+- **Pictographs (emoji, dingbats, the miscellaneous symbol blocks) get the same treatment, from a third fallback chain.** No text face carries them — not the one the document declares, and not the CJK faces — so an emoji classified as ordinary text was drawn as the declared face's `.notdef` box, one hollow rectangle per emoji, while the diagnostics reported every request satisfied. Pictographs are now resolved by glyph coverage against a symbol chain (`Segoe UI Emoji`, `Apple Color Emoji`, `Noto Color Emoji`, then the monochrome symbol faces), and a run is split so its emoji come from a symbol face while its Chinese comes from a CJK face in the same run. The substitution is reported through `FontDiagnostics` like any other
 - Public read/render entry points recover panics caused by malformed input and return them as `*PanicError` instead of crashing the process
 - Group shapes and Placeholder shapes
 - Unsupported OOXML constructs (SmartArt, OLE objects, unreadable chart parts) are kept as visible placeholders and are enumerable via `UnsupportedShapes()`, instead of being silently dropped
@@ -384,6 +385,7 @@ Draft 是画质取舍，而不是另一个渲染器：输出尺寸与内容都�
 - 图表：柱状图、3D柱状图、折线图、面积图、饼图、3D饼图、环形图、散点图、雷达图
 - 可配置的字体回退链，并能报告每次渲染中被替换或未找到的字体
 - 中日韩文字按**字形覆盖**而非字体名匹配。有些生成器会把同一份 font-family 列表同时写进 `<a:latin>` 和 `<a:ea>`，于是把一款拉丁字体声明成了「东亚字体」；字体名能解析，因此按名字查找会报告完美匹配，而每个汉字实际都画成了该字体的 `.notdef` 方框。所以每个候选字体都会拿该 run 实际包含的字去校验，拉丁字体会被跳过并改用回退链。CJK 文本中常用的带圈符号（`①`、`㈠`、`㎡`）也一并纳入该判定，从而进入同一套覆盖检查，而不是直接落到拉丁字体上
+- **象形字符（emoji、装饰符号、各类杂项符号区）走同一套判定，但用第三条回退链。** 没有任何文字字体带这些字形——文档声明的文字字体没有，CJK 回退链里的字体也没有——所以被当成普通文字的 emoji 会被画成声明字体的 `.notdef` 方框，每个 emoji 一个空心方框，而诊断仍报告「所有请求均已满足」。现在象形字符按字形覆盖在符号字体链（`Segoe UI Emoji`、`Apple Color Emoji`、`Noto Color Emoji`，其后是单色符号字体）里挑选 face，并且同一个 run 会按字符类别切开，让 emoji 走符号 face、同一 run 里的汉字仍走 CJK face。替换会照常通过 `FontDiagnostics` 报告
 - 公共读取／渲染入口在遇到畸形输入时会 recover panic 并以 `*PanicError` 返回，不会让进程崩溃
 - 组合形状和占位符形状
 - 不支持的 OOXML 结构（SmartArt、OLE 对象、无法读取的图表部件）会保留为可见占位框，并可通过 `UnsupportedShapes()` 枚举，而不是被静默丢弃
