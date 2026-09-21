@@ -697,6 +697,14 @@ func (w *PPTXWriter) writeTextRunXMLAt(tr *TextRun, indent string) string {
 	if font.Strikethrough {
 		attrs += ` strike="sngStrike"`
 	}
+	if font.Superscript {
+		// PowerPoint's own value: a 30% raise.
+		attrs += ` baseline="30000"`
+	}
+	if font.Subscript {
+		// PowerPoint's own value: a 25% drop.
+		attrs += ` baseline="-25000"`
+	}
 
 	solidFill := ""
 	if font.Color.ARGB != "" {

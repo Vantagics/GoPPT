@@ -1484,6 +1484,18 @@ func (r *PPTXReader) parseSlideXML(decoder *xml.Decoder, slide *Slide, rels []xm
 							currentFont.Underline = UnderlineType(attr.Value)
 						case "strike":
 							currentFont.Strikethrough = attr.Value == "sngStrike"
+						case "baseline":
+							// baseline is a shift in thousandths of a percent:
+							// +30000 raises the run (superscript), -25000 drops it
+							// (subscript) — the two values PowerPoint writes. The
+							// model keeps booleans; the renderer applies the shift.
+							if v, err := strconv.Atoi(attr.Value); err == nil {
+								if v > 0 {
+									currentFont.Superscript = true
+								} else if v < 0 {
+									currentFont.Subscript = true
+								}
+							}
 						}
 					}
 				}
@@ -3368,6 +3380,14 @@ func (r *PPTXReader) parseSlideXML(decoder *xml.Decoder, slide *Slide, rels []xm
 				}
 			case "buClr":
 				state.inBuClr = false
+			case "fillRef", "lnRef":
+				// The ref elements reset their own flag when they close.
+				// Without this, inFillRef stayed true for the whole
+				// <p:style>, and the schemeClr inside effectRef and fontRef
+				// was captured as the fill reference's colour — a fontRef
+				// naming lt1 turned the fillRef's accent into white.
+				state.inFillRef = false
+				state.inLnRef = false
 			case "style":
 				state.inStyle = false
 				state.inFontRef = false
@@ -5078,6 +5098,16 @@ func (r *PPTXReader) parseLayoutImages(data []byte, rels []xmlRelForRead, zr *zi
 							currentFont.Bold = attr.Value == "1"
 						case "i":
 							currentFont.Italic = attr.Value == "1"
+						case "baseline":
+							// Same shift the main scanner reads: without it a
+							// superscript picked up from a layout draws flat.
+							if v, err := strconv.Atoi(attr.Value); err == nil {
+								if v > 0 {
+									currentFont.Superscript = true
+								} else if v < 0 {
+									currentFont.Subscript = true
+								}
+							}
 						}
 					}
 				}

@@ -303,3 +303,159 @@ func TestMasterBodyStyleLevelIsOneBased(t *testing.T) {
 		t.Errorf("level-1 paragraph size = %v, want 28 (lvl2pPr); the level ladder is misaligned", got)
 	}
 }
+
+// ---------------------------------------------------------------------------
+// <a:fontRef> must not poison the fillRef colour.
+// ---------------------------------------------------------------------------
+
+// A styled shape's <p:style> names four references. The fontRef's schemeClr
+// used to be captured as the fill reference's colour, because inFillRef was
+// never reset when fillRef closed — a fontRef naming lt1 (white, the usual
+// "minor" text colour) turned every fillRef fill white. slide27's database
+// cylinders rendered as white boxes in round 16 because of exactly this.
+const poisonedStyleShape = `
+<p:sp>
+  <p:nvSpPr><p:cNvPr id="2" name="Disk"/><p:cNvSpPr/><p:nvPr/></p:nvSpPr>
+  <p:spPr>
+    <a:xfrm><a:off x="500000" y="500000"/><a:ext cx="2000000" cy="1500000"/></a:xfrm>
+    <a:prstGeom prst="flowChartMagneticDisk"><a:avLst/></a:prstGeom>
+    <a:ln><a:solidFill><a:schemeClr val="tx2"/></a:solidFill></a:ln>
+  </p:spPr>
+  <p:txBody><a:bodyPr rtlCol="0" anchor="ctr"/><a:lstStyle/><a:p/></p:txBody>
+  <p:style>
+    <a:lnRef idx="2"><a:schemeClr val="accent1"><a:shade val="50000"/></a:schemeClr></a:lnRef>
+    <a:fillRef idx="1"><a:schemeClr val="accent1"/></a:fillRef>
+    <a:effectRef idx="0"><a:schemeClr val="accent1"/></a:effectRef>
+    <a:fontRef idx="minor"><a:schemeClr val="lt1"/></a:fontRef>
+  </p:style>
+</p:sp>`
+
+func TestStyleRefFontRefDoesNotPoisonFillRef(t *testing.T) {
+	parts := zipParts(t, writeToBytes(t, New()))
+	parts["ppt/slides/slide1.xml"] = []byte(bodyPrSlide(poisonedStyleShape))
+	pkg := buildZip(t, parts)
+	pres, err := (&PPTXReader{}).ReadFromReader(bytes.NewReader(pkg), int64(len(pkg)))
+	if err != nil {
+		t.Fatalf("read the package: %v", err)
+	}
+	sh, ok := firstShapeOfType[*AutoShape](pres)
+	if !ok {
+		t.Fatal("no AutoShape found")
+	}
+	if sh.fill == nil || sh.fill.Type != FillSolid || sh.fill.Color != (Color{ARGB: "FF4472C4"}) {
+		t.Errorf("fillRef colour = %+v, want solid FF4472C4; the fontRef colour leaked into it", sh.fill)
+	}
+	// The explicit <a:ln> colour still wins over the lnRef.
+	if sh.border == nil || sh.border.Color != (Color{ARGB: "FF44546A"}) {
+		t.Errorf("line colour = %+v, want the explicit tx2 (FF44546A)", sh.border)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// <a:rPr baseline="…"> — superscript and subscript.
+// ---------------------------------------------------------------------------
+
+func TestRunBaselineRoundTrips(t *testing.T) {
+	slide := `<p:sp>
+  <p:nvSpPr><p:cNvPr id="2" name="T"/><p:cNvSpPr txBox="1"/><p:nvPr/></p:nvSpPr>
+  <p:spPr>
+    <a:xfrm><a:off x="500000" y="500000"/><a:ext cx="3000000" cy="800000"/></a:xfrm>
+    <a:prstGeom prst="rect"><a:avLst/></a:prstGeom>
+  </p:spPr>
+  <p:txBody><a:bodyPr/><a:lstStyle/>
+    <a:p><a:r><a:rPr lang="en-US" sz="1800" baseline="30000"/><a:t>SUP</a:t></a:r></a:p>
+    <a:p><a:r><a:rPr lang="en-US" sz="1800" baseline="-25000"/><a:t>SUB</a:t></a:r></a:p>
+  </p:txBody>
+</p:sp>`
+	parts := zipParts(t, writeToBytes(t, New()))
+	parts["ppt/slides/slide1.xml"] = []byte(bodyPrSlide(slide))
+	pkg := buildZip(t, parts)
+	pres, err := (&PPTXReader{}).ReadFromReader(bytes.NewReader(pkg), int64(len(pkg)))
+	if err != nil {
+		t.Fatalf("read the package: %v", err)
+	}
+	sh, ok := firstShapeOfType[*RichTextShape](pres)
+	if !ok {
+		t.Fatal("no RichTextShape found")
+	}
+	paras := sh.GetParagraphs()
+	if len(paras) != 2 {
+		t.Fatalf("got %d paragraphs, want 2", len(paras))
+	}
+	runFont := func(p *Paragraph) *Font {
+		for _, elem := range p.elements {
+			if tr, ok := elem.(*TextRun); ok {
+				return tr.font
+			}
+		}
+		return nil
+	}
+	sup, sub := runFont(paras[0]), runFont(paras[1])
+	if sup == nil || !sup.Superscript || sup.Subscript {
+		t.Errorf("baseline=\"30000\" read as Superscript=%v Subscript=%v, want true/false", sup.Superscript, sup.Subscript)
+	}
+	if sub == nil || !sub.Subscript || sub.Superscript {
+		t.Errorf("baseline=\"-25000\" read as Superscript=%v Subscript=%v, want false/true", sub.Superscript, sub.Subscript)
+	}
+
+	// The writer emits PowerPoint's own two values. The package bytes are a
+	// zipped archive, so search inside the unpacked slide part, not the raw bytes.
+	p2 := New()
+	shape := p2.GetActiveSlide().CreateRichTextShape()
+	tr := shape.CreateTextRun("x")
+	f := NewFont()
+	f.Size = 18
+	f.Superscript = true
+	tr.SetFont(f)
+	outParts := zipParts(t, writeToBytes(t, p2))
+	slideXML := string(outParts["ppt/slides/slide1.xml"])
+	if !bytes.Contains([]byte(slideXML), []byte(`baseline="30000"`)) {
+		t.Errorf("superscript run wrote no baseline=\"30000\":\n%s", slideXML)
+	}
+	p3 := New()
+	shape = p3.GetActiveSlide().CreateRichTextShape()
+	tr = shape.CreateTextRun("x")
+	f = NewFont()
+	f.Size = 18
+	f.Subscript = true
+	tr.SetFont(f)
+	outParts = zipParts(t, writeToBytes(t, p3))
+	slideXML = string(outParts["ppt/slides/slide1.xml"])
+	if !bytes.Contains([]byte(slideXML), []byte(`baseline="-25000"`)) {
+		t.Errorf("subscript run wrote no baseline=\"-25000\":\n%s", slideXML)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// can / flowChartMagneticDisk — the cylinder preset geometry.
+// ---------------------------------------------------------------------------
+
+func TestCylinderPresetsRenderFilled(t *testing.T) {
+	fc := NewFontCache()
+	for _, prst := range []AutoShapeType{AutoShapeCan, AutoShapeFlowChartMagneticDisk} {
+		p := New()
+		sh := NewAutoShape()
+		sh.shapeType = prst
+		sh.SetOffsetX(1000000)
+		sh.SetOffsetY(1000000)
+		sh.SetWidth(2000000)
+		sh.SetHeight(2000000)
+		sh.fill = NewFill()
+		sh.fill.SetSolid(NewColor("4472C4"))
+		p.GetActiveSlide().AddShape(sh)
+		img, err := p.SlideToImage(0, goldenOptions(fc))
+		if err != nil {
+			t.Fatalf("%s: render: %v", prst, err)
+		}
+		layout := p.GetLayout()
+		scale := float64(img.Bounds().Dx()) / float64(layout.CX)
+		// The body's centre, below the top ellipse: 60% down the shape.
+		cx := int(float64(1000000+2000000/2) * scale)
+		cy := int(float64(1000000+2000000*6/10) * scale)
+		r, g, bl, a := img.At(cx, cy).RGBA()
+		if a == 0 || (r > 0xC000 && g > 0xC000 && bl > 0xC000) {
+			t.Errorf("%s: body centre (%d,%d) is empty/white {%d %d %d %d}; the cylinder did not fill",
+				prst, cx, cy, r>>8, g>>8, bl>>8, a>>8)
+		}
+	}
+}

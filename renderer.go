@@ -1768,6 +1768,8 @@ func (r *renderer) renderAutoShapeFill(s *AutoShape, x, y, w, h int) {
 	case AutoShapeArc:
 		// Arc preset geometry has no fill by default (it's just a stroke).
 		// Skip fill for arc shapes.
+	case AutoShapeCan, AutoShapeFlowChartMagneticDisk:
+		r.fillCan(x, y, w, h, fc, s.adjustValues)
 	default:
 		r.renderFill(s.fill, rect)
 	}
@@ -1781,6 +1783,8 @@ func (r *renderer) renderAutoShapeBorder(s *AutoShape, x, y, w, h int) {
 	pw := maxInt(int(float64(maxInt(s.border.Width, 1))*12700.0*r.scaleX), 1)
 
 	switch s.shapeType {
+	case AutoShapeCan, AutoShapeFlowChartMagneticDisk:
+		r.drawCan(x, y, w, h, bc, pw, s.adjustValues)
 	case AutoShapeEllipse:
 		r.drawEllipseAA(x, y, w, h, bc, pw)
 	case AutoShapeRoundedRect:
@@ -3629,6 +3633,60 @@ func (r *renderer) drawArc(cx, cy, w, h int, c color.RGBA, startAngle, endAngle 
 	}
 }
 
+// --- Can (cylinder) preset ---
+
+// canTopRadius returns the vertical semi-axis of the can's top ellipse. The
+// preset's adj is a percentage of the height with PowerPoint's default 25000,
+// and the top ellipse takes half of that as its semi-axis — 12.5% of the
+// height at the default, which is what the COM export measures.
+func canTopRadius(h int, adjustValues map[string]int) int {
+	adj := 25000
+	if v, ok := adjustValues["adj"]; ok {
+		adj = v
+	}
+	if adj < 0 {
+		adj = 0
+	}
+	if adj > 50000 {
+		adj = 50000
+	}
+	return h * adj / 200000
+}
+
+// fillCan fills the cylinder silhouette: a body between the two ellipse
+// centres plus two full ellipses. The three overlaps are the same colour, so
+// the union is the shape PowerPoint fills.
+func (r *renderer) fillCan(x, y, w, h int, c color.RGBA, adjustValues map[string]int) {
+	ry := canTopRadius(h, adjustValues)
+	if 2*ry > h {
+		ry = h / 2
+	}
+	if ry <= 0 {
+		r.fillRectFast(image.Rect(x, y, x+w, y+h), c)
+		return
+	}
+	r.fillRectFast(image.Rect(x, y+ry, x+w, y+h-ry), c)
+	r.fillEllipseAA(x, y+h-2*ry, w, 2*ry, c)
+	r.fillEllipseAA(x, y, w, 2*ry, c)
+}
+
+// drawCan strokes the cylinder outline: the top rim as a full ellipse, the
+// two side lines, and the bottom cap as the ellipse's lower half.
+func (r *renderer) drawCan(x, y, w, h int, c color.RGBA, lineWidth int, adjustValues map[string]int) {
+	ry := canTopRadius(h, adjustValues)
+	if 2*ry > h {
+		ry = h / 2
+	}
+	if ry <= 0 {
+		r.drawRect(image.Rect(x, y, x+w, y+h), c, lineWidth)
+		return
+	}
+	r.drawEllipseAA(x, y, w, 2*ry, c, lineWidth)
+	r.drawLineThick(x, y+ry, x, y+h-ry, c, lineWidth)
+	r.drawLineThick(x+w-1, y+ry, x+w-1, y+h-ry, c, lineWidth)
+	r.drawArc(x, y+h-2*ry, w, 2*ry, c, 0, math.Pi, lineWidth)
+}
+
 // --- Polygon shapes ---
 
 type fpoint struct{ x, y float64 }
@@ -4938,8 +4996,20 @@ func (r *renderer) buildParaTextRuns(elements []ParagraphElement) []textRun {
 			if f == nil {
 				f = NewFont()
 			}
+			// A baseline-shifted run draws at two thirds of its declared
+			// size: PowerPoint shrinks the glyphs (the COM export's
+			// subscript measures ~0.68x the surrounding run's advance
+			// width) while the file keeps the declared size. Faces resolve
+			// from the scaled copy; the run itself keeps the original font,
+			// so the baseline shift below uses the real size.
+			faceFont := f
+			if f.Superscript || f.Subscript {
+				scaled := *f
+				scaled.Size = int(float64(f.Size)*(2.0/3.0) + 0.5)
+				faceFont = &scaled
+			}
 			if (containsCJK(e.text) || containsSymbol(e.text)) && r.fontCache != nil {
-				sizePt := float64(f.Size)
+				sizePt := float64(faceFont.Size)
 				if sizePt <= 0 {
 					sizePt = 10
 				}
@@ -4948,30 +5018,30 @@ func (r *renderer) buildParaTextRuns(elements []ParagraphElement) []textRun {
 				}
 				scaledPt := sizePt * 12700.0 * r.scaleX
 				var faces, measures [numTextClasses]font.Face
-				faces[textClassLatin] = r.fontCache.GetFace(f.Name, scaledPt, f.Bold, f.Italic)
+				faces[textClassLatin] = r.fontCache.GetFace(faceFont.Name, scaledPt, faceFont.Bold, faceFont.Italic)
 				if faces[textClassLatin] == nil {
-					faces[textClassLatin] = r.getFace(f)
+					faces[textClassLatin] = r.getFace(faceFont)
 				}
-				measures[textClassLatin] = r.getMeasureFace(f)
+				measures[textClassLatin] = r.getMeasureFace(faceFont)
 				// Face selection is driven by the characters in this run, not by
 				// the declared font names: a name that resolves can still lack
 				// the glyphs, and then the text draws as empty boxes.
 				if containsCJK(e.text) {
 					var used string
-					faces[textClassCJK], used = r.getCJKFace(f, e.text)
-					measures[textClassCJK], _ = r.getCJKMeasureFace(f, e.text)
+					faces[textClassCJK], used = r.getCJKFace(faceFont, e.text)
+					measures[textClassCJK], _ = r.getCJKMeasureFace(faceFont, e.text)
 					r.noteCJKFont(f, used)
 				}
 				if containsSymbol(e.text) {
 					var used string
-					faces[textClassSymbol], used = r.getSymbolFace(f, e.text)
-					measures[textClassSymbol], _ = r.getSymbolMeasureFace(f, e.text)
+					faces[textClassSymbol], used = r.getSymbolFace(faceFont, e.text)
+					measures[textClassSymbol], _ = r.getSymbolMeasureFace(faceFont, e.text)
 					r.noteSymbolFont(f, used)
 				}
 				runs = append(runs, r.splitRunByClass(e.text, f, faces, measures)...)
 			} else {
-				face := r.getFace(f)
-				mf := r.getMeasureFace(f)
+				face := r.getFace(faceFont)
+				mf := r.getMeasureFace(faceFont)
 				runs = append(runs, textRun{
 					text:        e.text,
 					font:        f,
@@ -5450,10 +5520,14 @@ func (r *renderer) drawParagraphs(paragraphs []*Paragraph, x, y, w, h int, ancho
 
 			runBaseline := baseline
 			if run.font != nil {
+				// The shift is what the file says: baseline is a shift in
+				// thousandths of a percent of the run's own size, and
+				// PowerPoint writes +30000 for a superscript and -25000 for
+				// a subscript.
 				if run.font.Superscript {
-					runBaseline -= li.line.ascent / 3
+					runBaseline -= int(r.fontSizePixels(run.font)*0.30 + 0.5)
 				} else if run.font.Subscript {
-					runBaseline += li.line.descent / 2
+					runBaseline += int(r.fontSizePixels(run.font)*0.25 + 0.5)
 				}
 			}
 
