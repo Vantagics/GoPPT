@@ -2087,3 +2087,64 @@ func TestEmptyParagraphLineHeightFollowsEndParaRPr(t *testing.T) {
 		t.Errorf("doubling the endParaRPr sz grew the gap by only %dpx; the empty line height must scale with it", gap36-gap18)
 	}
 }
+
+// TestLineAdvanceIsTwelveTenthsOfSize pins the r27 finding: PowerPoint
+// advances lines by 1.2 x the largest font size on the line, whatever the
+// font's vertical metrics say. The COM variant experiment (slide14 of the
+// comparison deck) swapped the master body font between Calibri, Arial and
+// Segoe UI -- whose win-metric heights differ by up to 15% -- and the
+// rendered pitch did not move; only the size moved it. The win metrics
+// still place the baseline (ascent below the line top), so both must
+// survive here, each from its own source. The fixture feeds the run the
+// values the run-stamping code produces for Calibri at 32pt on a 4:3 deck
+// rendered 1600px wide: winAsc 68, winDesc 19, whose sum (87) is the very
+// over-advance this fix removes (PowerPoint draws 85).
+func TestLineAdvanceIsTwelveTenthsOfSize(t *testing.T) {
+	r := &renderer{scaleX: 1600.0 / 9144000.0}
+	runs := []textRun{{
+		text:    "Implementing",
+		font:    &Font{Name: "Calibri", Size: 32},
+		winAsc:  68,
+		winDesc: 19,
+	}}
+	tl := r.buildTextLine(runs)
+	if got := tl.lineHeight; got != 85 {
+		t.Errorf("line advance = %d, want 85 (1.2 x 32pt at 1600px/10in); the font's win-metric height would say 87", got)
+	}
+	if got := tl.ascent; got != 68 {
+		t.Errorf("baseline ascent = %d, want 68 (the win metric still places the baseline)", got)
+	}
+	// The largest run on the line sets the advance, not the first one.
+	big := runs
+	big = append(big, textRun{
+		text:    "X",
+		font:    &Font{Name: "Calibri", Size: 40},
+		winAsc:  85,
+		winDesc: 24,
+	})
+	if got := r.buildTextLine(big).lineHeight; got != 107 {
+		t.Errorf("line advance with a 40pt run present = %d, want 107 (1.2 x 40pt)", got)
+	}
+	// Without win metrics (the basicfont fallback path) the metrics-based
+	// height must survive untouched.
+	plain := []textRun{{text: "x", font: &Font{Name: "Calibri", Size: 32}}}
+	if got := r.buildTextLine(plain).lineHeight; got <= 0 {
+		t.Errorf("metrics-fallback line height = %d, want positive", got)
+	}
+}
+
+// TestEmptyParagraphLineHeightIsTwelveTenthsSize extends the same rule to
+// the empty line: its height was win-metric based after round 26, but the
+// COM experiment that doubled an empty paragraph's endParaRPr size read a
+// 1.2x line, and the difference is one pixel on the comparison deck's 18pt
+// separator (49 win-based vs 48).
+func TestEmptyParagraphLineHeightIsTwelveTenthsSize(t *testing.T) {
+	r := &renderer{scaleX: 1600.0 / 9144000.0}
+	para := &Paragraph{endParaRPrSize: 1800}
+	if got := r.emptyParagraphLineHeight(para); got != 48 {
+		t.Errorf("empty 18pt line height = %d, want 48 (1.2 x 18pt)", got)
+	}
+	if got := r.emptyParagraphLineHeight(&Paragraph{}); got != 14 {
+		t.Errorf("empty line without endParaRPr = %d, want the 14px fallback", got)
+	}
+}

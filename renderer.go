@@ -368,7 +368,10 @@ func (r *renderer) emuToPixelY(emu int64) int { return int(math.Round(float64(em
 // 1 point = 12700 EMU, so 1/100 point = 127 EMU.
 func (r *renderer) hundredthPtToPixelY(val int) int {
 	emu := float64(val) * 127.0
-	return int(emu * r.scaleY)
+	// Round, not truncate: a 12pt space-before is 26.67px, and truncation
+	// shaves a pixel off every gap on the slide — the loss accumulates
+	// down the text block (slide35 drifted 6px by its last line).
+	return int(emu*r.scaleY + 0.5)
 }
 
 func argbToRGBA(c Color) color.RGBA {
@@ -5272,6 +5275,7 @@ func (r *renderer) buildTextLine(runs []textRun) textLine {
 	tl.runs = runs
 	maxHeight := 0 // track font's recommended line-to-line height (includes line gap)
 	hasCJK := false
+	hasWin := false
 	// A bullet run must not contribute to the line's metrics when real text
 	// shares the line: the bullet's face (the master's buFont, often Arial)
 	// can be taller than the text face and would push every glyph down. When
@@ -5302,9 +5306,10 @@ func (r *renderer) buildTextLine(runs []textRun) textLine {
 		}
 		if run.winAsc > 0 || run.winDesc > 0 {
 			// GDI metrics recorded at face-creation time — PowerPoint's
-			// baseline placement and line advance. These win over the
-			// hhea-derived face.Metrics, which sit a line-gap (and for
-			// fonts like Calibri a fifth of an em) away from them.
+			// baseline placement. These win over the hhea-derived
+			// face.Metrics, which sit a line-gap (and for fonts like
+			// Calibri a fifth of an em) away from them.
+			hasWin = true
 			if run.winAsc > tl.ascent {
 				tl.ascent = run.winAsc
 			}
@@ -5353,6 +5358,37 @@ func (r *renderer) buildTextLine(runs []textRun) textLine {
 			tl.lineHeight = adSum
 		}
 	}
+	// But the line *advance* is not the font's metrics: PowerPoint spaces
+	// lines at 1.2 × the largest font size on the line (its "single"
+	// spacing) whatever face serves the glyphs. COM single-factor variants
+	// of slide14 of the comparison deck pinned this: swapping the master
+	// body font between Calibri (win-metric height 1.221em), Arial
+	// (1.117em) and Segoe UI (1.332em) moved the rendered line pitch by
+	// exactly nothing, while 36pt/40pt master sizes moved it to 1.2×size
+	// rounded per line (96/107 px). The win metrics still place the
+	// baseline — ascent below the line top (round 22) — they just do not
+	// size the line box.
+	//
+	// Those variants were Latin, so the rule is applied to Latin lines
+	// only. CJK keeps the metrics-derived height it was tuned against:
+	// the cjk_wrap golden measures 3.2% of pixels against the 1.2×
+	// advance and passes against ascent+descent, and nothing in this
+	// round's evidence speaks to which of the two PowerPoint really uses
+	// there. Reserving the question beats silently moving a golden.
+	if hasWin && !hasCJK {
+		adv := 0
+		for _, run := range textRuns {
+			if run.font == nil {
+				continue
+			}
+			if h := int(1.2*r.fontSizePixels(run.font) + 0.5); h > adv {
+				adv = h
+			}
+		}
+		if adv > 0 {
+			tl.lineHeight = adv
+		}
+	}
 	if tl.lineHeight < 1 {
 		tl.lineHeight = 14
 	}
@@ -5399,26 +5435,22 @@ func (r *renderer) paraSpaceBefore(para *Paragraph, firstPara bool) int {
 		return para.spaceBefore
 	}
 	if para.spaceBeforePct > 0 {
-		return int(r.paragraphFontSize(para) * float64(para.spaceBeforePct) / 100000.0 * 100)
+		return int(r.paragraphFontSize(para)*float64(para.spaceBeforePct)/100000.0*100 + 0.5)
 	}
 	if para.inheritedSpaceBeforePct > 0 {
-		// The inherited percentage rides the whole line and inherits every
-		// factor the line rides: 1.2 × the run size, then the normAutofit
-		// levers. slide35 is the proof that the levers apply: its master
-		// 20% over 32pt runs measures 14.2px = 20% × 1.2 × 32 × 0.925
-		// (fontScale) × 0.9 (lnSpcReduction) — the exact value the old
-		// level-based bake produced by coincidence (20% × 32 = 6.4pt),
-		// which is how round 23 concluded the 1.2 did not exist. slide34
-		// (empty autofit) isolates the 1.2: tripling the pct moved every
-		// gap by 2 × 17.5px and enlarging the level's defRPr moved nothing.
+		// The inherited percentage resolves against 1.2 × the run's own
+		// size (round 26), but it does NOT ride the normAutofit levers
+		// (fontScale, lnSpcReduction) the way the line advance does.
+		// Round 27 tried both and let the deck decide: with the levers
+		// multiplied in, slide35 — the only autofit page whose body
+		// inherits a 20% space-before — scored 6.45% against the
+		// PowerPoint export; without them 5.29%, and the pages that
+		// carry no autofit were untouched. The two-factor fit round 26
+		// rested on (20% × 1.2 × 32 × 0.925 × 0.9 = 14.2px) was a
+		// coincidence: the unscaled 20% × 1.2 × 28 = 14.9px sits in the
+		// same pixel, and only one of the two survives a second page.
 		v := r.paragraphFontSize(para) * 1.2 * float64(para.inheritedSpaceBeforePct) / 100000.0 * 100
-		if r.fontScale > 0 && r.fontScale != 1.0 {
-			v *= r.fontScale
-		}
-		if r.lnSpcReduction > 0 {
-			v *= 1.0 - r.lnSpcReduction
-		}
-		return int(v)
+		return int(v + 0.5)
 	}
 	return para.spaceBefore
 }
@@ -5452,17 +5484,11 @@ func (r *renderer) emptyParagraphLineHeight(para *Paragraph) int {
 	sizePt := float64(para.endParaRPrSize) / 100.0
 	f := NewFont()
 	f.Size = int(sizePt + 0.5)
-	if r.fontCache != nil {
-		_, used, _ := r.resolveFace(f, r.fontSizePixels(f), false)
-		if a, d, ok := r.fontCache.WinVerticalMetrics(used, r.fontSizePixels(f), false, false); ok {
-			lh := int(a + d + 0.5)
-			if lh > 0 {
-				return lh
-			}
-		}
-	}
-	// No cache or no vitals: approximate the line as 1.2 × the size.
-	return r.hundredthPtToPixelY(int(sizePt * 120))
+	// Line advance is 1.2 × the size regardless of the font's vertical
+	// metrics (see buildTextLine); the empty line is no exception — the
+	// COM variant that doubled an empty paragraph's endParaRPr size grew
+	// the following gap by exactly the 1.2× line plus its spacing.
+	return int(1.2*r.fontSizePixels(f) + 0.5)
 }
 
 // measureParagraphsHeight estimates the total pixel height needed to render
