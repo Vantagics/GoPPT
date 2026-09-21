@@ -61,6 +61,7 @@ func (t ShapeType) String() string {
 type BaseShape struct {
 	name           string
 	description    string
+	hidden         bool  // <p:cNvPr hidden="1">: PowerPoint does not draw the shape
 	offsetX        int64 // in EMU
 	offsetY        int64 // in EMU
 	width          int64 // in EMU
@@ -80,7 +81,12 @@ func (b *BaseShape) GetWidth() int64   { return b.width }
 func (b *BaseShape) GetHeight() int64  { return b.height }
 func (b *BaseShape) GetName() string   { return b.name }
 func (b *BaseShape) GetRotation() int  { return b.rotation }
+func (b *BaseShape) GetHidden() bool   { return b.hidden }
 func (b *BaseShape) base() *BaseShape  { return b }
+
+// SetHidden marks the shape hidden, as PowerPoint's <p:cNvPr hidden="1">
+// does: the shape stays in the file but is not drawn.
+func (b *BaseShape) SetHidden(h bool) *BaseShape { b.hidden = h; return b }
 
 func (b *BaseShape) SetOffsetX(x int64) *BaseShape { b.offsetX = x; return b }
 func (b *BaseShape) SetOffsetY(y int64) *BaseShape { b.offsetY = y; return b }

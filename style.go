@@ -192,6 +192,13 @@ type Alignment struct {
 	MarginBottom int64
 	Indent       int64
 	Level        int
+
+	// marLSet/indentSet record that the paragraph's markup stated the
+	// attribute, even as an explicit 0. The master's bodyStyle carries a
+	// marL/indent of its own, and inheritance must not overwrite a value the
+	// slide spelled out — "0" is a deliberate override there, not "unset".
+	marLSet   bool
+	indentSet bool
 }
 
 // HorizontalAlignment represents horizontal text alignment.

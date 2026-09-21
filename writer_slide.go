@@ -425,6 +425,16 @@ func xfrmAttrs(b *BaseShape) string {
 	return sb.String()
 }
 
+// hiddenAttr returns the cNvPr attribute that marks a shape hidden, or ""
+// for a visible one. Every shape emitter shares it so the flag cannot drift
+// between shape kinds.
+func hiddenAttr(b *BaseShape) string {
+	if b.hidden {
+		return ` hidden="1"`
+	}
+	return ""
+}
+
 func (w *PPTXWriter) writeRichTextShapeXML(s *RichTextShape, shapeID *int) string {
 	id := *shapeID
 	*shapeID++
@@ -448,6 +458,7 @@ func (w *PPTXWriter) writeRichTextShapeXML(s *RichTextShape, shapeID *int) strin
 	if s.description != "" {
 		descrAttr = fmt.Sprintf(` descr="%s"`, xmlEscape(s.description))
 	}
+	descrAttr += hiddenAttr(&s.BaseShape)
 
 	return fmt.Sprintf(`      <p:sp>
         <p:nvSpPr>
@@ -613,16 +624,18 @@ func (w *PPTXWriter) writeParagraphXMLAt(para *Paragraph, indent string) string 
 		// The reader parses marL/marR/indent and the renderer indents the text by
 		// all three — marL with a negative indent is the hanging indent every
 		// bulleted list uses. No emitter wrote them, so a paragraph indented in
-		// the source deck came back flush against the shape's left edge. Zero is
-		// the schema default, so a value the paragraph was never given is left
-		// out rather than stated.
-		if align.MarginLeft != 0 {
+		// the source deck came back flush against the shape's left edge. A
+		// value stated as an explicit 0 (marLSet/indentSet) is still written:
+		// it is the paragraph's own override of the master, not the schema
+		// default, and dropping it would let the master's margin creep back
+		// in on the next read.
+		if align.MarginLeft != 0 || align.marLSet {
 			attrs += fmt.Sprintf(` marL="%d"`, align.MarginLeft)
 		}
 		if align.MarginRight != 0 {
 			attrs += fmt.Sprintf(` marR="%d"`, align.MarginRight)
 		}
-		if align.Indent != 0 {
+		if align.Indent != 0 || align.indentSet {
 			attrs += fmt.Sprintf(` indent="%d"`, align.Indent)
 		}
 	}
@@ -961,7 +974,7 @@ func (w *PPTXWriter) writeDrawingShapeXML(s *DrawingShape, shapeID *int, slideNu
 
 	return fmt.Sprintf(`      <p:pic>
         <p:nvPicPr>
-          <p:cNvPr id="%d" name="%s" descr="%s"/>
+          <p:cNvPr id="%d" name="%s" descr="%s"%s/>
           <p:cNvPicPr>
             <a:picLocks noChangeAspect="1"/>
           </p:cNvPicPr>
@@ -983,7 +996,7 @@ func (w *PPTXWriter) writeDrawingShapeXML(s *DrawingShape, shapeID *int, slideNu
           </a:prstGeom>%s
         </p:spPr>
       </p:pic>
-`, id, xmlEscape(name), xmlEscape(s.description),
+`, id, xmlEscape(name), xmlEscape(s.description), hiddenAttr(&s.BaseShape),
 		blipFillChildrenXML(relIdx, s.alpha, s.cropLeft, s.cropTop, s.cropRight, s.cropBottom),
 		xfrmAttrs(&s.BaseShape),
 		s.offsetX, s.offsetY, s.width, s.height,
@@ -1081,7 +1094,7 @@ func (w *PPTXWriter) writeAutoShapeXML(s *AutoShape, shapeID *int) string {
 %s
 %s%s        </p:spPr>%s
       </p:sp>
-`, id, xmlEscape(name), descrAttr,
+`, id, xmlEscape(name), descrAttr+hiddenAttr(&s.BaseShape),
 		xfrmAttrs(&s.BaseShape),
 		s.offsetX, s.offsetY, s.width, s.height,
 		shapeGeomXML(string(s.shapeType), s.adjustValues, nil, "          "),
@@ -1137,7 +1150,7 @@ func (w *PPTXWriter) writeLineShapeXML(s *LineShape, shapeID *int) string {
 
 	return fmt.Sprintf(`      <p:cxnSp>
         <p:nvCxnSpPr>
-          <p:cNvPr id="%d" name="%s"/>
+          <p:cNvPr id="%d" name="%s"%s/>
           <p:cNvCxnSpPr/>
           <p:nvPr/>
         </p:nvCxnSpPr>
@@ -1154,7 +1167,7 @@ func (w *PPTXWriter) writeLineShapeXML(s *LineShape, shapeID *int) string {
           </a:ln>
         </p:spPr>
       </p:cxnSp>
-`, id, xmlEscape(name),
+`, id, xmlEscape(name), hiddenAttr(&s.BaseShape),
 		xfrmAttrs(&s.BaseShape),
 		s.offsetX, s.offsetY, s.width, s.height,
 		shapeGeomXML(prstGeom, s.adjustValues, s.customPath, "          "),
@@ -1407,7 +1420,7 @@ func (w *PPTXWriter) writeTableShapeXML(s *TableShape, shapeID *int) string {
 
 	return fmt.Sprintf(`      <p:graphicFrame>
         <p:nvGraphicFramePr>
-          <p:cNvPr id="%d" name="%s"/>
+          <p:cNvPr id="%d" name="%s"%s/>
           <p:cNvGraphicFramePr>
             <a:graphicFrameLocks noGrp="1"/>
           </p:cNvGraphicFramePr>
@@ -1427,7 +1440,7 @@ func (w *PPTXWriter) writeTableShapeXML(s *TableShape, shapeID *int) string {
           </a:graphicData>
         </a:graphic>
       </p:graphicFrame>
-`, id, xmlEscape(name),
+`, id, xmlEscape(name), hiddenAttr(&s.BaseShape),
 		s.offsetX, s.offsetY, s.width, s.height,
 		gridCols.String(), rowsXML.String())
 }
@@ -1565,7 +1578,7 @@ func (w *PPTXWriter) writeChartShapeXML(s *ChartShape, shapeID *int, slideNum in
 
 	return fmt.Sprintf(`      <p:graphicFrame>
         <p:nvGraphicFramePr>
-          <p:cNvPr id="%d" name="%s"/>
+          <p:cNvPr id="%d" name="%s"%s/>
           <p:cNvGraphicFramePr>
             <a:graphicFrameLocks noGrp="1"/>
           </p:cNvGraphicFramePr>
@@ -1581,7 +1594,7 @@ func (w *PPTXWriter) writeChartShapeXML(s *ChartShape, shapeID *int, slideNum in
           </a:graphicData>
         </a:graphic>
       </p:graphicFrame>
-`, id, xmlEscape(name),
+`, id, xmlEscape(name), hiddenAttr(&s.BaseShape),
 		s.offsetX, s.offsetY, s.width, s.height,
 		relIdx)
 }
@@ -1624,7 +1637,7 @@ func (w *PPTXWriter) writeGroupShapeXML(g *GroupShape, shapeID *int, slideNum in
 
 	return fmt.Sprintf(`      <p:grpSp>
         <p:nvGrpSpPr>
-          <p:cNvPr id="%d" name="%s"/>
+          <p:cNvPr id="%d" name="%s"%s/>
           <p:cNvGrpSpPr/>
           <p:nvPr/>
         </p:nvGrpSpPr>
@@ -1637,7 +1650,7 @@ func (w *PPTXWriter) writeGroupShapeXML(g *GroupShape, shapeID *int, slideNum in
           </a:xfrm>
         </p:grpSpPr>
 %s      </p:grpSp>
-`, id, xmlEscape(name),
+`, id, xmlEscape(name), hiddenAttr(&g.BaseShape),
 		xfrmAttrs(&g.BaseShape),
 		g.offsetX, g.offsetY, g.width, g.height,
 		g.offsetX, g.offsetY, g.width, g.height,
@@ -1662,7 +1675,7 @@ func (w *PPTXWriter) writePlaceholderShapeXML(s *PlaceholderShape, shapeID *int)
 
 	return fmt.Sprintf(`      <p:sp>
         <p:nvSpPr>
-          <p:cNvPr id="%d" name="%s"/>
+          <p:cNvPr id="%d" name="%s"%s/>
           <p:cNvSpPr>
             <a:spLocks noGrp="1"/>
           </p:cNvSpPr>
@@ -1681,7 +1694,7 @@ func (w *PPTXWriter) writePlaceholderShapeXML(s *PlaceholderShape, shapeID *int)
           <a:lstStyle/>
 %s        </p:txBody>
       </p:sp>
-`, id, xmlEscape(name),
+`, id, xmlEscape(name), hiddenAttr(&s.BaseShape),
 		placeholderAttrsXML(s.phType, s.phIdx),
 		xfrmAttrs(&s.BaseShape),
 		s.offsetX, s.offsetY, s.width, s.height,

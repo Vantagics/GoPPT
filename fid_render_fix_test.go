@@ -1139,3 +1139,161 @@ func TestBulletTextLandsOnTheMargin(t *testing.T) {
 		t.Errorf("bulleted text ink row = %d vs %d plain; the bullet face's metrics grew the line box and pushed the text down %d px", textRow, plainRow, d)
 	}
 }
+
+// A shape marked <p:cNvPr hidden="1"> must stay in the file but never reach
+// the canvas. The real deck's slide27 hides a white-filled rectangle drawn on
+// top of an entire diagram; the renderer used to draw it and blank the region.
+// Asserted on the writer (the attribute is emitted), the reader (it round
+// trips), and the renderer (the ink of an earlier shape survives a hidden
+// white cover drawn later in z-order).
+func TestHiddenShapeIsKeptButNotDrawn(t *testing.T) {
+	pres := New()
+	sl := pres.GetActiveSlide()
+
+	text := sl.CreateRichTextShape()
+	text.BaseShape.SetOffsetX(300000).SetOffsetY(300000)
+	text.BaseShape.SetWidth(3000000).SetHeight(800000)
+	run := text.CreateTextRun("INK")
+	run.GetFont().SetName("Arial").SetSize(24)
+	run.GetFont().Color = NewColor("000000")
+
+	cover := NewAutoShape()
+	cover.BaseShape.SetOffsetX(200000).SetOffsetY(200000)
+	cover.BaseShape.SetWidth(3400000).SetHeight(1200000)
+	cover.SetFill(NewFill().SetSolid(NewColor("FFFFFF")))
+	cover.SetHidden(true)
+	sl.AddShape(cover) // later in z-order: would cover the text if drawn
+
+	// Write half: the hidden attribute is on the emitted cNvPr, and a shape
+	// never told to hide emits nothing.
+	parts := zipParts(t, writeToBytes(t, pres))
+	slideXML := string(parts["ppt/slides/slide1.xml"])
+	if !strings.Contains(slideXML, `hidden="1"`) {
+		t.Errorf("written slide does not mark the cover shape hidden:\n%s", slideXML)
+	}
+	if strings.Count(slideXML, `hidden="1"`) != 1 {
+		t.Errorf("hidden attribute emitted %d times, want exactly 1 (only the cover)", strings.Count(slideXML, `hidden="1"`))
+	}
+
+	// Read half: the flag survives the round trip on the right shape.
+	data := writeToBytes(t, pres)
+	pres2, err := ReadFrom(bytes.NewReader(data), int64(len(data)))
+	if err != nil {
+		t.Fatalf("re-open: %v", err)
+	}
+	shapes := pres2.GetActiveSlide().GetShapes()
+	if len(shapes) != 2 {
+		t.Fatalf("got %d shapes after round trip, want 2", len(shapes))
+	}
+	if shapes[0].base().hidden {
+		t.Errorf("text shape came back hidden; only the cover was marked")
+	}
+	if !shapes[1].base().hidden {
+		t.Errorf("cover shape lost its hidden flag on the round trip")
+	}
+
+	// Render half: the text's ink must survive the hidden white cover above it.
+	fc := NewFontCache()
+	opts := DefaultRenderOptions()
+	opts.Width = 640
+	opts.FontCache = fc
+	img, err := pres.SlideToImage(0, opts)
+	if err != nil {
+		t.Fatalf("render: %v", err)
+	}
+	rect := emuRect(t, pres, 300000, 300000, 3000000, 800000, 640)
+	dark := 0
+	for y := rect.Min.Y; y < rect.Max.Y; y++ {
+		for x := rect.Min.X; x < rect.Max.X; x++ {
+			r, g, b, a := img.At(x, y).RGBA()
+			if a != 0 && (r+g+b)/3 < 20000 {
+				dark++
+			}
+		}
+	}
+	if dark < 50 {
+		t.Errorf("text region has %d dark px; the hidden white cover is being drawn over the text", dark)
+	}
+}
+
+// A paragraph that states marL="0" indent="0" is overriding the master's
+// hanging indent, not leaving it unset — 0 and "absent" are different claims.
+// The inheritance ladder used to see MarginLeft == 0 and bake the master
+// bodyStyle's marL in, shifting every such paragraph right by the margin
+// (60px on the fidelity deck's slide27). The writer must re-emit the explicit
+// zero, or the override is lost on the next save.
+const zeroMarginMaster = `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<p:sldMaster xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships" xmlns:p="http://schemas.openxmlformats.org/presentationml/2006/main">
+  <p:cSld>
+    <p:spTree>
+      <p:nvGrpSpPr><p:cNvPr id="1" name=""/><p:cNvGrpSpPr/><p:nvPr/></p:nvGrpSpPr>
+      <p:grpSpPr/>
+    </p:spTree>
+  </p:cSld>
+  <p:clrMap bg1="lt1" tx1="dk1" bg2="lt2" tx2="dk2" accent1="accent1" accent2="accent2" accent3="accent3" accent4="accent4" accent5="accent5" accent6="accent6" hlink="hlink" folHlink="folHlink"/>
+  <p:sldLayoutIdLst/>
+  <p:txStyles>
+    <p:titleStyle><a:lvl1pPr><a:defRPr sz="4400"/></a:lvl1pPr></p:titleStyle>
+    <p:bodyStyle>
+      <a:lvl1pPr marL="342900" indent="-342900"><a:defRPr sz="3200"/></a:lvl1pPr>
+    </p:bodyStyle>
+    <p:otherStyle><a:lvl1pPr><a:defRPr sz="1800"/></a:lvl1pPr></p:otherStyle>
+  </p:txStyles>
+</p:sldMaster>`
+
+const zeroMarginSlideShape = `
+<p:sp>
+  <p:nvSpPr>
+    <p:cNvPr id="4" name="Body Placeholder"/>
+    <p:cNvSpPr><a:spLocks noGrp="1"/></p:cNvSpPr>
+    <p:nvPr><p:ph type="body" idx="1"/></p:nvPr>
+  </p:nvSpPr>
+  <p:spPr>
+    <a:xfrm><a:off x="500000" y="500000"/><a:ext cx="4000000" cy="3000000"/></a:xfrm>
+  </p:spPr>
+  <p:txBody>
+    <a:bodyPr/>
+    <a:lstStyle/>
+    <a:p><a:pPr marL="0" indent="0"/><a:r><a:rPr lang="en-US"/><a:t>ZERO</a:t></a:r></a:p>
+    <a:p><a:r><a:rPr lang="en-US"/><a:t>INHERIT</a:t></a:r></a:p>
+  </p:txBody>
+</p:sp>`
+
+func TestExplicitZeroMarginIsNotOverridden(t *testing.T) {
+	parts := zipParts(t, writeToBytes(t, New()))
+	parts["ppt/slides/slide1.xml"] = []byte(bodyPrSlide(zeroMarginSlideShape))
+	parts["ppt/slideMasters/slideMaster1.xml"] = []byte(zeroMarginMaster)
+	pkg := buildZip(t, parts)
+	pres, err := (&PPTXReader{}).ReadFromReader(bytes.NewReader(pkg), int64(len(pkg)))
+	if err != nil {
+		t.Fatalf("read the package: %v", err)
+	}
+	ph, ok := firstShapeOfType[*PlaceholderShape](pres)
+	if !ok {
+		t.Fatal("no body placeholder found")
+	}
+	paras := ph.GetParagraphs()
+	if len(paras) != 2 {
+		t.Fatalf("got %d paragraphs, want 2", len(paras))
+	}
+	if paras[0].alignment == nil {
+		t.Fatal("explicit-zero paragraph has no alignment")
+	}
+	if paras[0].alignment.MarginLeft != 0 || paras[0].alignment.Indent != 0 {
+		t.Errorf("explicit-zero paragraph came back marL=%d indent=%d; the master's hanging indent overrode the slide's marL=\"0\" indent=\"0\"",
+			paras[0].alignment.MarginLeft, paras[0].alignment.Indent)
+	}
+	if paras[1].alignment == nil || paras[1].alignment.MarginLeft != 342900 || paras[1].alignment.Indent != -342900 {
+		gotML, gotInd := int64(-1), int64(-1)
+		if paras[1].alignment != nil {
+			gotML, gotInd = paras[1].alignment.MarginLeft, paras[1].alignment.Indent
+		}
+		t.Errorf("unset paragraph should inherit the master's marL=342900 indent=-342900, got marL=%d indent=%d", gotML, gotInd)
+	}
+
+	// The explicit zero must survive a save as a stated attribute.
+	got := string(zipParts(t, writeToBytes(t, pres))["ppt/slides/slide1.xml"])
+	if !strings.Contains(got, `<a:pPr marL="0" indent="0">`) {
+		t.Errorf("written slide dropped the explicit marL=\"0\" indent=\"0\":\n%s", got)
+	}
+}

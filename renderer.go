@@ -329,6 +329,12 @@ func (r *renderer) subRenderer(img *image.RGBA) *renderer {
 }
 
 func (r *renderer) renderShape(shape Shape) {
+	// <p:cNvPr hidden="1">: PowerPoint keeps the shape in the file but never
+	// draws it — including whole groups, which hides their children too.
+	// Rendering it would paint hidden whiteout rectangles over real content.
+	if shape.base().hidden {
+		return
+	}
 	switch s := shape.(type) {
 	case *RichTextShape:
 		r.renderRichText(s)

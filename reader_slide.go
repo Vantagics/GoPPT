@@ -341,6 +341,7 @@ func applyPPrAttrs(p *Paragraph, attrs []xml.Attr) {
 		case "marL":
 			if v, err := strconv.ParseInt(attr.Value, 10, 64); err == nil {
 				p.alignment.MarginLeft = v
+				p.alignment.marLSet = true
 			}
 		case "marR":
 			if v, err := strconv.ParseInt(attr.Value, 10, 64); err == nil {
@@ -349,6 +350,7 @@ func applyPPrAttrs(p *Paragraph, attrs []xml.Attr) {
 		case "indent":
 			if v, err := strconv.ParseInt(attr.Value, 10, 64); err == nil {
 				p.alignment.Indent = v
+				p.alignment.indentSet = true
 			}
 		case "lvl":
 			if v, err := strconv.Atoi(attr.Value); err == nil {
@@ -678,6 +680,7 @@ func (r *PPTXReader) parseSlideXML(decoder *xml.Decoder, slide *Slide, rels []xm
 	var offX, offY, extCX, extCY int64
 	var chOffX, chOffY, chExtCX, chExtCY int64
 	var shapeName, shapeDescr string
+	var shapeHidden bool
 	var flipH, flipV bool
 	var shapeRotation int
 	var prstGeom string
@@ -744,6 +747,7 @@ func (r *PPTXReader) parseSlideXML(decoder *xml.Decoder, slide *Slide, rels []xm
 		group    *GroupShape
 		name     string
 		descr    string
+		hidden   bool
 		offX     int64
 		offY     int64
 		extCX    int64
@@ -817,6 +821,7 @@ func (r *PPTXReader) parseSlideXML(decoder *xml.Decoder, slide *Slide, rels []xm
 					offX, offY, extCX, extCY = 0, 0, 0, 0
 					chOffX, chOffY, chExtCX, chExtCY = 0, 0, 0, 0
 					shapeName = ""
+					shapeHidden = false
 					shapeDescr = ""
 					prstGeom = ""
 					shapeRotation = 0
@@ -832,6 +837,7 @@ func (r *PPTXReader) parseSlideXML(decoder *xml.Decoder, slide *Slide, rels []xm
 					state.phIdx = 0
 					offX, offY, extCX, extCY = 0, 0, 0, 0
 					shapeName = ""
+					shapeHidden = false
 					shapeDescr = ""
 					prstGeom = ""
 					shapeRotation = 0
@@ -854,6 +860,7 @@ func (r *PPTXReader) parseSlideXML(decoder *xml.Decoder, slide *Slide, rels []xm
 					currentDrawing = NewDrawingShape()
 					offX, offY, extCX, extCY = 0, 0, 0, 0
 					shapeName = ""
+					shapeHidden = false
 					shapeDescr = ""
 					prstGeom = ""
 					shapeRotation = 0
@@ -864,6 +871,7 @@ func (r *PPTXReader) parseSlideXML(decoder *xml.Decoder, slide *Slide, rels []xm
 					currentLine = NewLineShape()
 					offX, offY, extCX, extCY = 0, 0, 0, 0
 					shapeName = ""
+					shapeHidden = false
 					prstGeom = ""
 					shapeRotation = 0
 					pendingCustomPath = nil
@@ -878,6 +886,7 @@ func (r *PPTXReader) parseSlideXML(decoder *xml.Decoder, slide *Slide, rels []xm
 					state.inGraphicFrame = true
 					offX, offY, extCX, extCY = 0, 0, 0, 0
 					shapeName = ""
+					shapeHidden = false
 					prstGeom = ""
 					shapeRotation = 0
 					chartRelID = ""
@@ -1064,6 +1073,11 @@ func (r *PPTXReader) parseSlideXML(decoder *xml.Decoder, slide *Slide, rels []xm
 							shapeName = attr.Value
 						case "descr":
 							shapeDescr = attr.Value
+						case "hidden":
+							// <p:cNvPr hidden="1"> — PowerPoint keeps the shape
+							// in the file but never draws it. true/1 both mean
+							// hidden per the XML boolean rules.
+							shapeHidden = attr.Value == "1" || attr.Value == "true"
 						}
 					}
 				}
@@ -2803,6 +2817,7 @@ func (r *PPTXReader) parseSlideXML(decoder *xml.Decoder, slide *Slide, rels []xm
 						if g != nil {
 							g.name = top.name
 							g.description = top.descr
+							g.hidden = top.hidden
 							g.offsetX = top.offX
 							g.offsetY = top.offY
 							g.width = top.extCX
@@ -2842,6 +2857,7 @@ func (r *PPTXReader) parseSlideXML(decoder *xml.Decoder, slide *Slide, rels []xm
 					state.inSp = false
 					if state.isPlaceholder && currentPlaceholder != nil {
 						currentPlaceholder.name = shapeName
+						currentPlaceholder.hidden = shapeHidden
 						currentPlaceholder.description = shapeDescr
 						currentPlaceholder.offsetX = offX
 						currentPlaceholder.offsetY = offY
@@ -2860,6 +2876,7 @@ func (r *PPTXReader) parseSlideXML(decoder *xml.Decoder, slide *Slide, rels []xm
 						// Non-rect geometry → AutoShape
 						autoShape := NewAutoShape()
 						autoShape.name = shapeName
+						autoShape.hidden = shapeHidden
 						autoShape.description = shapeDescr
 						autoShape.offsetX = offX
 						autoShape.offsetY = offY
@@ -2943,6 +2960,7 @@ func (r *PPTXReader) parseSlideXML(decoder *xml.Decoder, slide *Slide, rels []xm
 						// Shape has blipFill — convert to DrawingShape
 						ds := NewDrawingShape()
 						ds.name = shapeName
+						ds.hidden = shapeHidden
 						ds.description = shapeDescr
 						ds.offsetX = offX
 						ds.offsetY = offY
@@ -2962,6 +2980,7 @@ func (r *PPTXReader) parseSlideXML(decoder *xml.Decoder, slide *Slide, rels []xm
 						}
 					} else if currentRichText != nil {
 						currentRichText.name = shapeName
+						currentRichText.hidden = shapeHidden
 						currentRichText.description = shapeDescr
 						currentRichText.offsetX = offX
 						currentRichText.offsetY = offY
@@ -3010,6 +3029,7 @@ func (r *PPTXReader) parseSlideXML(decoder *xml.Decoder, slide *Slide, rels []xm
 						// RichTextShape to carry the custom path, fill, and border.
 						rt := NewRichTextShape()
 						rt.name = shapeName
+						rt.hidden = shapeHidden
 						rt.description = shapeDescr
 						rt.offsetX = offX
 						rt.offsetY = offY
@@ -3050,6 +3070,7 @@ func (r *PPTXReader) parseSlideXML(decoder *xml.Decoder, slide *Slide, rels []xm
 						// but no text body — create an AutoShape so it gets rendered.
 						autoShape := NewAutoShape()
 						autoShape.name = shapeName
+						autoShape.hidden = shapeHidden
 						autoShape.description = shapeDescr
 						autoShape.offsetX = offX
 						autoShape.offsetY = offY
@@ -3119,6 +3140,7 @@ func (r *PPTXReader) parseSlideXML(decoder *xml.Decoder, slide *Slide, rels []xm
 					state.inPic = false
 					if currentDrawing != nil {
 						currentDrawing.name = shapeName
+						currentDrawing.hidden = shapeHidden
 						currentDrawing.description = shapeDescr
 						currentDrawing.offsetX = offX
 						currentDrawing.offsetY = offY
@@ -3140,6 +3162,7 @@ func (r *PPTXReader) parseSlideXML(decoder *xml.Decoder, slide *Slide, rels []xm
 					state.inCxnSp = false
 					if currentLine != nil {
 						currentLine.name = shapeName
+						currentLine.hidden = shapeHidden
 						currentLine.offsetX = offX
 						currentLine.offsetY = offY
 						currentLine.width = extCX
@@ -3170,6 +3193,7 @@ func (r *PPTXReader) parseSlideXML(decoder *xml.Decoder, slide *Slide, rels []xm
 					isTable := currentTable != nil
 					if isTable {
 						currentTable.name = shapeName
+						currentTable.hidden = shapeHidden
 						currentTable.offsetX = offX
 						currentTable.offsetY = offY
 						currentTable.width = extCX
@@ -3198,6 +3222,7 @@ func (r *PPTXReader) parseSlideXML(decoder *xml.Decoder, slide *Slide, rels []xm
 						}
 						if cs := r.readChartShape(zr, rels, slidePath, chartRelID, themeColors); cs != nil {
 							cs.name = shapeName
+							cs.hidden = shapeHidden
 							cs.offsetX = offX
 							cs.offsetY = offY
 							cs.width = extCX
@@ -3228,6 +3253,7 @@ func (r *PPTXReader) parseSlideXML(decoder *xml.Decoder, slide *Slide, rels []xm
 						}
 						ph := NewUnsupportedShape(reason)
 						ph.name = shapeName
+						ph.hidden = shapeHidden
 						ph.offsetX = offX
 						ph.offsetY = offY
 						ph.width = extCX
@@ -3465,6 +3491,7 @@ func (r *PPTXReader) parseSlideXML(decoder *xml.Decoder, slide *Slide, rels []xm
 					top := grpStack[len(grpStack)-1]
 					if top.name == "" {
 						top.name = shapeName
+						top.hidden = shapeHidden
 						top.descr = shapeDescr
 					}
 				}
@@ -4253,10 +4280,14 @@ func applyMasterTextStyles(ph *PlaceholderShape, m *masterTextStyles) {
 		if para.alignment.Horizontal == "" && s.align != "" {
 			para.alignment.Horizontal = HorizontalAlignment(s.align)
 		}
-		if para.alignment.MarginLeft == 0 && s.marL != 0 {
+		// marL/indent: a paragraph that stated the attribute explicitly keeps
+		// it even when the stated value is 0 — slide27's body paragraphs say
+		// marL="0" indent="0" to break free of the master's hanging indent,
+		// and baking the master's marL in shifted the whole text block right.
+		if !para.alignment.marLSet && s.marL != 0 {
 			para.alignment.MarginLeft = s.marL
 		}
-		if para.alignment.Indent == 0 && s.indent != 0 {
+		if !para.alignment.indentSet && s.indent != 0 {
 			para.alignment.Indent = s.indent
 		}
 		// Space before paragraphs. PowerPoint applies it to every paragraph,
@@ -4752,6 +4783,7 @@ func (r *PPTXReader) parseLayoutImages(data []byte, rels []xmlRelForRead, zr *zi
 	inLn := false
 	inLnSolidFill := false
 	isPH := false
+	shapeHidden := false
 	var offX, offY, extCX, extCY int64
 	var embedID string
 	var flipH, flipV bool
@@ -4793,6 +4825,7 @@ func (r *PPTXReader) parseLayoutImages(data []byte, rels []xmlRelForRead, zr *zi
 				embedID = ""
 				picAlpha = 0
 				cropL, cropT, cropR, cropB = 0, 0, 0, 0
+				shapeHidden = false
 			case "sp":
 				inSp = true
 				isPH = false
@@ -4808,6 +4841,7 @@ func (r *PPTXReader) parseLayoutImages(data []byte, rels []xmlRelForRead, zr *zi
 				offX, offY, extCX, extCY = 0, 0, 0, 0
 				flipH, flipV = false, false
 				currentLine = NewLineShape()
+				shapeHidden = false
 			case "nvSpPr":
 				if inSp {
 					inNvSpPr = true
@@ -4823,6 +4857,14 @@ func (r *PPTXReader) parseLayoutImages(data []byte, rels []xmlRelForRead, zr *zi
 			case "ph":
 				if inNvPr {
 					isPH = true
+				}
+			case "cNvPr":
+				if inNvSpPr {
+					for _, attr := range t.Attr {
+						if attr.Name.Local == "hidden" {
+							shapeHidden = attr.Value == "1" || attr.Value == "true"
+						}
+					}
 				}
 			case "spPr":
 				if inPic || (inSp && !inNvSpPr) || (inCxnSp && !inNvSpPr) {
@@ -5390,6 +5432,7 @@ func (r *PPTXReader) parseLayoutImages(data []byte, rels []xmlRelForRead, zr *zi
 								ds.cropTop = cropT
 								ds.cropRight = cropR
 								ds.cropBottom = cropB
+								ds.hidden = shapeHidden
 								shapes = append(shapes, ds)
 							}
 							break
@@ -5419,6 +5462,7 @@ func (r *PPTXReader) parseLayoutImages(data []byte, rels []xmlRelForRead, zr *zi
 						currentRichText.width = extCX
 						currentRichText.height = extCY
 						currentRichText.textAnchor = textAnchor
+						currentRichText.hidden = shapeHidden
 						shapes = append(shapes, currentRichText)
 					}
 				}
@@ -5475,6 +5519,7 @@ func (r *PPTXReader) parseLayoutImages(data []byte, rels []xmlRelForRead, zr *zi
 					currentLine.height = extCY
 					currentLine.flipHorizontal = flipH
 					currentLine.flipVertical = flipV
+					currentLine.hidden = shapeHidden
 					if currentLine.lineWidth == 0 {
 						currentLine.lineWidth = 1
 					}
