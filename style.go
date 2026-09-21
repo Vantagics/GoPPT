@@ -98,6 +98,7 @@ func hexVal(c byte) int {
 type Font struct {
 	Name          string
 	NameEA        string // East Asian font name (from <a:ea> element)
+	NameSym       string // symbol font name (from <a:sym> element) — carries the PUA U+F000-F0FF glyphs
 	Size          int    // in points
 	Bold          bool
 	Italic        bool
@@ -106,6 +107,7 @@ type Font struct {
 	Color         Color
 	Superscript   bool
 	Subscript     bool
+	Shadow        *Shadow // run-level text shadow, from <a:rPr><a:effectLst><a:outerShdw>
 }
 
 // UnderlineType represents the underline style.

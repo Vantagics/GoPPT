@@ -2226,6 +2226,24 @@ func (r *PPTXReader) parseSlideXML(decoder *xml.Decoder, slide *Slide, rels []xm
 						defFont.NameEA = n
 					}
 				}
+			case "sym":
+				// Symbol font: the declaration that carries the run's PUA
+				// characters (U+F000-F0FF). PowerPoint writes it for runs the
+				// user typed with a symbol font selected; without it the
+				// arrows and bullets those runs hold draw as tofu.
+				if state.inRunProps && currentFont != nil {
+					if n := typefaceOf(pres, t.Attr); n != "" {
+						currentFont.NameSym = n
+					}
+				} else if state.inDefRPr && state.inLstStyleLvl1 && lstStyleFont != nil {
+					if n := typefaceOf(pres, t.Attr); n != "" {
+						lstStyleFont.NameSym = n
+					}
+				} else if state.inDefRPr && defFont != nil {
+					if n := typefaceOf(pres, t.Attr); n != "" {
+						defFont.NameSym = n
+					}
+				}
 			case "t":
 				if state.inTcRun {
 					state.inTcText = true
@@ -2542,7 +2560,12 @@ func (r *PPTXReader) parseSlideXML(decoder *xml.Decoder, slide *Slide, rels []xm
 					}
 				}
 			case "effectLst":
-				if state.inSpPr && !state.inLn {
+				// Two homes: inside <p:spPr> it is the shape's own shadow
+				// (attached when the shape closes), inside <a:rPr> it is the
+				// run's text shadow (attached to currentFont when the element
+				// closes). A run is never inside spPr, so the two cannot be
+				// confused.
+				if (state.inSpPr && !state.inLn) || state.inRunProps {
 					state.inEffectLst = true
 				}
 			case "outerShdw":
@@ -3339,6 +3362,14 @@ func (r *PPTXReader) parseSlideXML(decoder *xml.Decoder, slide *Slide, rels []xm
 				state.inOuterShdw = false
 			case "effectLst":
 				state.inEffectLst = false
+				// The run's text shadow completes here: hand the pending
+				// outerShdw to the font being built. The shape path attaches
+				// the same variable when the shape closes, so only consume it
+				// in a run context.
+				if state.inRunProps && pendingShadow != nil && currentFont != nil {
+					currentFont.Shadow = pendingShadow
+					pendingShadow = nil
+				}
 			case "spPr", "grpSpPr":
 				state.inSpPr = false
 				state.inLn = false
@@ -5013,6 +5044,22 @@ func (r *PPTXReader) parseLayoutImages(data []byte, rels []xmlRelForRead, zr *zi
 				} else if inRunProps && currentFont != nil {
 					if n := typefaceOf(pres, t.Attr); n != "" {
 						currentFont.NameEA = n
+					}
+				}
+			case "sym":
+				// Same declaration the main scanner reads: a layout-sourced
+				// symbol run without it draws its PUA characters as tofu.
+				if inDefRPr && lstStyleFont != nil {
+					if n := typefaceOf(pres, t.Attr); n != "" {
+						lstStyleFont.NameSym = n
+					}
+				} else if inPPrDefRPr && defFont != nil {
+					if n := typefaceOf(pres, t.Attr); n != "" {
+						defFont.NameSym = n
+					}
+				} else if inRunProps && currentFont != nil {
+					if n := typefaceOf(pres, t.Attr); n != "" {
+						currentFont.NameSym = n
 					}
 				}
 			case "br":

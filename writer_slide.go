@@ -712,6 +712,22 @@ func (w *PPTXWriter) writeTextRunXMLAt(tr *TextRun, indent string) string {
 %s<a:solidFill><a:srgbClr val="%s"/></a:solidFill>`, inner, colorRGB(font.Color))
 	}
 
+	// Run-level text shadow: CT_TextCharacterProperties puts effectLst after
+	// the fill and before the latin typeface. The model keeps the geometry in
+	// points and degrees, the file wants EMU and 60000ths of a degree, and the
+	// colour alpha is a separate <a:alpha> child in thousandths of a percent.
+	effect := ""
+	if font.Shadow != nil && font.Shadow.Visible {
+		effect = fmt.Sprintf(`
+%s<a:effectLst><a:outerShdw blurRad="%d" dist="%d" dir="%d" rotWithShape="0"><a:srgbClr val="%s"><a:alpha val="%d"/></a:srgbClr></a:outerShdw></a:effectLst>`,
+			inner,
+			font.Shadow.BlurRadius*12700,
+			font.Shadow.Distance*12700,
+			font.Shadow.Direction*60000,
+			colorRGB(font.Shadow.Color),
+			font.Shadow.Alpha*1000)
+	}
+
 	latin := ""
 	if font.Name != "" {
 		latin = fmt.Sprintf(`
@@ -722,6 +738,13 @@ func (w *PPTXWriter) writeTextRunXMLAt(tr *TextRun, indent string) string {
 	if font.NameEA != "" {
 		ea = fmt.Sprintf(`
 %s<a:ea typeface="%s"/>`, inner, xmlEscape(font.NameEA))
+	}
+
+	// <a:sym> sits between <a:ea> and the hyperlink in CT_TextCharacterProperties.
+	sym := ""
+	if font.NameSym != "" {
+		sym = fmt.Sprintf(`
+%s<a:sym typeface="%s"/>`, inner, xmlEscape(font.NameSym))
 	}
 
 	// The relationship id is a placeholder the slide writer replaces once every
@@ -743,11 +766,11 @@ func (w *PPTXWriter) writeTextRunXMLAt(tr *TextRun, indent string) string {
 	}
 
 	return fmt.Sprintf(`%s<a:r>
-%s<a:rPr%s>%s%s%s%s
+%s<a:rPr%s>%s%s%s%s%s%s
 %s</a:rPr>
 %s<a:t>%s</a:t>
 %s</a:r>
-`, indent, inner, attrs, solidFill, latin, ea, hlink, inner, inner, xmlEscape(tr.text), indent)
+`, indent, inner, attrs, solidFill, effect, latin, ea, sym, hlink, inner, inner, xmlEscape(tr.text), indent)
 }
 
 // --- Geometry ---

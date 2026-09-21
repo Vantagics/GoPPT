@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"image"
 	"image/color"
+	"strings"
 	"testing"
 )
 
@@ -423,6 +424,200 @@ func TestRunBaselineRoundTrips(t *testing.T) {
 	slideXML = string(outParts["ppt/slides/slide1.xml"])
 	if !bytes.Contains([]byte(slideXML), []byte(`baseline="-25000"`)) {
 		t.Errorf("subscript run wrote no baseline=\"-25000\":\n%s", slideXML)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// <a:rPr><a:effectLst><a:outerShdw> — run-level text shadow, and <a:sym>.
+// ---------------------------------------------------------------------------
+
+func TestRunShadowRoundTrips(t *testing.T) {
+	slide := `<p:sp>
+  <p:nvSpPr><p:cNvPr id="2" name="T"/><p:cNvSpPr txBox="1"/><p:nvPr/></p:nvSpPr>
+  <p:spPr>
+    <a:xfrm><a:off x="500000" y="500000"/><a:ext cx="3000000" cy="800000"/></a:xfrm>
+    <a:prstGeom prst="rect"><a:avLst/></a:prstGeom>
+  </p:spPr>
+  <p:txBody><a:bodyPr/><a:lstStyle/>
+    <a:p><a:r><a:rPr lang="en-US" sz="1600" b="1" dirty="0"><a:solidFill><a:srgbClr val="302E27"/></a:solidFill><a:effectLst><a:outerShdw blurRad="38100" dist="38100" dir="2700000" algn="tl"><a:srgbClr val="000000"><a:alpha val="43137"/></a:srgbClr></a:outerShdw></a:effectLst><a:sym typeface="Symbol"/></a:rPr><a:t>x</a:t></a:r></a:p>
+  </p:txBody>
+</p:sp>`
+	parts := zipParts(t, writeToBytes(t, New()))
+	parts["ppt/slides/slide1.xml"] = []byte(bodyPrSlide(slide))
+	pkg := buildZip(t, parts)
+	pres, err := (&PPTXReader{}).ReadFromReader(bytes.NewReader(pkg), int64(len(pkg)))
+	if err != nil {
+		t.Fatalf("read the package: %v", err)
+	}
+	sh, ok := firstShapeOfType[*RichTextShape](pres)
+	if !ok {
+		t.Fatal("no RichTextShape found")
+	}
+	paras := sh.GetParagraphs()
+	if len(paras) != 1 {
+		t.Fatalf("got %d paragraphs, want 1", len(paras))
+	}
+	var font *Font
+	for _, elem := range paras[0].elements {
+		if tr, ok := elem.(*TextRun); ok {
+			font = tr.font
+		}
+	}
+	if font == nil {
+		t.Fatal("no text run found")
+	}
+	// The reader's units: blur and distance in points, direction in degrees,
+	// alpha in percent.
+	if font.Shadow == nil || !font.Shadow.Visible {
+		t.Fatalf("run shadow not read: %+v", font.Shadow)
+	}
+	if font.Shadow.BlurRadius != 3 || font.Shadow.Distance != 3 {
+		t.Errorf("shadow blur/dist = %d/%d pt, want 3/3", font.Shadow.BlurRadius, font.Shadow.Distance)
+	}
+	if font.Shadow.Direction != 45 {
+		t.Errorf("shadow direction = %d°, want 45 (2700000 in 60000ths)", font.Shadow.Direction)
+	}
+	if font.Shadow.Alpha != 43 {
+		t.Errorf("shadow alpha = %d, want 43 (43137 thousandths)", font.Shadow.Alpha)
+	}
+	// The reader bakes the alpha into the colour's own byte as well (the shape
+	// shadow convention); the renderer takes the real alpha from Shadow.Alpha.
+	if !strings.HasSuffix(font.Shadow.Color.ARGB, "000000") {
+		t.Errorf("shadow colour = %q, want the black …000000", font.Shadow.Color.ARGB)
+	}
+	if font.NameSym != "Symbol" {
+		t.Errorf("sym typeface = %q, want Symbol — <a:sym> is what carries the run's PUA glyphs", font.NameSym)
+	}
+
+	// The writer emits PowerPoint's own values back. The package bytes are a
+	// zipped archive, so search inside the unpacked slide part.
+	p2 := New()
+	shape := p2.GetActiveSlide().CreateRichTextShape()
+	tr := shape.CreateTextRun("x")
+	f := NewFont()
+	f.Size = 16
+	f.Shadow = NewShadow()
+	f.Shadow.Visible = true
+	f.Shadow.BlurRadius = 3
+	f.Shadow.Distance = 3
+	f.Shadow.Direction = 45
+	f.Shadow.Color = NewColor("000000")
+	f.Shadow.Alpha = 43
+	f.NameSym = "Symbol"
+	tr.SetFont(f)
+	outParts := zipParts(t, writeToBytes(t, p2))
+	slideXML := string(outParts["ppt/slides/slide1.xml"])
+	for _, want := range []string{
+		`<a:outerShdw blurRad="38100" dist="38100" dir="2700000"`,
+		`<a:alpha val="43000"/>`, // the model keeps alpha in percent: 43137‰ rounds to 43%
+		`<a:sym typeface="Symbol"/>`,
+	} {
+		if !bytes.Contains([]byte(slideXML), []byte(want)) {
+			t.Errorf("slide part is missing %s:\n%s", want, slideXML)
+		}
+	}
+}
+
+// TestSymbolPUARendersAsTheSymFont pins the rendering half of <a:sym>: a
+// U+F000-F0FF character draws from the font the run declares with <a:sym>, not
+// as the declared text face's .notdef box. slide25 of the comparison deck
+// writes "1 → 2" as U+F0AE with <a:sym typeface="Symbol"/> — the box version
+// of that arrow was one of the largest remaining differences from PowerPoint.
+func TestSymbolPUARendersAsTheSymFont(t *testing.T) {
+	fc := NewFontCache()
+	if !fc.HasFont("Symbol", false, false) || !fc.CoversRune("Symbol", false, false, 0xF0AE) {
+		t.Skip("no installed Symbol face covers U+F0AE")
+	}
+	declared := installedFaceLacking(fc, "\uf0ae")
+	if declared == "" {
+		t.Skip("every installed face draws U+F0AE; the boxed case cannot be constructed")
+	}
+	// The arrow via <a:sym> and the same character without it must not be the
+	// same drawing: without the sym declaration the run falls to the declared
+	// face and boxes.
+	pres := New()
+	shape := pres.GetActiveSlide().CreateRichTextShape()
+	shape.BaseShape.SetOffsetX(400000).SetOffsetY(400000)
+	shape.BaseShape.SetWidth(6000000).SetHeight(1500000)
+	run := shape.CreateTextRun("\uf0ae")
+	run.GetFont().SetName(declared).SetSize(40)
+	run.GetFont().NameSym = "Symbol"
+	opts := DefaultRenderOptions()
+	opts.Width = 640
+	opts.FontCache = fc
+	img, err := pres.SlideToImage(0, opts)
+	if err != nil {
+		t.Fatalf("render with sym: %v", err)
+	}
+	rect := emuRect(t, pres, 400000, 400000, 6000000, 1500000, 640)
+	symInk := countInkIn(img, rect)
+	if symInk == 0 {
+		t.Fatal("U+F0AE rendered no ink at all with the sym font declared")
+	}
+
+	run.GetFont().NameSym = ""
+	img2, err := pres.SlideToImage(0, opts)
+	if err != nil {
+		t.Fatalf("render without sym: %v", err)
+	}
+	plainInk := countInkIn(img2, rect)
+	if plainInk == symInk {
+		t.Errorf("U+F0AE inked %d pixels with and without <a:sym>: identical counts mean the sym "+
+			"declaration was ignored and both drew the declared face's .notdef box", plainInk)
+	}
+}
+
+// TestTextShadowAddsOffsetInk pins the draw half of the run shadow: the glyph
+// pass is repeated offset along the shadow direction before the real text, so
+// a shadowed run puts more ink on the canvas than the same run without one.
+// The shadow's distance used to be multiplied by a pixels-per-EMU scale
+// directly, which rounds any realistic distance to zero — an invisible shadow.
+// The blur is deliberately zero: blur spreads ink even at a zero offset, which
+// would mask the lost displacement, and the offset alone is the unit bug.
+func TestTextShadowAddsOffsetInk(t *testing.T) {
+	fc := NewFontCache()
+	render := func() int {
+		pres := New()
+		shape := pres.GetActiveSlide().CreateRichTextShape()
+		shape.BaseShape.SetOffsetX(400000).SetOffsetY(400000)
+		shape.BaseShape.SetWidth(6000000).SetHeight(1500000)
+		run := shape.CreateTextRun("H")
+		run.GetFont().SetName("Arial").SetSize(40)
+		run.GetFont().Shadow = NewShadow()
+		run.GetFont().Shadow.Visible = true
+		run.GetFont().Shadow.BlurRadius = 0
+		run.GetFont().Shadow.Distance = 6
+		run.GetFont().Shadow.Direction = 45
+		run.GetFont().Shadow.Color = NewColor("000000")
+		run.GetFont().Shadow.Alpha = 100
+		opts := DefaultRenderOptions()
+		opts.Width = 640
+		opts.FontCache = fc
+		img, err := pres.SlideToImage(0, opts)
+		if err != nil {
+			t.Fatalf("render: %v", err)
+		}
+		return countInkIn(img, emuRect(t, pres, 400000, 400000, 6000000, 1500000, 640))
+	}
+	plain := func() int {
+		pres := New()
+		shape := pres.GetActiveSlide().CreateRichTextShape()
+		shape.BaseShape.SetOffsetX(400000).SetOffsetY(400000)
+		shape.BaseShape.SetWidth(6000000).SetHeight(1500000)
+		run := shape.CreateTextRun("H")
+		run.GetFont().SetName("Arial").SetSize(40)
+		opts := DefaultRenderOptions()
+		opts.Width = 640
+		opts.FontCache = fc
+		img, err := pres.SlideToImage(0, opts)
+		if err != nil {
+			t.Fatalf("render: %v", err)
+		}
+		return countInkIn(img, emuRect(t, pres, 400000, 400000, 6000000, 1500000, 640))
+	}
+	plainInk, shadowedInk := plain(), render()
+	if shadowedInk <= plainInk {
+		t.Errorf("shadowed run inked %d pixels vs %d plain: the shadow added nothing, so the offset is probably zero", shadowedInk, plainInk)
 	}
 }
 

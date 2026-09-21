@@ -2994,7 +2994,10 @@ func (r *renderer) renderShadow(shadow *Shadow, rect image.Rectangle) {
 		return
 	}
 	rad := float64(shadow.Direction) * math.Pi / 180.0
-	dist := float64(shadow.Distance) * r.scaleX
+	// Distance is in points and scaleX is pixels per EMU: the offset used to
+	// be dist*scaleX, which at 1600 px wide rounds to zero for any realistic
+	// distance — shape shadows were parsed but never visibly displaced.
+	dist := float64(shadow.Distance) * 12700 * r.scaleX
 	dx := int(dist * math.Cos(rad))
 	dy := int(dist * math.Sin(rad))
 	shadowColor := argbToRGBA(shadow.Color)
@@ -3038,7 +3041,8 @@ func (r *renderer) renderShadowRounded(shadow *Shadow, rect image.Rectangle, rad
 		return
 	}
 	rad := float64(shadow.Direction) * math.Pi / 180.0
-	dist := float64(shadow.Distance) * r.scaleX
+	// Same points→EMU→pixels conversion as renderShadow.
+	dist := float64(shadow.Distance) * 12700 * r.scaleX
 	dx := int(dist * math.Cos(rad))
 	dy := int(dist * math.Sin(rad))
 	shadowColor := argbToRGBA(shadow.Color)
@@ -4719,9 +4723,10 @@ func (r *renderer) classCandidates(f *Font, class textClass) []string {
 		// East Asian text is declared by <a:ea> alone.
 		declared = append(declared, f.NameEA)
 	case textClassSymbol:
-		// A symbol has no declaration of its own in OOXML, so either of the
-		// run's two font names may be the one that carries the glyphs.
-		declared = append(declared, f.NameEA, f.Name)
+		// A symbol declared with <a:sym> names the font that carries the run's
+		// private-use glyphs, so it outranks everything else. Otherwise either
+		// of the run's two font names may be the one that carries the glyphs.
+		declared = append(declared, f.NameSym, f.NameEA, f.Name)
 	}
 
 	var chain []string
@@ -5531,6 +5536,23 @@ func (r *renderer) drawParagraphs(paragraphs []*Paragraph, x, y, w, h int, ancho
 				}
 			}
 
+			// Run-level text shadow: the glyph pass is repeated offset along
+			// the shadow direction and blended with the shadow colour before
+			// the real text goes down on top of it. Same geometry as the
+			// shape shadow: distance in points scaled to pixels, direction in
+			// degrees with y growing downward.
+			if run.font != nil && run.font.Shadow != nil && run.font.Shadow.Visible && !r.draft {
+				sh := run.font.Shadow
+				rad := float64(sh.Direction) * math.Pi / 180.0
+				// Distance is in points; scaleX is pixels per EMU, so the
+				// points go to EMU first (12700 per point).
+				dist := float64(sh.Distance) * 12700 * r.scaleX
+				dx := int(dist * math.Cos(rad))
+				dy := int(dist * math.Sin(rad))
+				blurPx := int(float64(sh.BlurRadius)*12700*r.scaleX + 0.5)
+				r.drawTextShadow(run.text, run.face, drawX+dx, runBaseline+dy, sh, blurPx)
+			}
+
 			d := &font.Drawer{
 				Dst:  r.img,
 				Src:  image.NewUniform(drawSrc(fc)),
@@ -5569,6 +5591,138 @@ func (r *renderer) drawParagraphs(paragraphs []*Paragraph, x, y, w, h int, ancho
 
 		curY += lh
 		curY += li.spaceAfter
+	}
+}
+
+// drawTextShadow draws the shadow copy of a text run: the glyphs rasterised at
+// the already-offset baseline (x, y), coloured and blended at the shadow's
+// alpha. With a blur radius the glyphs go into an offscreen alpha mask that is
+// box-blurred (three passes, which tracks PowerPoint's gaussian closely enough
+// at deck render sizes) and composited through the mask, so the shadow is soft
+// the way the golden export shows it instead of a hard second glyph.
+func (r *renderer) drawTextShadow(text string, face font.Face, x, y int, sh *Shadow, blurPx int) {
+	if text == "" || face == nil {
+		return
+	}
+	scol := argbToRGBA(sh.Color)
+	baseA := float64(sh.Alpha) / 100
+	if blurPx < 1 {
+		c := scol
+		c.A = uint8(baseA*255 + 0.5)
+		d := &font.Drawer{
+			Dst:  r.img,
+			Src:  image.NewUniform(drawSrc(c)),
+			Face: face,
+			Dot:  fixed.P(x, y),
+		}
+		d.DrawString(text)
+		return
+	}
+
+	// Offscreen coverage mask, padded wide enough for the blur to spread.
+	metrics := face.Metrics()
+	asc := metrics.Ascent.Ceil()
+	desc := metrics.Descent.Ceil()
+	adv := measureStringWithKern(face, text).Ceil()
+	pad := blurPx*3 + 2
+	bx := x - pad
+	by := y - asc - pad
+	bw := adv + 2*pad
+	bh := asc + desc + 2*pad
+	if bw <= 0 || bh <= 0 || bx >= r.img.Bounds().Max.X || by >= r.img.Bounds().Max.Y {
+		return
+	}
+	mask := image.NewAlpha(image.Rect(0, 0, bw, bh))
+	d := &font.Drawer{
+		Dst:  mask,
+		Src:  image.NewUniform(color.Alpha{A: 255}),
+		Face: face,
+		Dot:  fixed.P(pad, pad+asc),
+	}
+	d.DrawString(text)
+	boxBlurAlpha(mask, blurPx, 3)
+
+	bounds := r.img.Bounds()
+	for py := 0; py < bh; py++ {
+		imgY := by + py
+		if imgY < bounds.Min.Y || imgY >= bounds.Max.Y {
+			continue
+		}
+		for px := 0; px < bw; px++ {
+			a := mask.AlphaAt(px, py).A
+			if a == 0 {
+				continue
+			}
+			imgX := bx + px
+			if imgX < bounds.Min.X || imgX >= bounds.Max.X {
+				continue
+			}
+			c := scol
+			c.A = uint8(float64(a)*baseA + 0.5)
+			if c.A > 0 {
+				r.blendPixel(imgX, imgY, c)
+			}
+		}
+	}
+}
+
+// boxBlurAlpha box-blurs an alpha mask in place. Three passes of a box blur
+// approximate a gaussian; radius is in pixels.
+func boxBlurAlpha(m *image.Alpha, radius, passes int) {
+	if radius < 1 || passes < 1 {
+		return
+	}
+	b := m.Bounds()
+	w, h := b.Dx(), b.Dy()
+	if w == 0 || h == 0 {
+		return
+	}
+	src := make([]uint8, w*h)
+	dst := make([]uint8, w*h)
+	for y := 0; y < h; y++ {
+		for x := 0; x < w; x++ {
+			src[y*w+x] = m.AlphaAt(b.Min.X+x, b.Min.Y+y).A
+		}
+	}
+	div := 2*radius + 1
+	clamp := func(v, lo, hi int) int {
+		if v < lo {
+			return lo
+		}
+		if v > hi {
+			return hi
+		}
+		return v
+	}
+	for p := 0; p < passes; p++ {
+		// Horizontal, with a running sum over the window.
+		for y := 0; y < h; y++ {
+			row := y * w
+			sum := 0
+			for x := -radius; x <= radius; x++ {
+				sum += int(src[row+clamp(x, 0, w-1)])
+			}
+			for x := 0; x < w; x++ {
+				dst[row+x] = uint8(sum / div)
+				sum += int(src[row+clamp(x+radius+1, 0, w-1)]) - int(src[row+clamp(x-radius, 0, w-1)])
+			}
+		}
+		// Vertical, same running sum over the horizontal result.
+		for x := 0; x < w; x++ {
+			sum := 0
+			for y := -radius; y <= radius; y++ {
+				sum += int(dst[clamp(y, 0, h-1)*w+x])
+			}
+			for y := 0; y < h; y++ {
+				src[y*w+x] = uint8(sum / div)
+				sum += int(dst[clamp(y+radius+1, 0, h-1)*w+x]) - int(dst[clamp(y-radius, 0, h-1)*w+x])
+			}
+		}
+	}
+	for y := 0; y < h; y++ {
+		for x := 0; x < w; x++ {
+			m.SetAlpha(b.Min.X+x, b.Min.Y+y, color.Alpha{A: src[y*w+x]})
+		}
 	}
 }
 
@@ -5955,6 +6109,11 @@ func isSymbolRune(r rune) bool {
 		return true // Miscellaneous Symbols and Arrows (⬛ ⬅ ⭐)
 	case r >= 0x2300 && r <= 0x23FF:
 		return true // Miscellaneous Technical (⌚ ⏰ ⏳), drawn as emoji
+	case r >= 0xF000 && r <= 0xF0FF:
+		// Symbol-font private use: the TrueType cmap of Symbol, Wingdings and
+		// Webdings maps U+F000+byte, and a run declares that font with
+		// <a:sym>. PowerPoint writes these code points verbatim into <a:t>.
+		return true
 	}
 	return false
 }
