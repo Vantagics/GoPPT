@@ -39,13 +39,23 @@ func probeRuns(path string, only int) {
 					walk(g.GetShapes(), depth+1)
 					continue
 				}
-				rt, ok := s.(*ppt.RichTextShape)
+				rt, ok := s.(runCarrier)
 				if !ok {
 					continue
 				}
-				fmt.Printf("slide%02d %s box=(%d,%d %dx%d)\n", i+1,
-					strings.Repeat("  ", depth), rt.GetOffsetX(), rt.GetOffsetY(), rt.GetWidth(), rt.GetHeight())
+				fmt.Printf("slide%02d %s%s box=(%d,%d %dx%d)\n", i+1,
+					strings.Repeat("  ", depth), shapeLabel(s),
+					rt.GetOffsetX(), rt.GetOffsetY(), rt.GetWidth(), rt.GetHeight())
 				for pi, p := range rt.GetParagraphs() {
+					// Paragraph properties first: they decide where the runs
+					// land, and a run list alone cannot show a wrapping or a
+					// hanging-indent bug.
+					if al := p.GetAlignment(); al != nil {
+						fmt.Printf("  p%d algn=%q lvl=%d marL=%d marR=%d indent=%d\n",
+							pi, al.Horizontal, al.Level, al.MarginLeft, al.MarginRight, al.Indent)
+					} else {
+						fmt.Printf("  p%d algn=<nil>\n", pi)
+					}
 					for _, e := range p.GetElements() {
 						tr, ok := e.(*ppt.TextRun)
 						if !ok {
@@ -57,14 +67,49 @@ func probeRuns(path string, only int) {
 							fmt.Printf("  p%d run %s (no font)\n", pi, quoteASCII(tr.GetText()))
 							continue
 						}
-						fmt.Printf("  p%d run %s sz=%d bold=%v latin=%q ea=%q color=%s\n",
-							pi, quoteASCII(tr.GetText()), f.Size, f.Bold, f.Name, f.NameEA, describeARGB(f.Color.ARGB))
+						fmt.Printf("  p%d run %s sz=%d bold=%v italic=%v latin=%q ea=%q color=%s\n",
+							pi, quoteASCII(tr.GetText()), f.Size, f.Bold, f.Italic, f.Name, f.NameEA, describeARGB(f.Color.ARGB))
 					}
 				}
 			}
 		}
 		walk(slide.GetShapes(), 0)
 	}
+}
+
+// runCarrier is the part of a shape this probe needs. RichTextShape has it, and
+// so does every shape that embeds one.
+//
+// Asking for the interface rather than *RichTextShape matters: PlaceholderShape
+// embeds RichTextShape, and a type assertion to the concrete embedded type does
+// not match a pointer to the outer one. Asserting the concrete type silently
+// skipped every placeholder in the deck — which is where the inherited text
+// actually lives, so the probe was blind to the very shapes it was written to
+// explain.
+type runCarrier interface {
+	GetParagraphs() []*ppt.Paragraph
+	GetOffsetX() int64
+	GetOffsetY() int64
+	GetWidth() int64
+	GetHeight() int64
+}
+
+// shapeLabel names the shape so a report can be read against the XML.
+func shapeLabel(s ppt.Shape) string {
+	if ph, ok := s.(*ppt.PlaceholderShape); ok {
+		return fmt.Sprintf("ph:%-7s ", ph.GetPlaceholderType())
+	}
+	switch s.GetType() {
+	case ppt.ShapeTypeRichText:
+		return "textbox  "
+	case ppt.ShapeTypeTable:
+		return "table    "
+	case ppt.ShapeTypeChart:
+		return "chart    "
+	case ppt.ShapeTypeAutoShape:
+		return "autoshape"
+	}
+	return fmt.Sprintf("%-9s", s.GetType())
 }
 
 // quoteASCII renders text as an ASCII-only quoted string, escaping every rune
