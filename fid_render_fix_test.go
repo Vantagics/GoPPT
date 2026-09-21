@@ -897,19 +897,28 @@ func TestMasterBodyStyleBulletIsInherited(t *testing.T) {
 	}
 }
 
-// PowerPoint applies space before the *first* paragraph of a text body too,
-// so the renderer must not skip it the way it skips nothing else.
-func TestFirstParagraphSpaceBeforeShiftsInk(t *testing.T) {
+// The block's FIRST paragraph never gets its space-before — not the declared
+// kind, not the inherited kind. The COM variants of slide1 settled it: deleting
+// every declared spcBef and enlarging them fivefold both rendered identical to
+// the original. So the renderer must skip a first paragraph's space while a
+// later paragraph keeps its own.
+func TestFirstParagraphSpaceBeforeIsIgnored(t *testing.T) {
 	fc := NewFontCache()
-	firstInkRow := func(spaceBefore int) int {
+	renderInkRows := func(spacings ...int) []int {
 		pres := New()
 		shape := pres.GetActiveSlide().CreateRichTextShape()
 		shape.BaseShape.SetOffsetX(400000).SetOffsetY(400000)
-		shape.BaseShape.SetWidth(6000000).SetHeight(2000000)
-		run := shape.CreateTextRun("H")
-		run.GetFont().SetName("Arial").SetSize(24)
-		run.GetFont().Color = NewColor("000000")
-		shape.GetParagraphs()[0].spaceBefore = spaceBefore
+		shape.BaseShape.SetWidth(6000000).SetHeight(4000000)
+		for i, sp := range spacings {
+			if i > 0 {
+				shape.CreateParagraph()
+			}
+			paras := shape.GetParagraphs()
+			run := paras[len(paras)-1].CreateTextRun("H")
+			run.GetFont().SetName("Arial").SetSize(24)
+			run.GetFont().Color = NewColor("000000")
+			paras[len(paras)-1].spaceBefore = sp
+		}
 		opts := DefaultRenderOptions()
 		opts.Width = 640
 		opts.FontCache = fc
@@ -917,21 +926,37 @@ func TestFirstParagraphSpaceBeforeShiftsInk(t *testing.T) {
 		if err != nil {
 			t.Fatalf("render: %v", err)
 		}
-		rect := emuRect(t, pres, 400000, 400000, 6000000, 2000000, 640)
+		rect := emuRect(t, pres, 400000, 400000, 6000000, 4000000, 640)
+		var rows []int
+		inInk := false
 		for y := rect.Min.Y; y < rect.Max.Y; y++ {
+			ink := false
 			for x := rect.Min.X; x < rect.Max.X; x++ {
 				r, g, b, a := img.At(x, y).RGBA()
 				if a != 0 && (r+g+b)/3 < 20000 {
-					return y
+					ink = true
+					break
 				}
 			}
+			if ink && !inInk {
+				rows = append(rows, y)
+			}
+			inInk = ink
 		}
-		return rect.Max.Y
+		return rows
 	}
-	plain := firstInkRow(0)
-	spaced := firstInkRow(1000) // 10pt: 8-9px at this scale
-	if spaced-plain < 5 {
-		t.Errorf("first paragraph ink row moved %d px with spaceBefore=1000 (%d vs %d); the first paragraph's space was skipped", spaced-plain, spaced, plain)
+	// A first paragraph's space-before moves nothing.
+	if plain, spaced := renderInkRows(0), renderInkRows(1000); len(plain) < 1 || len(spaced) < 1 || spaced[0] != plain[0] {
+		t.Errorf("first paragraph ink row moved with spaceBefore=1000 (%v vs %v); the first paragraph's space must be ignored", spaced, plain)
+	}
+	// A second paragraph's space-before still moves its own line down.
+	base := renderInkRows(0, 0)
+	spaced := renderInkRows(0, 1000) // 10pt ≈ 8-9px at this scale
+	if len(base) < 2 || len(spaced) < 2 {
+		t.Fatalf("expected two ink rows, got %v / %v", base, spaced)
+	}
+	if spaced[1]-base[1] < 5 {
+		t.Errorf("second paragraph ink row moved %d px with spaceBefore=1000 (%d vs %d); a later paragraph must keep its space", spaced[1]-base[1], spaced[1], base[1])
 	}
 }
 
@@ -1522,26 +1547,71 @@ func TestLnSpcReductionRoundTrips(t *testing.T) {
 	}
 }
 
+// A ctrTitle slide placeholder inherits from the master's title placeholder and
+// a subTitle from the body: PowerPoint treats them as variants of those types,
+// and the master only ever defines title/body. Without the alias, slide1's
+// ctrTitle matched nothing on the master rung, lost the master's anchor="ctr"
+// and rendered top-anchored 32px low.
+func TestCtrTitleInheritsFromMasterTitle(t *testing.T) {
+	master := []layoutPlaceholder{
+		{phType: "title", anchorSet: true, anchor: TextAnchorMiddle},
+		{phType: "body", phIdx: 1},
+	}
+	ctr := &PlaceholderShape{phType: "ctrTitle"}
+	def := matchPlaceholderDef(master, ctr)
+	if def == nil || def.phType != "title" {
+		t.Fatalf("ctrTitle matched %v, want the master's title placeholder", def)
+	}
+	if def.anchor != TextAnchorMiddle {
+		t.Fatalf("ctrTitle inherited anchor %q, want ctr", def.anchor)
+	}
+	sub := &PlaceholderShape{phType: "subTitle"}
+	if def := matchPlaceholderDef(master, sub); def == nil || def.phType != "body" {
+		t.Fatalf("subTitle matched %v, want the master's body placeholder", def)
+	}
+	// An exact match still wins over an alias.
+	masterExact := []layoutPlaceholder{
+		{phType: "title", anchorSet: true, anchor: TextAnchorMiddle},
+		{phType: "ctrTitle", anchorSet: true, anchor: TextAnchorTop},
+	}
+	if def := matchPlaceholderDef(masterExact, ctr); def == nil || def.anchor != TextAnchorTop {
+		t.Fatalf("exact ctrTitle match lost to the alias: %v", def)
+	}
+	// A plain title still matches by exact type, and an unrelated type stays unmatched.
+	if def := matchPlaceholderDef(master, &PlaceholderShape{phType: "title"}); def == nil || def.phType != "title" {
+		t.Fatalf("title matched %v, want exact", def)
+	}
+	if def := matchPlaceholderDef(master, &PlaceholderShape{phType: "sldNum"}); def != nil {
+		t.Fatalf("sldNum matched %v, want nil", def)
+	}
+}
+
 // A declared spcPct resolves against the paragraph's own font size — 20% of
-// 32pt = 640 hundredths, no 1.2 line factor — and applies to the first
-// paragraph, unlike the inherited value.
+// 32pt = 640 hundredths, no 1.2 line factor — but the block's first paragraph
+// never gets any space-before at all: the COM variants of slide1 deleted every
+// declared spcBef and enlarged them fivefold, and both rendered identical to
+// the original.
 func TestDeclaredSpcPctResolvesAgainstFontSize(t *testing.T) {
 	r := &renderer{}
 	para := NewParagraph()
 	run := para.CreateTextRun("H")
 	run.GetFont().SetName("Calibri").SetSize(32)
 	para.spaceBeforePct = 20000
-	if got := r.paraSpaceBefore(para); got != 640 {
+	if got := r.paraSpaceBefore(para, false); got != 640 {
 		t.Fatalf("paraSpaceBefore = %d, want 640 (20%% of 32pt)", got)
+	}
+	// The block's first paragraph gets none of it, declared or not.
+	if got := r.paraSpaceBefore(para, true); got != 0 {
+		t.Fatalf("paraSpaceBefore on the first paragraph = %d, want 0", got)
 	}
 	// An explicit spcPts wins and the pct is left unused.
 	para.spaceBefore = 1200
-	if got := r.paraSpaceBefore(para); got != 1200 {
+	if got := r.paraSpaceBefore(para, false); got != 1200 {
 		t.Fatalf("paraSpaceBefore with both = %d, want the declared pts 1200", got)
 	}
 	// Nothing declared resolves to zero, not the fallback size.
 	plain := NewParagraph()
-	if got := r.paraSpaceBefore(plain); got != 0 {
+	if got := r.paraSpaceBefore(plain, false); got != 0 {
 		t.Fatalf("paraSpaceBefore on a plain paragraph = %d, want 0", got)
 	}
 }

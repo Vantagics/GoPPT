@@ -3892,8 +3892,12 @@ func runSizeIsDefault(size int) bool { return size == 18 || size <= 10 }
 
 // matchPlaceholderDef finds the definition a slide placeholder inherits from.
 //
-// The match is by type and index, then by type alone: a layout rarely numbers
-// its single title, and PowerPoint treats the unnumbered one as the match.
+// The match is by type and index, then by type alone — where "by type" walks
+// the placeholder's alias list: PowerPoint treats ctrTitle as the title's
+// centred variant and subTitle as the body's, and the master only ever defines
+// title/body. Without the aliases a ctrTitle placeholder matched nothing on
+// the master rung and lost the master's anchor="ctr" (slide1's title sat 32px
+// too low because it rendered top-anchored).
 func matchPlaceholderDef(defs []layoutPlaceholder, ph *PlaceholderShape) *layoutPlaceholder {
 	for i := range defs {
 		d := &defs[i]
@@ -3901,12 +3905,29 @@ func matchPlaceholderDef(defs []layoutPlaceholder, ph *PlaceholderShape) *layout
 			return d
 		}
 	}
-	for i := range defs {
-		if defs[i].phType == string(ph.phType) {
-			return &defs[i]
+	aliases := placeholderTypeAliases(string(ph.phType))
+	for _, alias := range aliases {
+		for i := range defs {
+			if defs[i].phType == alias {
+				return &defs[i]
+			}
 		}
 	}
 	return nil
+}
+
+// placeholderTypeAliases returns the definition type names that can satisfy a
+// placeholder of the given type, most specific first. Only the two title/body
+// variants have aliases; every other type matches itself alone.
+func placeholderTypeAliases(t string) []string {
+	switch t {
+	case "ctrTitle":
+		return []string{"ctrTitle", "title"}
+	case "subTitle":
+		return []string{"subTitle", "body"}
+	default:
+		return []string{t}
+	}
 }
 
 // applyPlaceholderInsets copies a definition's text insets onto the placeholder

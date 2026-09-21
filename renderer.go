@@ -5344,7 +5344,16 @@ func (r *renderer) applyLnSpcReduction(lh int) int {
 // run sizes are not known when the pPr closes. The percentage is of the font
 // size itself, not of the 1.2× line: the COM experiment on slide35 measured
 // the inherited 20% as 20% × 32pt and not 20% × 1.2 × 32pt.
-func (r *renderer) paraSpaceBefore(para *Paragraph) int {
+//
+// The first paragraph of a text block never gets any of it. The COM variants
+// of slide1 proved this in both directions: deleting every declared spcBef
+// and enlarging them fivefold both rendered bit-identical to the original —
+// PowerPoint ignores a first paragraph's space-before whether it was declared
+// on the paragraph or inherited from the master.
+func (r *renderer) paraSpaceBefore(para *Paragraph, firstPara bool) int {
+	if firstPara {
+		return 0
+	}
 	if para.spaceBefore > 0 {
 		return para.spaceBefore
 	}
@@ -5416,7 +5425,7 @@ func (r *renderer) measureParagraphsHeight(paragraphs []*Paragraph, w, h int, an
 				lineSpacing: para.lineSpacing,
 			}
 			if i == 0 {
-				li.spaceBefore = r.hundredthPtToPixelY(r.paraSpaceBefore(para))
+				li.spaceBefore = r.hundredthPtToPixelY(r.paraSpaceBefore(para, pi == 0))
 			}
 			if i == len(lines)-1 {
 				li.spaceAfter = r.hundredthPtToPixelY(para.spaceAfter)
@@ -5427,8 +5436,8 @@ func (r *renderer) measureParagraphsHeight(paragraphs []*Paragraph, w, h int, an
 
 	totalH := 0
 	for _, li := range allLines {
-		// spaceBefore applies to every paragraph, the first included — same
-		// as the draw path.
+		// spaceBefore applies to every paragraph except the block's first —
+		// same as the draw path.
 		totalH += li.spaceBefore
 		lh := li.lineHeight
 		if li.lineSpacing < 0 {
@@ -5569,7 +5578,7 @@ func (r *renderer) drawParagraphs(paragraphs []*Paragraph, x, y, w, h int, ancho
 			}
 			if i == 0 {
 				// spaceBefore is in hundredths of a point from spcPts
-				li.spaceBefore = r.hundredthPtToPixelY(r.paraSpaceBefore(para))
+				li.spaceBefore = r.hundredthPtToPixelY(r.paraSpaceBefore(para, pi == 0))
 			}
 			if i == len(lines)-1 {
 				li.spaceAfter = r.hundredthPtToPixelY(para.spaceAfter)
@@ -5612,7 +5621,7 @@ func (r *renderer) drawParagraphs(paragraphs []*Paragraph, x, y, w, h int, ancho
 	curY := startY
 	for _, li := range allLines {
 		// Same rule as the height measure above: every paragraph carries its
-		// spaceBefore, the first one included.
+		// spaceBefore except the block's first, which PowerPoint ignores.
 		curY += li.spaceBefore
 
 		lh := li.line.lineHeight
