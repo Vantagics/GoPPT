@@ -766,14 +766,23 @@ func TestMasterSpaceBeforeReachesParagraphs(t *testing.T) {
 	if len(paras) != 2 {
 		t.Fatalf("got %d paragraphs, want 2", len(paras))
 	}
-	// 28pt line × 1.2 × 20% = 6.72pt = 672 hundredths.
-	if got := paras[0].spaceBefore; got != 672 {
-		t.Errorf("level-0 paragraph spaceBefore = %d, want 672 (20%% of a 28pt line)", got)
+	// The inherited value reaches paragraph two and onward only. The COM
+	// experiment behind the rule: an explicit spcPts 0 on the first paragraph
+	// moved nothing in PowerPoint's own render (it was already flush), the
+	// same element on the second paragraph moved that line up by the full
+	// inherited amount. The percentage is of the font size itself — 20% of a
+	// 28pt level = 560 hundredths (5.6pt); the 1.2 line factor over-shot the
+	// measured 14px gap on slide35 by 20%.
+	if got := paras[0].spaceBefore; got != 0 {
+		t.Errorf("first paragraph spaceBefore = %d, want 0 (inherited spacing skips paragraph one)", got)
+	}
+	if got := paras[1].spaceBefore; got != 560 {
+		t.Errorf("second paragraph spaceBefore = %d, want 560 (20%% of a 28pt level)", got)
 	}
 	// The write half: the baked value survives as absolute points.
 	parts2 := zipParts(t, writeToBytes(t, pres))
-	if got := string(parts2["ppt/slides/slide1.xml"]); !bytes.Contains([]byte(got), []byte(`<a:spcBef><a:spcPts val="672"/>`)) {
-		t.Errorf("written slide has no spcPts val=\"672\":\n%s", got)
+	if got := string(parts2["ppt/slides/slide1.xml"]); !bytes.Contains([]byte(got), []byte(`<a:spcBef><a:spcPts val="560"/>`)) {
+		t.Errorf("written slide has no spcPts val=\"560\":\n%s", got)
 	}
 }
 
@@ -1456,4 +1465,218 @@ func TestWinMetricsReachBuildTextLine(t *testing.T) {
 		return
 	}
 	t.Skip("no installed font discriminates win from hhea ascent")
+}
+
+// ---------------------------------------------------------------------------
+// normAutofit lnSpcReduction — the second autofit lever — and declared
+// spcBef percentages. Semantics pinned by COM variant experiments on the
+// comparison deck (slide35 with lnSpcReduction/fontScale/spcBef toggled).
+// ---------------------------------------------------------------------------
+
+// The reduction survives the round trip on both carriers and is emitted
+// exactly as the file wrote it, next to the fontScale it rides with.
+func TestLnSpcReductionRoundTrips(t *testing.T) {
+	parts := zipParts(t, writeToBytes(t, New()))
+	parts["ppt/slides/slide1.xml"] = []byte(bodyPrSlide(bodyPrTextBox(
+		`<a:bodyPr><a:normAutofit fontScale="92500" lnSpcReduction="10000"/></a:bodyPr>`)))
+	pkg := buildZip(t, parts)
+	pres, err := (&PPTXReader{}).ReadFromReader(bytes.NewReader(pkg), int64(len(pkg)))
+	if err != nil {
+		t.Fatalf("read the package: %v", err)
+	}
+	rt, ok := firstShapeOfType[*RichTextShape](pres)
+	if !ok {
+		t.Fatal("no rich text shape found")
+	}
+	if rt.fontScale != 92500 {
+		t.Errorf("fontScale = %d, want 92500", rt.fontScale)
+	}
+	if rt.lnSpcReduction != 10000 {
+		t.Errorf("lnSpcReduction = %d, want 10000; the second autofit lever was dropped on the read", rt.lnSpcReduction)
+	}
+
+	// The write half: both attributes ride the same <a:normAutofit>, exactly once.
+	out := string(zipParts(t, writeToBytes(t, pres))["ppt/slides/slide1.xml"])
+	if !strings.Contains(out, `<a:normAutofit fontScale="92500" lnSpcReduction="10000"/>`) {
+		t.Errorf("written slide lost the reduction attribute:\n%s", out)
+	}
+	if strings.Count(out, "lnSpcReduction") != 1 {
+		t.Errorf("lnSpcReduction emitted %d times, want 1", strings.Count(out, "lnSpcReduction"))
+	}
+
+	// The AutoShape conversion carries it too (round 14's bodyPr consolidation
+	// owns this path now, but the field still has to travel).
+	parts["ppt/slides/slide1.xml"] = []byte(bodyPrSlide(bodyPrAutoShape(
+		`<a:bodyPr><a:normAutofit lnSpcReduction="30000"/></a:bodyPr>`, "X")))
+	pkg = buildZip(t, parts)
+	pres, err = (&PPTXReader{}).ReadFromReader(bytes.NewReader(pkg), int64(len(pkg)))
+	if err != nil {
+		t.Fatalf("read the auto shape package: %v", err)
+	}
+	as, ok := firstShapeOfType[*AutoShape](pres)
+	if !ok {
+		t.Fatal("no auto shape found")
+	}
+	if as.lnSpcReduction != 30000 {
+		t.Errorf("auto shape lnSpcReduction = %d, want 30000", as.lnSpcReduction)
+	}
+}
+
+// A declared spcPct resolves against the paragraph's own font size — 20% of
+// 32pt = 640 hundredths, no 1.2 line factor — and applies to the first
+// paragraph, unlike the inherited value.
+func TestDeclaredSpcPctResolvesAgainstFontSize(t *testing.T) {
+	r := &renderer{}
+	para := NewParagraph()
+	run := para.CreateTextRun("H")
+	run.GetFont().SetName("Calibri").SetSize(32)
+	para.spaceBeforePct = 20000
+	if got := r.paraSpaceBefore(para); got != 640 {
+		t.Fatalf("paraSpaceBefore = %d, want 640 (20%% of 32pt)", got)
+	}
+	// An explicit spcPts wins and the pct is left unused.
+	para.spaceBefore = 1200
+	if got := r.paraSpaceBefore(para); got != 1200 {
+		t.Fatalf("paraSpaceBefore with both = %d, want the declared pts 1200", got)
+	}
+	// Nothing declared resolves to zero, not the fallback size.
+	plain := NewParagraph()
+	if got := r.paraSpaceBefore(plain); got != 0 {
+		t.Fatalf("paraSpaceBefore on a plain paragraph = %d, want 0", got)
+	}
+}
+
+// Render level: the reduction compresses the whole line box — advance and
+// ascent alike — so a two-line block with lnSpcReduction 50000 is measurably
+// shorter than the same block without, and the compression is not just the
+// fontScale's doing.
+func TestLnSpcReductionShortensTheBlock(t *testing.T) {
+	fc := NewFontCache()
+	blockHeight := func(reduction int) int {
+		pres := New()
+		shape := pres.GetActiveSlide().CreateRichTextShape()
+		shape.BaseShape.SetOffsetX(400000).SetOffsetY(400000)
+		shape.BaseShape.SetWidth(6000000).SetHeight(4000000)
+		shape.autoFit = AutoFitNormal
+		shape.fontScale = 100000
+		shape.lnSpcReduction = reduction
+		p1 := shape.GetParagraphs()[0]
+		run1 := p1.CreateTextRun("FIRST")
+		run1.GetFont().SetName("Arial").SetSize(24)
+		run1.GetFont().Color = NewColor("000000")
+		p2 := shape.CreateParagraph()
+		run2 := p2.CreateTextRun("SECOND")
+		run2.GetFont().SetName("Arial").SetSize(24)
+		run2.GetFont().Color = NewColor("000000")
+		_ = p2
+		opts := DefaultRenderOptions()
+		opts.Width = 640
+		opts.FontCache = fc
+		img, err := pres.SlideToImage(0, opts)
+		if err != nil {
+			t.Fatalf("render: %v", err)
+		}
+		rect := emuRect(t, pres, 400000, 400000, 6000000, 4000000, 640)
+		top, bottom := -1, -1
+		for y := rect.Min.Y; y < rect.Max.Y; y++ {
+			for x := rect.Min.X; x < rect.Max.X; x++ {
+				r, g, b, a := img.At(x, y).RGBA()
+				if a != 0 && (r+g+b)/3 < 20000 {
+					if top < 0 {
+						top = y
+					}
+					bottom = y
+					break
+				}
+			}
+		}
+		if top < 0 {
+			t.Fatal("no ink rendered")
+		}
+		return bottom - top
+	}
+	// The ascent rides the same factor, so the FIRST line's ink moves up too
+	// (top-anchored): with advance-only compression the first ink row would
+	// not move at all, which is exactly the half-fix the pixel comparison
+	// ruled out.
+	firstInkRow := func(reduction int) int {
+		pres := New()
+		shape := pres.GetActiveSlide().CreateRichTextShape()
+		shape.BaseShape.SetOffsetX(400000).SetOffsetY(400000)
+		shape.BaseShape.SetWidth(6000000).SetHeight(4000000)
+		shape.autoFit = AutoFitNormal
+		shape.fontScale = 100000
+		shape.lnSpcReduction = reduction
+		para := shape.GetParagraphs()[0]
+		run := para.CreateTextRun("R")
+		run.GetFont().SetName("Arial").SetSize(24)
+		run.GetFont().Color = NewColor("000000")
+		opts := DefaultRenderOptions()
+		opts.Width = 640
+		opts.FontCache = fc
+		img, err := pres.SlideToImage(0, opts)
+		if err != nil {
+			t.Fatalf("render: %v", err)
+		}
+		rect := emuRect(t, pres, 400000, 400000, 6000000, 4000000, 640)
+		for y := rect.Min.Y; y < rect.Max.Y; y++ {
+			for x := rect.Min.X; x < rect.Max.X; x++ {
+				r, g, b, a := img.At(x, y).RGBA()
+				if a != 0 && (r+g+b)/3 < 20000 {
+					return y
+				}
+			}
+		}
+		t.Fatal("no ink rendered")
+		return 0
+	}
+	full := blockHeight(0)
+	half := blockHeight(50000)
+	if half >= full-full/5 {
+		t.Fatalf("block with 50%% reduction = %dpx, want under 80%% of the unreduced %dpx", half, full)
+	}
+	if ink := firstInkRow(50000); ink >= firstInkRow(0) {
+		t.Fatalf("first ink row with 50%% reduction = %d, want above the unreduced %d (ascent did not shrink with the line box)", ink, firstInkRow(0))
+	}
+}
+
+// The reader stores a declared <a:spcBef><a:spcPct> raw on the paragraph —
+// that storage is what the renderer's layout-time resolution consumes, so a
+// reader drop silently flattens every declared percentage to zero.
+func TestDeclaredSpcPctIsReadFromPPr(t *testing.T) {
+	slide := `<p:sp>
+  <p:nvSpPr><p:cNvPr id="2" name="TextBox"/><p:cNvSpPr txBox="1"/><p:nvPr/></p:nvSpPr>
+  <p:spPr>
+    <a:xfrm><a:off x="500000" y="500000"/><a:ext cx="3000000" cy="2000000"/></a:xfrm>
+    <a:prstGeom prst="rect"><a:avLst/></a:prstGeom>
+  </p:spPr>
+  <p:txBody>
+    <a:bodyPr/>
+    <a:lstStyle/>
+    <a:p><a:pPr algn="l"><a:spcBef><a:spcPct val="20000"/></a:spcBef></a:pPr><a:r><a:rPr lang="en-US" sz="3200"/><a:t>PCT</a:t></a:r></a:p>
+  </p:txBody>
+</p:sp>`
+	parts := zipParts(t, writeToBytes(t, New()))
+	parts["ppt/slides/slide1.xml"] = []byte(bodyPrSlide(slide))
+	pkg := buildZip(t, parts)
+	pres, err := (&PPTXReader{}).ReadFromReader(bytes.NewReader(pkg), int64(len(pkg)))
+	if err != nil {
+		t.Fatalf("read the package: %v", err)
+	}
+	rt, ok := firstShapeOfType[*RichTextShape](pres)
+	if !ok {
+		t.Fatal("no rich text shape found")
+	}
+	paras := rt.GetParagraphs()
+	if len(paras) != 1 {
+		t.Fatalf("got %d paragraphs, want 1", len(paras))
+	}
+	if paras[0].spaceBeforePct != 20000 {
+		t.Fatalf("paragraph spaceBeforePct = %d, want 20000; the declared percentage was dropped on the read", paras[0].spaceBeforePct)
+	}
+	// The write half: the declaration survives as a spcPct, not flattened.
+	out := string(zipParts(t, writeToBytes(t, pres))["ppt/slides/slide1.xml"])
+	if !strings.Contains(out, `<a:spcBef><a:spcPct val="20000"/></a:spcBef>`) {
+		t.Errorf("written slide lost the spcPct declaration:\n%s", out)
+	}
 }

@@ -309,6 +309,7 @@ type renderer struct {
 	dpi                 float64
 	overlayOpacityScale float64 // 0 means 1.0 (no change)
 	fontScale           float64 // normAutofit font scale factor (0 or 1.0 = no scaling)
+	lnSpcReduction      float64 // normAutofit lnSpcReduction as a fraction (0 = none, 0.10 = lines 10% shorter)
 	fontFallback        []string
 	cjkFallback         []string
 	symbolFallback      []string
@@ -736,7 +737,17 @@ func (r *renderer) renderRichText(s *RichTextShape) {
 	if s.fontScale > 0 && s.fontScale != 100000 {
 		r.fontScale = float64(s.fontScale) / 100000.0
 	}
-	defer func() { r.fontScale = prevFontScale }()
+	// Apply normAutofit line-spacing reduction: each line advance shrinks by
+	// the recorded percentage, which is what compresses an overflowing text
+	// body back into its shape in PowerPoint.
+	prevLnSpcReduction := r.lnSpcReduction
+	if s.lnSpcReduction > 0 && s.lnSpcReduction != 100000 {
+		r.lnSpcReduction = float64(s.lnSpcReduction) / 100000.0
+	}
+	defer func() {
+		r.fontScale = prevFontScale
+		r.lnSpcReduction = prevLnSpcReduction
+	}()
 
 	// Text insets (padding). PowerPoint defaults: lIns=91440, rIns=91440, tIns=45720, bIns=45720
 	lIns, rIns, tIns, bIns := int64(91440), int64(91440), int64(45720), int64(45720)
@@ -1305,7 +1316,16 @@ func (r *renderer) renderAutoShape(s *AutoShape) {
 	if s.fontScale > 0 && s.fontScale != 100000 {
 		r.fontScale = float64(s.fontScale) / 100000.0
 	}
-	defer func() { r.fontScale = prevFontScale }()
+	// Same for the normAutofit line-spacing reduction (renderRichText's
+	// mirror — the two must not drift).
+	prevLnSpcReduction := r.lnSpcReduction
+	if s.lnSpcReduction > 0 && s.lnSpcReduction != 100000 {
+		r.lnSpcReduction = float64(s.lnSpcReduction) / 100000.0
+	}
+	defer func() {
+		r.fontScale = prevFontScale
+		r.lnSpcReduction = prevLnSpcReduction
+	}()
 
 	// Vertical text direction
 	vertRotation := 0
@@ -5304,6 +5324,43 @@ func (r *renderer) buildTextLine(runs []textRun) textLine {
 	return tl
 }
 
+// applyLnSpcReduction shrinks a line advance by normAutofit's
+// lnSpcReduction percentage. PowerPoint applies it to every line of the text
+// body that carries the attribute — it is the second lever (besides
+// fontScale) that presses overflowing text back into its shape. The
+// experiment that pinned the semantics showed the whole line box scales:
+// the ascent rides the same factor, which lifts the first glyphs toward the
+// line top rather than only pulling consecutive lines together.
+func (r *renderer) applyLnSpcReduction(lh int) int {
+	if r.lnSpcReduction <= 0 {
+		return lh
+	}
+	return int(float64(lh)*(1.0-r.lnSpcReduction) + 0.5)
+}
+
+// paraSpaceBefore resolves a paragraph's space-before to hundredths of a
+// point. A declared spcPts is already stored; a declared spcPct is resolved
+// against the paragraph's own font size here, at layout time, because the
+// run sizes are not known when the pPr closes. The percentage is of the font
+// size itself, not of the 1.2× line: the COM experiment on slide35 measured
+// the inherited 20% as 20% × 32pt and not 20% × 1.2 × 32pt.
+func (r *renderer) paraSpaceBefore(para *Paragraph) int {
+	if para.spaceBefore > 0 {
+		return para.spaceBefore
+	}
+	if para.spaceBeforePct > 0 {
+		sizePt := 18.0
+		for _, elem := range para.elements {
+			if tr, ok := elem.(*TextRun); ok && tr.font != nil && tr.font.Size > 0 {
+				sizePt = float64(tr.font.Size)
+				break
+			}
+		}
+		return int(sizePt * float64(para.spaceBeforePct) / 100000.0 * 100)
+	}
+	return para.spaceBefore
+}
+
 // measureParagraphsHeight estimates the total pixel height needed to render
 // the given paragraphs within the specified width, replicating the same line
 // building and spacing logic used by drawParagraphs.
@@ -5359,7 +5416,7 @@ func (r *renderer) measureParagraphsHeight(paragraphs []*Paragraph, w, h int, an
 				lineSpacing: para.lineSpacing,
 			}
 			if i == 0 {
-				li.spaceBefore = r.hundredthPtToPixelY(para.spaceBefore)
+				li.spaceBefore = r.hundredthPtToPixelY(r.paraSpaceBefore(para))
 			}
 			if i == len(lines)-1 {
 				li.spaceAfter = r.hundredthPtToPixelY(para.spaceAfter)
@@ -5379,7 +5436,7 @@ func (r *renderer) measureParagraphsHeight(paragraphs []*Paragraph, w, h int, an
 		} else if li.lineSpacing > 0 {
 			lh = r.hundredthPtToPixelY(li.lineSpacing)
 		}
-		totalH += lh
+		totalH += r.applyLnSpcReduction(lh)
 		totalH += li.spaceAfter
 	}
 	return totalH
@@ -5512,7 +5569,7 @@ func (r *renderer) drawParagraphs(paragraphs []*Paragraph, x, y, w, h int, ancho
 			}
 			if i == 0 {
 				// spaceBefore is in hundredths of a point from spcPts
-				li.spaceBefore = r.hundredthPtToPixelY(para.spaceBefore)
+				li.spaceBefore = r.hundredthPtToPixelY(r.paraSpaceBefore(para))
 			}
 			if i == len(lines)-1 {
 				li.spaceAfter = r.hundredthPtToPixelY(para.spaceAfter)
@@ -5535,7 +5592,7 @@ func (r *renderer) drawParagraphs(paragraphs []*Paragraph, x, y, w, h int, ancho
 			// spcPts: hundredths of a point (e.g. 1200 = 12pt)
 			lh = r.hundredthPtToPixelY(li.lineSpacing)
 		}
-		totalH += lh
+		totalH += r.applyLnSpcReduction(lh)
 		totalH += li.spaceAfter
 	}
 
@@ -5564,6 +5621,7 @@ func (r *renderer) drawParagraphs(paragraphs []*Paragraph, x, y, w, h int, ancho
 		} else if li.lineSpacing > 0 {
 			lh = r.hundredthPtToPixelY(li.lineSpacing)
 		}
+		lh = r.applyLnSpcReduction(lh)
 
 		// Horizontal alignment
 		lineX := x
@@ -5585,7 +5643,10 @@ func (r *renderer) drawParagraphs(paragraphs []*Paragraph, x, y, w, h int, ancho
 			}
 		}
 
-		baseline := curY + li.line.ascent
+		// The baseline sits ascent-scaled below the line top: lnSpcReduction
+		// shrinks the ascent along with the advance (see applyLnSpcReduction),
+		// which is what lifts the first line's glyphs toward the inset.
+		baseline := curY + r.applyLnSpcReduction(li.line.ascent)
 
 		// Draw each run
 		drawX := lineX

@@ -483,17 +483,18 @@ func (w *PPTXWriter) writeRichTextShapeXML(s *RichTextShape, shapeID *int) strin
 		shapeGeomXML("rect", nil, s.customPath, "          "),
 		fillXML, borderXML,
 		bodyPrXML(bodyPrAttrs{
-			wrap:      boolToWrap(s.wordWrap),
-			columns:   s.columns,
-			anchor:    s.textAnchor,
-			textDir:   s.textDirection,
-			fontScale: s.fontScale,
-			autoFit:   s.autoFit,
-			insetsSet: s.insetsSet,
-			lIns:      s.insetLeft,
-			rIns:      s.insetRight,
-			tIns:      s.insetTop,
-			bIns:      s.insetBottom,
+			wrap:           boolToWrap(s.wordWrap),
+			columns:        s.columns,
+			anchor:         s.textAnchor,
+			textDir:        s.textDirection,
+			fontScale:      s.fontScale,
+			lnSpcReduction: s.lnSpcReduction,
+			autoFit:        s.autoFit,
+			insetsSet:      s.insetsSet,
+			lIns:           s.insetLeft,
+			rIns:           s.insetRight,
+			tIns:           s.insetTop,
+			bIns:           s.insetBottom,
 		}),
 		paragraphsXML.String())
 }
@@ -513,12 +514,15 @@ type bodyPrAttrs struct {
 	anchor    TextAnchorType
 	textDir   string // vert; "horz" is the schema default and is omitted
 	fontScale int    // normAutofit fontScale, in thousandths of a percent
-	autoFit   AutoFitType
-	insetsSet bool
-	lIns      int64
-	rIns      int64
-	tIns      int64
-	bIns      int64
+	// lnSpcReduction is normAutofit's line-spacing reduction, in thousandths
+	// of a percent of the line advance (e.g. 10000 shortens lines by 10%).
+	lnSpcReduction int
+	autoFit        AutoFitType
+	insetsSet      bool
+	lIns           int64
+	rIns           int64
+	tIns           int64
+	bIns           int64
 }
 
 // bodyPrXML serialises a shape's <a:bodyPr>.
@@ -554,7 +558,7 @@ func bodyPrXML(a bodyPrAttrs) string {
 		fmt.Fprintf(&b, ` anchor="%s"`, xmlEscape(string(a.anchor)))
 	}
 
-	child := autoFitXML(a.autoFit, a.fontScale)
+	child := autoFitXML(a.autoFit, a.fontScale, a.lnSpcReduction)
 	if child == "" {
 		b.WriteString("/>")
 		return b.String()
@@ -572,8 +576,17 @@ func bodyPrXML(a bodyPrAttrs) string {
 // holds, so it writes nothing: <a:noAutofit/> would claim a decision the model
 // never made. A recorded fontScale still produces <a:normAutofit>, because the
 // attribute is meaningless without the element that carries it.
-func autoFitXML(mode AutoFitType, fontScale int) string {
+func autoFitXML(mode AutoFitType, fontScale, lnSpcReduction int) string {
 	scaled := fontScale > 0 && fontScale != 100000
+	shorter := lnSpcReduction > 0 && lnSpcReduction != 100000
+	if shorter && mode != AutoFitShape {
+		// A recorded lnSpcReduction (with or without a fontScale) still
+		// produces <a:normAutofit>: the attribute rides that element.
+		if scaled {
+			return fmt.Sprintf(`<a:normAutofit fontScale="%d" lnSpcReduction="%d"/>`, fontScale, lnSpcReduction)
+		}
+		return fmt.Sprintf(`<a:normAutofit lnSpcReduction="%d"/>`, lnSpcReduction)
+	}
 	switch mode {
 	case AutoFitShape:
 		return "<a:spAutoFit/>"
@@ -663,6 +676,8 @@ func (w *PPTXWriter) writeParagraphXMLAt(para *Paragraph, indent string) string 
 	}
 	if para.spaceBefore > 0 {
 		line(fmt.Sprintf(`<a:spcBef><a:spcPts val="%d"/></a:spcBef>`, para.spaceBefore))
+	} else if para.spaceBeforePct > 0 {
+		line(fmt.Sprintf(`<a:spcBef><a:spcPct val="%d"/></a:spcBef>`, para.spaceBeforePct))
 	}
 	if para.spaceAfter > 0 {
 		line(fmt.Sprintf(`<a:spcAft><a:spcPts val="%d"/></a:spcAft>`, para.spaceAfter))
@@ -1106,17 +1121,18 @@ func (w *PPTXWriter) writeAutoShapeXML(s *AutoShape, shapeID *int) string {
 // text — so the argument list lives here rather than being repeated.
 func autoShapeBodyPr(s *AutoShape) string {
 	return bodyPrXML(bodyPrAttrs{
-		wrap:      boolToWrap(s.wordWrap),
-		columns:   s.columns,
-		anchor:    s.textAnchor,
-		textDir:   s.textDirection,
-		fontScale: s.fontScale,
-		autoFit:   s.autoFit,
-		insetsSet: s.insetsSet,
-		lIns:      s.insetLeft,
-		rIns:      s.insetRight,
-		tIns:      s.insetTop,
-		bIns:      s.insetBottom,
+		wrap:           boolToWrap(s.wordWrap),
+		columns:        s.columns,
+		anchor:         s.textAnchor,
+		textDir:        s.textDirection,
+		fontScale:      s.fontScale,
+		lnSpcReduction: s.lnSpcReduction,
+		autoFit:        s.autoFit,
+		insetsSet:      s.insetsSet,
+		lIns:           s.insetLeft,
+		rIns:           s.insetRight,
+		tIns:           s.insetTop,
+		bIns:           s.insetBottom,
 	})
 }
 
@@ -1699,17 +1715,18 @@ func (w *PPTXWriter) writePlaceholderShapeXML(s *PlaceholderShape, shapeID *int)
 		xfrmAttrs(&s.BaseShape),
 		s.offsetX, s.offsetY, s.width, s.height,
 		bodyPrXML(bodyPrAttrs{
-			wrap:      boolToWrap(s.wordWrap),
-			columns:   s.columns,
-			anchor:    s.textAnchor,
-			textDir:   s.textDirection,
-			fontScale: s.fontScale,
-			autoFit:   s.autoFit,
-			insetsSet: s.insetsSet,
-			lIns:      s.insetLeft,
-			rIns:      s.insetRight,
-			tIns:      s.insetTop,
-			bIns:      s.insetBottom,
+			wrap:           boolToWrap(s.wordWrap),
+			columns:        s.columns,
+			anchor:         s.textAnchor,
+			textDir:        s.textDirection,
+			fontScale:      s.fontScale,
+			lnSpcReduction: s.lnSpcReduction,
+			autoFit:        s.autoFit,
+			insetsSet:      s.insetsSet,
+			lIns:           s.insetLeft,
+			rIns:           s.insetRight,
+			tIns:           s.insetTop,
+			bIns:           s.insetBottom,
 		}),
 		paragraphsXML.String())
 }

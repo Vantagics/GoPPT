@@ -1242,22 +1242,30 @@ func (r *PPTXReader) parseSlideXML(decoder *xml.Decoder, slide *Slide, rels []xm
 					}
 				}
 			case "normAutofit":
-				// <a:normAutofit fontScale="62500"/> inside <a:bodyPr>
+				// <a:normAutofit fontScale="62500" lnSpcReduction="10000"/> inside <a:bodyPr>
 				if state.inTxBody {
 					fontScaleVal := 100000 // default 100%
+					lnSpcReductionVal := 0 // raw file value in thousandths of a percent, 0 = no reduction
 					for _, attr := range t.Attr {
 						if attr.Name.Local == "fontScale" {
 							if v, err := strconv.Atoi(attr.Value); err == nil {
 								fontScaleVal = v
 							}
 						}
+						if attr.Name.Local == "lnSpcReduction" {
+							if v, err := strconv.Atoi(attr.Value); err == nil {
+								lnSpcReductionVal = v
+							}
+						}
 					}
 					if state.isPlaceholder && currentPlaceholder != nil {
 						currentPlaceholder.autoFit = AutoFitNormal
 						currentPlaceholder.fontScale = fontScaleVal
+						currentPlaceholder.lnSpcReduction = lnSpcReductionVal
 					} else if currentRichText != nil {
 						currentRichText.autoFit = AutoFitNormal
 						currentRichText.fontScale = fontScaleVal
+						currentRichText.lnSpcReduction = lnSpcReductionVal
 					}
 				}
 			case "spAutoFit":
@@ -1402,9 +1410,15 @@ func (r *PPTXReader) parseSlideXML(decoder *xml.Decoder, slide *Slide, rels []xm
 								if state.inLnSpc {
 									// Store as negative to distinguish from spcPts
 									currentParagraph.lineSpacing = -v
+								} else if state.inSpcBef {
+									// A declared percentage rides the paragraph
+									// raw; the renderer resolves it against the
+									// paragraph's own font size, because that
+									// size is not known until the runs close.
+									currentParagraph.spaceBeforePct = v
 								}
-								// spcPct inside spcBef/spcAft with val=0 means no spacing;
-								// non-zero percentage spacing before/after is rare and
+								// spcPct inside spcAft with val=0 means no spacing;
+								// non-zero percentage spacing after is rare and
 								// would need line-height-relative calculation at render time.
 							}
 						}
@@ -2921,6 +2935,7 @@ func (r *PPTXReader) parseSlideXML(decoder *xml.Decoder, slide *Slide, rels []xm
 							autoShape.textAnchor = textAnchor
 							autoShape.textDirection = textDir
 							autoShape.fontScale = currentRichText.fontScale
+							autoShape.lnSpcReduction = currentRichText.lnSpcReduction
 							// The body properties are read into the temporary
 							// text body whatever the shape turns out to be, so
 							// they have to travel with it: a shape whose wrap
@@ -4237,11 +4252,15 @@ func parseMasterTextStyles(data []byte, pres *Presentation) *masterTextStyles {
 			case "lvl1pPr", "lvl2pPr", "lvl3pPr", "lvl4pPr", "lvl5pPr",
 				"lvl6pPr", "lvl7pPr", "lvl8pPr", "lvl9pPr":
 				// Now the level's defRPr has been seen, a percentage space
-				// can finally be turned into points: a line is 1.2× the font
-				// size, and the percentage is of that line. 20000 of a 28pt
-				// level is 672 (6.72pt in hundredths).
+				// can finally be turned into points: the percentage is of
+				// the font size itself — 20000 of a 28pt level is 560
+				// (5.6pt in hundredths). The 1.2 line-height factor an
+				// earlier round multiplied in is disproven by the COM
+				// experiment on slide35: the inherited gap between its
+				// paragraphs measures 20% × 32pt (14px), not 20% × 1.2 ×
+				// 32pt (17px).
 				if cur != nil && cur.spcBef == 0 && spcBefPct > 0 && cur.size > 0 {
-					cur.spcBef = int(float64(cur.size) * 1.2 * float64(spcBefPct) / 100000 * 100)
+					cur.spcBef = int(float64(cur.size) * float64(spcBefPct) / 100000 * 100)
 				}
 				cur = nil
 			case "titleStyle", "bodyStyle", "otherStyle":
@@ -4262,7 +4281,7 @@ func applyMasterTextStyles(ph *PlaceholderShape, m *masterTextStyles) {
 	if ph == nil || m == nil {
 		return
 	}
-	for _, para := range ph.paragraphs {
+	for pi, para := range ph.paragraphs {
 		// lvl is 0-based on the paragraph, lvlNpPr is 1-based on the master:
 		// a level-0 paragraph is styled by lvl1pPr, a level-1 one by lvl2pPr.
 		level := 1
@@ -4290,10 +4309,14 @@ func applyMasterTextStyles(ph *PlaceholderShape, m *masterTextStyles) {
 		if !para.alignment.indentSet && s.indent != 0 {
 			para.alignment.Indent = s.indent
 		}
-		// Space before paragraphs. PowerPoint applies it to every paragraph,
-		// the first one included, so 0 (the model's "nothing declared") simply
-		// takes the master's value.
-		if para.spaceBefore == 0 && s.spcBef > 0 {
+		// Space before paragraphs. The inherited value reaches paragraphs two
+		// and onward only — a COM experiment on the comparison deck (explicit
+		// spcPts 0 on the first paragraph moved nothing, on the second moved
+		// one line) shows PowerPoint keeps the first paragraph flush with the
+		// text inset unless the paragraph itself declares spacing. A declared
+		// spcPts already sits in spaceBefore, a declared spcPct in
+		// spaceBeforePct; both apply to the first paragraph.
+		if pi > 0 && para.spaceBefore == 0 && para.spaceBeforePct == 0 && s.spcBef > 0 {
 			para.spaceBefore = s.spcBef
 		}
 
@@ -5040,15 +5063,22 @@ func (r *PPTXReader) parseLayoutImages(data []byte, rels []xmlRelForRead, zr *zi
 			case "normAutofit":
 				if inTxBody && currentRichText != nil {
 					fontScaleVal := 100000
+					lnSpcReductionVal := 0
 					for _, attr := range t.Attr {
 						if attr.Name.Local == "fontScale" {
 							if v, err := strconv.Atoi(attr.Value); err == nil {
 								fontScaleVal = v
 							}
 						}
+						if attr.Name.Local == "lnSpcReduction" {
+							if v, err := strconv.Atoi(attr.Value); err == nil {
+								lnSpcReductionVal = v
+							}
+						}
 					}
 					currentRichText.autoFit = AutoFitNormal
 					currentRichText.fontScale = fontScaleVal
+					currentRichText.lnSpcReduction = lnSpcReductionVal
 				}
 			case "lstStyle":
 				if inTxBody {

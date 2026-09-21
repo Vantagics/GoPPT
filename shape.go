@@ -188,6 +188,7 @@ type RichTextShape struct {
 	activeParagraph int
 	autoFit         AutoFitType
 	fontScale       int // normAutofit fontScale in thousandths of a percent (e.g. 62500 = 62.5%), 0 means 100%
+	lnSpcReduction  int // normAutofit lnSpcReduction in thousandths of a percent (e.g. 10000 = lines 10% shorter), 0 means none
 	wordWrap        bool
 	verticalAlign   VerticalAlignment
 	textAnchor      TextAnchorType
@@ -371,6 +372,11 @@ type Paragraph struct {
 	lineSpacing int // in points * 100
 	spaceBefore int
 	spaceAfter  int
+	// spaceBeforePct holds a declared <a:spcBef><a:spcPct val="..."> as the
+	// raw percentage (20000 = 20%), which the renderer converts against the
+	// paragraph's own font size. Declared spacing — pts or pct — applies to
+	// the first paragraph too; only the master-inherited value does not.
+	spaceBeforePct int
 }
 
 // ParagraphElement is the interface for paragraph content.
@@ -660,11 +666,12 @@ type AutoShape struct {
 	// wordWrap, columns and autoFit describe the shape's <a:bodyPr>. They are
 	// read for every <p:sp> and the renderer honours all three, so a shape
 	// converted from the reader's temporary text body has to carry them too.
-	wordWrap     bool
-	columns      int
-	autoFit      AutoFitType
-	adjustValues map[string]int // avLst adjustment values (e.g. "adj1" -> 10690)
-	fontScale    int            // normAutofit fontScale in thousandths of a percent (e.g. 62500 = 62.5%), 0 means 100%
+	wordWrap       bool
+	columns        int
+	autoFit        AutoFitType
+	adjustValues   map[string]int // avLst adjustment values (e.g. "adj1" -> 10690)
+	fontScale      int            // normAutofit fontScale in thousandths of a percent (e.g. 62500 = 62.5%), 0 means 100%
+	lnSpcReduction int            // normAutofit lnSpcReduction in thousandths of a percent, 0 means none
 	// Text insets (padding) in EMU.
 	insetLeft   int64
 	insetRight  int64
