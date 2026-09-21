@@ -1,6 +1,7 @@
 package gopresentation
 
 import (
+	"encoding/binary"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -59,6 +60,11 @@ type FontCache struct {
 	fonts        map[string]*opentype.Font // lowercase font name -> parsed font
 	faces        map[fontKey]font.Face     // cached render faces (HintingFull)
 	measureFaces map[fontKey]font.Face     // cached measure faces (HintingNone)
+	// vitals caches the raw vertical metrics (OS/2 usWinAscent/usWinDescent,
+	// head unitsPerEm) per parsed font, read straight from the font bytes at
+	// registration time. Go's font.Face.Metrics reports the hhea values
+	// instead, and for many fonts those are not what a renderer uses.
+	vitals map[*opentype.Font]fontVitals
 	// misses caches requests that matched no installed font. Without it a
 	// document that names an uninstalled font re-runs the whole style-variant
 	// search (and, when nothing matches at all, the entire fallback chain) for
@@ -84,6 +90,7 @@ func NewFontCache(extraDirs ...string) *FontCache {
 		fonts:        make(map[string]*opentype.Font),
 		faces:        make(map[fontKey]font.Face),
 		measureFaces: make(map[fontKey]font.Face),
+		vitals:       make(map[*opentype.Font]fontVitals),
 		misses:       make(map[fontKey]struct{}),
 		coverage:     make(map[glyphCoverageKey]bool),
 	}
@@ -334,6 +341,7 @@ func (fc *FontCache) LoadFont(name string, path string) error {
 	fc.ensureScanned()
 	fc.mu.Lock()
 	fc.fonts[lowerFontName(name)] = f
+	fc.recordVitals(f, data, 0)
 	fc.registerByFamilyName(f)
 	// A newly registered font may satisfy a request that previously missed.
 	fc.resetDerivedCachesLocked()
@@ -353,6 +361,7 @@ func (fc *FontCache) LoadFontData(name string, data []byte) error {
 	fc.ensureScanned()
 	fc.mu.Lock()
 	fc.fonts[lowerFontName(name)] = f
+	fc.recordVitals(f, data, 0)
 	fc.registerByFamilyName(f)
 	fc.resetDerivedCachesLocked()
 	fc.mu.Unlock()
@@ -440,6 +449,7 @@ func (fc *FontCache) loadSingleFont(data []byte, lowerFilename string) {
 	}
 	baseName := strings.TrimSuffix(lowerFilename, filepath.Ext(lowerFilename))
 	fc.fonts[baseName] = f
+	fc.recordVitals(f, data, 0)
 	// Also register by the font's internal family name
 	fc.registerByFamilyName(f)
 }
@@ -457,6 +467,15 @@ func (fc *FontCache) loadCollection(data []byte, lowerFilename string) {
 		if err != nil {
 			continue
 		}
+		// Collection members share the file but carry their own table
+		// directory at the i-th offset of the TTC header.
+		base := 0
+		if len(data) >= 16 {
+			if off := int(binary.BigEndian.Uint32(data[12+4*i : 16+4*i])); off > 0 && off < len(data) {
+				base = off
+			}
+		}
+		fc.recordVitals(f, data, base)
 		// Register first font also by base filename for backward compat
 		if i == 0 {
 			baseName := strings.TrimSuffix(lowerFilename, filepath.Ext(lowerFilename))
@@ -488,6 +507,105 @@ var chineseFontAliases = map[string]string{
 	"方正姚体":    "fzyaoti",
 	"隶书":      "lisu",
 	"幼圆":      "youyuan",
+}
+
+// fontVitals holds the raw vertical metrics a renderer needs, read directly
+// from the font's tables. upem is head.unitsPerEm; winAsc/winDesc are
+// OS/2.usWinAscent/usWinDescent in font units.
+type fontVitals struct {
+	upem    int
+	winAsc  int
+	winDesc int
+}
+
+// parseFontVitals extracts the vertical metrics from raw sfnt data. base is
+// the offset of the font's table directory within data (0 for a single font,
+// the TTC inner offset for a collection member). OS/2 is preferred because
+// that is what GDI/DirectWrite render from; a font too old to carry one falls
+// back to hhea. The OS/2 offsets are version-stable: usWinAscent/usWinDescent
+// sit at 74/76 in every OS/2 version.
+func parseFontVitals(data []byte, base int) (fontVitals, bool) {
+	var v fontVitals
+	if len(data) < base+12 {
+		return v, false
+	}
+	numTables := int(binary.BigEndian.Uint16(data[base+4 : base+6]))
+	var os2, head, hhea int
+	for i := 0; i < numTables; i++ {
+		off := base + 12 + 16*i
+		if off+16 > len(data) {
+			break
+		}
+		switch string(data[off : off+4]) {
+		case "OS/2":
+			os2 = int(binary.BigEndian.Uint32(data[off+8 : off+12]))
+		case "head":
+			head = int(binary.BigEndian.Uint32(data[off+8 : off+12]))
+		case "hhea":
+			hhea = int(binary.BigEndian.Uint32(data[off+8 : off+12]))
+		}
+	}
+	if head > 0 && head+20 <= len(data) {
+		v.upem = int(binary.BigEndian.Uint16(data[head+18 : head+20]))
+	}
+	if os2 > 0 && os2+78 <= len(data) {
+		v.winAsc = int(binary.BigEndian.Uint16(data[os2+74 : os2+76]))
+		v.winDesc = int(binary.BigEndian.Uint16(data[os2+76 : os2+78]))
+	} else if hhea > 0 && hhea+10 <= len(data) {
+		// No OS/2 (ancient font): hhea ascender/descender are the next best
+		// approximation of what a rasteriser would use.
+		asc := int(int16(binary.BigEndian.Uint16(data[hhea+4 : hhea+6])))
+		desc := int(int16(binary.BigEndian.Uint16(data[hhea+6 : hhea+8])))
+		if asc > 0 {
+			v.winAsc = asc
+		}
+		if desc < 0 {
+			v.winDesc = -desc
+		}
+	}
+	if v.upem <= 0 || v.winAsc <= 0 || v.winDesc < 0 {
+		return v, false
+	}
+	return v, true
+}
+
+// recordVitals caches the vertical metrics of a parsed font alongside its raw
+// bytes. base is the table-directory offset (0 for single fonts, the TTC inner
+// offset for collection members).
+func (fc *FontCache) recordVitals(f *opentype.Font, data []byte, base int) {
+	if v, ok := parseFontVitals(data, base); ok {
+		if fc.vitals == nil {
+			fc.vitals = make(map[*opentype.Font]fontVitals)
+		}
+		fc.vitals[f] = v
+	}
+}
+
+// WinVerticalMetrics returns the GDI/DirectWrite vertical metrics of the font
+// that would render name — OS/2 usWinAscent/usWinDescent — scaled to sizePx
+// pixels per em. PowerPoint places the baseline winAscent below the line top
+// and advances the line winAscent+winDescent, while Go's font.Face.Metrics
+// reports the hhea values; for Calibri those differ by a fifth of an em
+// (hhea ascent 0.75em vs win ascent 0.952em), which is a 13px baseline error
+// on 28pt text. ok is false when no font matched or its tables said nothing
+// usable, in which case the caller should fall back to face.Metrics.
+func (fc *FontCache) WinVerticalMetrics(name string, sizePx float64, bold, italic bool) (asc, desc float64, ok bool) {
+	if name == "" || sizePx <= 0 {
+		return 0, 0, false
+	}
+	fc.ensureScanned()
+	f := fc.findFont(name, bold, italic)
+	if f == nil {
+		return 0, 0, false
+	}
+	fc.mu.RLock()
+	v, cached := fc.vitals[f]
+	fc.mu.RUnlock()
+	if !cached {
+		return 0, 0, false
+	}
+	scale := sizePx / float64(v.upem)
+	return float64(v.winAsc) * scale, float64(v.winDesc) * scale, true
 }
 
 // registerByFamilyName extracts the font family name from the font's name

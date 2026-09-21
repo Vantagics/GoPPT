@@ -2,10 +2,14 @@ package gopresentation
 
 import (
 	"bytes"
+	"encoding/binary"
 	"image"
 	"image/color"
+	"sort"
 	"strings"
 	"testing"
+
+	"golang.org/x/image/font/basicfont"
 )
 
 // Regression tests for the fidelity fixes that came out of the
@@ -1296,4 +1300,160 @@ func TestExplicitZeroMarginIsNotOverridden(t *testing.T) {
 	if !strings.Contains(got, `<a:pPr marL="0" indent="0">`) {
 		t.Errorf("written slide dropped the explicit marL=\"0\" indent=\"0\":\n%s", got)
 	}
+}
+
+// ---------------------------------------------------------------------------
+// GDI vertical metrics (OS/2 usWinAscent/usWinDescent) — the baseline fix.
+// ---------------------------------------------------------------------------
+
+// synthSfnt builds a minimal sfnt byte blob whose table directory carries the
+// given tables. content maps tag -> table body; the directory is well-formed
+// enough for parseFontVitals, which is all this test exercises.
+func synthSfnt(content map[string][]byte) []byte {
+	tags := make([]string, 0, len(content))
+	for tag := range content {
+		tags = append(tags, tag)
+	}
+	sort.Strings(tags)
+	n := len(tags)
+	body := 12 + 16*n
+	buf := make([]byte, body)
+	binary.BigEndian.PutUint32(buf[0:4], 0x00010000) // sfntVersion
+	binary.BigEndian.PutUint16(buf[4:6], uint16(n))
+	for i, tag := range tags {
+		off := 12 + 16*i
+		copy(buf[off:off+4], tag)
+		binary.BigEndian.PutUint32(buf[off+8:off+12], uint32(body))
+		binary.BigEndian.PutUint32(buf[off+12:off+16], uint32(len(content[tag])))
+		buf = append(buf, content[tag]...)
+		body += len(content[tag])
+	}
+	return buf
+}
+
+func testVitalsTables(winAsc, winDesc uint16) map[string][]byte {
+	head := make([]byte, 54)
+	binary.BigEndian.PutUint16(head[18:20], 2048) // unitsPerEm
+	os2 := make([]byte, 78)
+	binary.BigEndian.PutUint16(os2[74:76], winAsc)
+	binary.BigEndian.PutUint16(os2[76:78], winDesc)
+	return map[string][]byte{"head": head, "OS/2": os2}
+}
+
+// parseFontVitals must read usWinAscent/usWinDescent at OS/2 offsets 74/76 and
+// unitsPerEm at head+18 — those offsets are what make Calibri's win metrics
+// (1950/550) reachable, and they are version-stable across every OS/2 version.
+func TestParseFontVitalsReadsWinMetrics(t *testing.T) {
+	v, ok := parseFontVitals(synthSfnt(testVitalsTables(1950, 550)), 0)
+	if !ok {
+		t.Fatal("parseFontVitals rejected a well-formed OS/2 font")
+	}
+	if v.upem != 2048 || v.winAsc != 1950 || v.winDesc != 550 {
+		t.Fatalf("vitals = upem %d winAsc %d winDesc %d, want 2048/1950/550", v.upem, v.winAsc, v.winDesc)
+	}
+
+	// A font too old for OS/2 falls back to hhea (ascent/descent signed).
+	hhea := make([]byte, 36)
+	binary.BigEndian.PutUint16(hhea[4:6], 1600)
+	binary.BigEndian.PutUint16(hhea[6:8], 0xFE70) // -400 as int16
+	v, ok = parseFontVitals(synthSfnt(map[string][]byte{
+		"head": testVitalsTables(0, 0)["head"], "hhea": hhea,
+	}), 0)
+	if !ok {
+		t.Fatal("parseFontVitals rejected an OS/2-less font with hhea")
+	}
+	if v.winAsc != 1600 || v.winDesc != 400 {
+		t.Fatalf("hhea fallback = winAsc %d winDesc %d, want 1600/400", v.winAsc, v.winDesc)
+	}
+
+	if _, ok := parseFontVitals([]byte{0x00, 0x01}, 0); ok {
+		t.Error("parseFontVitals accepted truncated data")
+	}
+}
+
+// buildTextLine must prefer a run's recorded win metrics over the hhea values
+// face.Metrics reports; that preference is the whole baseline fix (Calibri's
+// hhea ascent 0.75em vs win ascent 0.952em put every baseline 13px too high on
+// 28pt text). basicfont keeps this independent of installed fonts.
+func TestBuildTextLinePrefersWinMetrics(t *testing.T) {
+	r := &renderer{}
+	run := textRun{text: "x", face: basicfont.Face7x13, width: 7, winAsc: 40, winDesc: 14}
+	tl := r.buildTextLine([]textRun{run})
+	if tl.ascent != 40 || tl.descent != 14 {
+		t.Fatalf("line with win metrics = asc %d desc %d, want 40/14 (face metrics leaked in)", tl.ascent, tl.descent)
+	}
+	if tl.lineHeight != 54 {
+		t.Fatalf("lineHeight = %d, want 54 = winAsc+winDesc with no line gap", tl.lineHeight)
+	}
+
+	// Without recorded metrics the old face.Metrics path still answers.
+	tl = r.buildTextLine([]textRun{{text: "x", face: basicfont.Face7x13, width: 7}})
+	if tl.ascent <= 0 || tl.descent <= 0 || tl.lineHeight < tl.ascent+tl.descent {
+		t.Fatalf("fallback metrics = asc %d desc %d lh %d, want the face's own values", tl.ascent, tl.descent, tl.lineHeight)
+	}
+}
+
+// The registration side: a scanned font's win metrics must be queryable and
+// plausible. Skipped only where the machine has no fonts at all, exactly like
+// the golden tests.
+func TestFontCacheWinVerticalMetrics(t *testing.T) {
+	fc := NewFontCache()
+	requireAnyFont(t, fc)
+	found := false
+	for _, name := range []string{"Calibri", "Arial", "Microsoft YaHei", "Segoe UI", "Times New Roman", "SimSun"} {
+		if !fc.HasFont(name, false, false) {
+			continue
+		}
+		asc, desc, ok := fc.WinVerticalMetrics(name, 100, false, false)
+		if !ok {
+			t.Errorf("WinVerticalMetrics(%q) not ok although the font is registered: the vitals were never recorded", name)
+			continue
+		}
+		if asc <= 0 || desc <= 0 || asc+desc > 250 {
+			t.Errorf("WinVerticalMetrics(%q, 100px) = %v/%v, implausible for a 100px em", name, asc, desc)
+		}
+		found = true
+		break
+	}
+	if !found {
+		t.Skip("none of the well-known fonts installed")
+	}
+}
+
+// The wiring end to end: buildParaTextRuns must stamp the cache's win metrics
+// onto runs, and buildTextLine must consume them — otherwise the deck quietly
+// reverts to the hhea placement the pixel comparison ruled out. Needs a font
+// whose win and hhea ascents actually differ (Calibri qualifies; Arial's are
+// identical, which is why this probes a few candidates).
+func TestWinMetricsReachBuildTextLine(t *testing.T) {
+	fc := NewFontCache()
+	requireAnyFont(t, fc)
+	r := &renderer{fontCache: fc, scaleX: 640.0 / 9144000.0, scaleY: 640.0 / 9144000.0}
+	for _, name := range []string{"Calibri", "Segoe UI", "Times New Roman", "Microsoft YaHei", "Arial"} {
+		if !fc.HasFont(name, false, false) {
+			continue
+		}
+		px := 40 * 12700 * r.scaleX // fontSizePixels for 40pt
+		winAsc, _, ok := fc.WinVerticalMetrics(name, px, false, false)
+		face := fc.GetMeasureFace(name, px, false, false)
+		if !ok || face == nil {
+			continue
+		}
+		hheaAsc := face.Metrics().Ascent.Ceil()
+		if float64(hheaAsc)-winAsc < 2 && winAsc-float64(hheaAsc) < 2 {
+			continue // this font cannot discriminate the two metric systems
+		}
+		f := NewFont()
+		f.SetName(name).SetSize(40)
+		runs := r.buildParaTextRuns([]ParagraphElement{&TextRun{text: "H", font: f}})
+		if len(runs) == 0 {
+			t.Fatalf("%s: buildParaTextRuns produced no runs", name)
+		}
+		tl := r.buildTextLine(runs)
+		if tl.ascent != int(winAsc+0.5) {
+			t.Errorf("%s: line ascent = %d, want the win metric %d (hhea %d leaked into the baseline)", name, tl.ascent, int(winAsc+0.5), hheaAsc)
+		}
+		return
+	}
+	t.Skip("no installed font discriminates win from hhea ascent")
 }

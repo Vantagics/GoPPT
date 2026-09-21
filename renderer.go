@@ -5029,11 +5029,15 @@ func (r *renderer) buildParaTextRuns(elements []ParagraphElement) []textRun {
 				}
 				scaledPt := sizePt * 12700.0 * r.scaleX
 				var faces, measures [numTextClasses]font.Face
+				var wins [numTextClasses]textWin
 				faces[textClassLatin] = r.fontCache.GetFace(faceFont.Name, scaledPt, faceFont.Bold, faceFont.Italic)
 				if faces[textClassLatin] == nil {
 					faces[textClassLatin] = r.getFace(faceFont)
 				}
 				measures[textClassLatin] = r.getMeasureFace(faceFont)
+				if a, d, ok := r.fontCache.WinVerticalMetrics(faceFont.Name, scaledPt, faceFont.Bold, faceFont.Italic); ok {
+					wins[textClassLatin] = textWin{asc: int(a + 0.5), desc: int(d + 0.5)}
+				}
 				// Face selection is driven by the characters in this run, not by
 				// the declared font names: a name that resolves can still lack
 				// the glyphs, and then the text draws as empty boxes.
@@ -5042,24 +5046,37 @@ func (r *renderer) buildParaTextRuns(elements []ParagraphElement) []textRun {
 					faces[textClassCJK], used = r.getCJKFace(faceFont, e.text)
 					measures[textClassCJK], _ = r.getCJKMeasureFace(faceFont, e.text)
 					r.noteCJKFont(f, used)
+					if a, d, ok := r.fontCache.WinVerticalMetrics(used, scaledPt, faceFont.Bold, faceFont.Italic); ok {
+						wins[textClassCJK] = textWin{asc: int(a + 0.5), desc: int(d + 0.5)}
+					}
 				}
 				if containsSymbol(e.text) {
 					var used string
 					faces[textClassSymbol], used = r.getSymbolFace(faceFont, e.text)
 					measures[textClassSymbol], _ = r.getSymbolMeasureFace(faceFont, e.text)
 					r.noteSymbolFont(f, used)
+					if a, d, ok := r.fontCache.WinVerticalMetrics(used, scaledPt, faceFont.Bold, faceFont.Italic); ok {
+						wins[textClassSymbol] = textWin{asc: int(a + 0.5), desc: int(d + 0.5)}
+					}
 				}
-				runs = append(runs, r.splitRunByClass(e.text, f, faces, measures)...)
+				runs = append(runs, r.splitRunByClass(e.text, f, faces, measures, wins)...)
 			} else {
 				face := r.getFace(faceFont)
 				mf := r.getMeasureFace(faceFont)
-				runs = append(runs, textRun{
+				tr := textRun{
 					text:        e.text,
 					font:        f,
 					face:        face,
 					measureFace: mf,
 					width:       measureStringWithKern(face, e.text).Ceil(),
-				})
+				}
+				if r.fontCache != nil {
+					if a, d, ok := r.fontCache.WinVerticalMetrics(faceFont.Name, r.fontSizePixels(faceFont), faceFont.Bold, faceFont.Italic); ok {
+						tr.winAsc = int(a + 0.5)
+						tr.winDesc = int(d + 0.5)
+					}
+				}
+				runs = append(runs, tr)
 			}
 		case *BreakElement:
 			runs = append(runs, textRun{text: "\n"})
@@ -5075,7 +5092,7 @@ func (r *renderer) buildParaTextRuns(elements []ParagraphElement) []textRun {
 // faces and measures are indexed by textClass and are supplied by the caller,
 // which resolves one face per class for the whole run — so the sample every
 // face was chosen against is the same one the segments are cut from.
-func (r *renderer) splitRunByClass(text string, f *Font, faces, measures [numTextClasses]font.Face) []textRun {
+func (r *renderer) splitRunByClass(text string, f *Font, faces, measures [numTextClasses]font.Face, wins [numTextClasses]textWin) []textRun {
 	// A class with no face of its own — no installed font covers its
 	// characters — is drawn with the Latin face, which the caller always
 	// supplies. Normalising here is also what keeps the split conservative:
@@ -5115,6 +5132,8 @@ func (r *renderer) splitRunByClass(text string, f *Font, faces, measures [numTex
 			face:        face,
 			measureFace: measures[class],
 			width:       measureStringWithKern(face, seg).Ceil(),
+			winAsc:      wins[class].asc,
+			winDesc:     wins[class].desc,
 		})
 	}
 
@@ -5155,6 +5174,23 @@ type textRun struct {
 	// face's. PowerPoint sizes a line by its text, not its bullet, so line
 	// metrics ignore bullet runs and the glyph rides the text baseline.
 	isBullet bool
+	// winAsc/winDesc are the GDI vertical metrics (OS/2 usWinAscent and
+	// usWinDescent) of the face this run draws with, scaled to the face's
+	// pixel size. PowerPoint places the baseline winAsc below the line top
+	// and advances lines by winAsc+winDesc, but Go's font.Face.Metrics
+	// reports the hhea values instead — for Calibri a fifth of an em apart
+	// (hhea ascent 0.75em vs win ascent 0.952em), which put every baseline
+	// 13px too high on 28pt text. Zero means "unknown": the run then falls
+	// back to face.Metrics in buildTextLine.
+	winAsc  int
+	winDesc int
+}
+
+// textWin carries the win-metric pair for one text class through
+// splitRunByClass, which stamps them onto each segment run it flushes.
+type textWin struct {
+	asc  int
+	desc int
 }
 
 // mface returns the face to use for measurement. If a dedicated measure face
@@ -5206,11 +5242,27 @@ func (r *renderer) buildTextLine(runs []textRun) textLine {
 	}
 	for _, run := range textRuns {
 		tl.width += run.width
-		if run.face == nil {
-			continue
-		}
 		if !hasCJK && containsCJK(run.text) {
 			hasCJK = true
+		}
+		if run.winAsc > 0 || run.winDesc > 0 {
+			// GDI metrics recorded at face-creation time — PowerPoint's
+			// baseline placement and line advance. These win over the
+			// hhea-derived face.Metrics, which sit a line-gap (and for
+			// fonts like Calibri a fifth of an em) away from them.
+			if run.winAsc > tl.ascent {
+				tl.ascent = run.winAsc
+			}
+			if run.winDesc > tl.descent {
+				tl.descent = run.winDesc
+			}
+			if h := run.winAsc + run.winDesc; h > maxHeight {
+				maxHeight = h
+			}
+			continue
+		}
+		if run.face == nil {
+			continue
 		}
 		// Use measure face (HintingNone) for line metrics when available.
 		// HintingFull rounds ascent/descent to pixel boundaries, inflating
@@ -6015,13 +6067,20 @@ func (r *renderer) buildBulletRun(b *Bullet, para *Paragraph, ordinal int) textR
 		}
 		w += gap
 	}
-	return textRun{
+	br := textRun{
 		text:     text,
 		font:     bulletFont,
 		face:     face,
 		width:    w,
 		isBullet: true,
 	}
+	if r.fontCache != nil {
+		if a, d, ok := r.fontCache.WinVerticalMetrics(bulletFont.Name, r.fontSizePixels(bulletFont), bulletFont.Bold, bulletFont.Italic); ok {
+			br.winAsc = int(a + 0.5)
+			br.winDesc = int(d + 0.5)
+		}
+	}
+	return br
 }
 
 // isSymbolFont returns true if the font name is a symbol/dingbats font
@@ -6512,6 +6571,8 @@ func (r *renderer) wrapRunLine(runs []textRun, maxWidth int) []textLine {
 						measureFace: run.measureFace,
 						width:       measureStringWithKern(run.face, pText).Ceil(),
 						isBullet:    run.isBullet,
+						winAsc:      run.winAsc,
+						winDesc:     run.winDesc,
 					})
 				}
 				lines = append(lines, r.buildTextLine(currentRuns))
@@ -6538,6 +6599,8 @@ func (r *renderer) wrapRunLine(runs []textRun, maxWidth int) []textLine {
 				measureFace: run.measureFace,
 				width:       measureStringWithKern(run.face, pText).Ceil(),
 				isBullet:    run.isBullet,
+				winAsc:      run.winAsc,
+				winDesc:     run.winDesc,
 			}
 			currentRuns = append(currentRuns, wr)
 			currentWidth += pw
@@ -6650,6 +6713,8 @@ func (r *renderer) wrapRunLineWithIndent(runs []textRun, firstLineWidth, contLin
 						measureFace: run.measureFace,
 						width:       measureStringWithKern(run.face, pText).Ceil(),
 						isBullet:    run.isBullet,
+						winAsc:      run.winAsc,
+						winDesc:     run.winDesc,
 					})
 				}
 				lines = append(lines, r.buildTextLine(currentRuns))
@@ -6676,6 +6741,8 @@ func (r *renderer) wrapRunLineWithIndent(runs []textRun, firstLineWidth, contLin
 				face:        run.face,
 				measureFace: run.measureFace,
 				width:       measureStringWithKern(run.face, pText).Ceil(),
+				winAsc:      run.winAsc,
+				winDesc:     run.winDesc,
 			})
 			currentWidth += pw
 		}
