@@ -3714,6 +3714,13 @@ type layoutPlaceholder struct {
 	insetTop    int64
 	insetBottom int64
 	insetsSet   bool
+	// Vertical anchoring from bodyPr. A placeholder inherits its anchor from
+	// the layout and then the master the same way it inherits its insets: the
+	// master's title placeholder is where "anchor=ctr" lives in a deck
+	// PowerPoint wrote, because the layout and the slide both leave bodyPr
+	// empty.
+	anchorSet bool
+	anchor    TextAnchorType
 }
 
 // applyLayoutInheritance reads the slide layout and applies inherited properties
@@ -3821,6 +3828,11 @@ func (r *PPTXReader) applyLayoutInheritance(zr *zip.Reader, slide *Slide, rels [
 		applyPlaceholderInsets(ph, match)
 		applyPlaceholderInsets(ph, masterMatch)
 
+		// Vertical anchoring, same ladder and same reasoning as the insets:
+		// the slide's own anchor wins, then the layout's, then the master's.
+		applyPlaceholderAnchor(ph, match)
+		applyPlaceholderAnchor(ph, masterMatch)
+
 		// Fonts, farthest first so that each nearer rung can still override.
 		applyMasterTextStyles(ph, pres.masterTextStyles)
 		applyPlaceholderFont(ph, masterMatch)
@@ -3866,6 +3878,20 @@ func applyPlaceholderInsets(ph *PlaceholderShape, def *layoutPlaceholder) {
 	ph.insetTop = def.insetTop
 	ph.insetBottom = def.insetBottom
 	ph.insetsSet = true
+}
+
+// applyPlaceholderAnchor copies a definition's vertical anchor onto the
+// placeholder if neither the slide nor a nearer rung of the ladder gave it one.
+//
+// TextAnchorNone ("") is what the reader stores for "no anchor attribute", so
+// it doubles as the unset marker; an explicit anchor="t" reads back as "t" and
+// is therefore never overwritten — which matters, because an explicit top is
+// the slide overriding the master's centre.
+func applyPlaceholderAnchor(ph *PlaceholderShape, def *layoutPlaceholder) {
+	if ph == nil || def == nil || !def.anchorSet || ph.textAnchor != TextAnchorNone {
+		return
+	}
+	ph.textAnchor = def.anchor
 }
 
 // applyPlaceholderFont copies a definition's font onto the runs of ph that have
@@ -3926,6 +3952,12 @@ type masterLevelStyle struct {
 	marL     int64
 	indent   int64
 	color    Color
+	// Space before each paragraph, in hundredths of a point — the units the
+	// paragraph model stores spcPts in. A master usually declares it as a
+	// percentage of the line (<a:spcPct val="20000"/>), which is converted
+	// here with the level's own font size (a line is 1.2× the size), so the
+	// paragraph carries an absolute value afterwards like any other.
+	spcBef int
 }
 
 // masterTextStyles is a slide master's <p:txStyles>, indexed by outline level
@@ -4000,6 +4032,8 @@ func parseMasterTextStyles(data []byte, pres *Presentation) *masterTextStyles {
 	var cur *masterLevelStyle
 	inDefRPr := false
 	inSolidFill := false
+	inSpcBef := false
+	spcBefPct := 0
 
 	for {
 		token, err := decoder.Token()
@@ -4069,6 +4103,37 @@ func parseMasterTextStyles(data []byte, pres *Presentation) *masterTextStyles {
 				}
 			case "solidFill":
 				inSolidFill = true
+			case "spcBef":
+				// Space before each paragraph. PowerPoint's own masters write
+				// it as a percentage of the line (<a:spcPct val="20000"/>),
+				// less often as absolute points; both are captured here and
+				// the percentage is converted when the level closes, because
+				// defRPr — which carries the size the percentage needs — ends
+				// after spcBef begins.
+				if cur != nil {
+					inSpcBef = true
+					spcBefPct = 0
+				}
+			case "spcPts":
+				if inSpcBef && cur != nil {
+					for _, attr := range t.Attr {
+						if attr.Name.Local == "val" {
+							if v, err := strconv.Atoi(attr.Value); err == nil {
+								cur.spcBef = v
+							}
+						}
+					}
+				}
+			case "spcPct":
+				if inSpcBef && cur != nil {
+					for _, attr := range t.Attr {
+						if attr.Name.Local == "val" {
+							if v, err := strconv.Atoi(attr.Value); err == nil {
+								spcBefPct = v
+							}
+						}
+					}
+				}
 			case "srgbClr":
 				if inSolidFill && cur != nil {
 					for _, attr := range t.Attr {
@@ -4096,8 +4161,17 @@ func parseMasterTextStyles(data []byte, pres *Presentation) *masterTextStyles {
 				inDefRPr = false
 			case "solidFill":
 				inSolidFill = false
+			case "spcBef":
+				inSpcBef = false
 			case "lvl1pPr", "lvl2pPr", "lvl3pPr", "lvl4pPr", "lvl5pPr",
 				"lvl6pPr", "lvl7pPr", "lvl8pPr", "lvl9pPr":
+				// Now the level's defRPr has been seen, a percentage space
+				// can finally be turned into points: a line is 1.2× the font
+				// size, and the percentage is of that line. 20000 of a 28pt
+				// level is 672 (6.72pt in hundredths).
+				if cur != nil && cur.spcBef == 0 && spcBefPct > 0 && cur.size > 0 {
+					cur.spcBef = int(float64(cur.size) * 1.2 * float64(spcBefPct) / 100000 * 100)
+				}
 				cur = nil
 			case "titleStyle", "bodyStyle", "otherStyle":
 				table = nil
@@ -4140,6 +4214,12 @@ func applyMasterTextStyles(ph *PlaceholderShape, m *masterTextStyles) {
 		}
 		if para.alignment.Indent == 0 && s.indent != 0 {
 			para.alignment.Indent = s.indent
+		}
+		// Space before paragraphs. PowerPoint applies it to every paragraph,
+		// the first one included, so 0 (the model's "nothing declared") simply
+		// takes the master's value.
+		if para.spaceBefore == 0 && s.spcBef > 0 {
+			para.spaceBefore = s.spcBef
 		}
 
 		for _, elem := range para.elements {
@@ -4201,6 +4281,8 @@ func (r *PPTXReader) parsePlaceholderDefs(data []byte, pres *Presentation) []lay
 	var fontColor Color
 	var insetLeft, insetRight, insetTop, insetBottom int64
 	var insetsSet bool
+	var phAnchor TextAnchorType
+	var phAnchorSet bool
 
 	for {
 		token, err := decoder.Token()
@@ -4226,6 +4308,8 @@ func (r *PPTXReader) parsePlaceholderDefs(data []byte, pres *Presentation) []lay
 				insetLeft, insetRight = 91440, 91440
 				insetTop, insetBottom = 45720, 45720
 				insetsSet = false
+				phAnchor = TextAnchorNone
+				phAnchorSet = false
 			case "nvSpPr":
 				if inSp {
 					inNvSpPr = true
@@ -4305,6 +4389,22 @@ func (r *PPTXReader) parsePlaceholderDefs(data []byte, pres *Presentation) []lay
 							if v, err := strconv.ParseInt(attr.Value, 10, 64); err == nil {
 								insetBottom = v
 								insetsSet = true
+							}
+						case "anchor":
+							// Only the three anchors the model carries; the
+							// schema's remaining values ("just", "dist",
+							// "justLow") have no model counterpart and inherit
+							// as nothing rather than being guessed.
+							phAnchorSet = true
+							switch attr.Value {
+							case "t":
+								phAnchor = TextAnchorTop
+							case "ctr":
+								phAnchor = TextAnchorMiddle
+							case "b":
+								phAnchor = TextAnchorBottom
+							default:
+								phAnchor = TextAnchorNone
 							}
 						}
 					}
@@ -4401,6 +4501,8 @@ func (r *PPTXReader) parsePlaceholderDefs(data []byte, pres *Presentation) []lay
 						insetTop:    insetTop,
 						insetBottom: insetBottom,
 						insetsSet:   insetsSet,
+						anchorSet:   phAnchorSet,
+						anchor:      phAnchor,
 					})
 				}
 				inSp = false

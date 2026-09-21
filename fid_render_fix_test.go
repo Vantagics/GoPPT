@@ -654,3 +654,253 @@ func TestCylinderPresetsRenderFilled(t *testing.T) {
 		}
 	}
 }
+
+// ---------------------------------------------------------------------------
+// Placeholder bodyPr anchoring inherits down the slide → layout → master
+// ladder. The master's title placeholder is where anchor="ctr" lives in a
+// deck PowerPoint wrote — slide5/6 of the comparison deck drew their titles
+// at the top of the frame because nothing read it.
+// ---------------------------------------------------------------------------
+
+const anchorMaster = `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<p:sldMaster xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships" xmlns:p="http://schemas.openxmlformats.org/presentationml/2006/main">
+  <p:cSld>
+    <p:spTree>
+      <p:nvGrpSpPr><p:cNvPr id="1" name=""/><p:cNvGrpSpPr/><p:nvPr/></p:nvGrpSpPr>
+      <p:grpSpPr/>
+      <p:sp>
+        <p:nvSpPr><p:cNvPr id="2" name="Title Placeholder"/><p:cNvSpPr><a:spLocks noGrp="1"/></p:cNvSpPr><p:nvPr><p:ph type="title"/></p:nvPr></p:nvSpPr>
+        <p:spPr/>
+        <p:txBody><a:bodyPr anchor="ctr"/><a:lstStyle/><a:p/></p:txBody>
+      </p:sp>
+    </p:spTree>
+  </p:cSld>
+  <p:clrMap bg1="lt1" tx1="dk1" bg2="lt2" tx2="dk2" accent1="accent1" accent2="accent2" accent3="accent3" accent4="accent4" accent5="accent5" accent6="accent6" hlink="hlink" folHlink="folHlink"/>
+  <p:sldLayoutIdLst/>
+  <p:txStyles/>
+</p:sldMaster>`
+
+const anchorSlideTitle = `
+<p:sp>
+  <p:nvSpPr>
+    <p:cNvPr id="4" name="Title"/>
+    <p:cNvSpPr><a:spLocks noGrp="1"/></p:cNvSpPr>
+    <p:nvPr><p:ph type="title"/></p:nvPr>
+  </p:nvSpPr>
+  <p:spPr>
+    <a:xfrm><a:off x="500000" y="300000"/><a:ext cx="8000000" cy="1000000"/></a:xfrm>
+  </p:spPr>
+  <p:txBody>
+    <a:bodyPr/>
+    <a:lstStyle/>
+    <a:p><a:r><a:rPr lang="en-US"/><a:t>TITLE</a:t></a:r></a:p>
+  </p:txBody>
+</p:sp>`
+
+func TestPlaceholderAnchorInheritsFromMaster(t *testing.T) {
+	parts := zipParts(t, writeToBytes(t, New()))
+	parts["ppt/slides/slide1.xml"] = []byte(bodyPrSlide(anchorSlideTitle))
+	parts["ppt/slideMasters/slideMaster1.xml"] = []byte(anchorMaster)
+	pkg := buildZip(t, parts)
+	pres, err := (&PPTXReader{}).ReadFromReader(bytes.NewReader(pkg), int64(len(pkg)))
+	if err != nil {
+		t.Fatalf("read the package: %v", err)
+	}
+	ph, ok := firstShapeOfType[*PlaceholderShape](pres)
+	if !ok {
+		t.Fatal("no title placeholder found")
+	}
+	if ph.textAnchor != TextAnchorMiddle {
+		t.Errorf("read anchor = %q, want %q: the master placeholder's anchor=ctr did not come down the ladder", ph.textAnchor, TextAnchorMiddle)
+	}
+	// The write half: the inherited anchor is emitted on the slide's own
+	// bodyPr so the value survives another round trip.
+	parts2 := zipParts(t, writeToBytes(t, pres))
+	if got := string(parts2["ppt/slides/slide1.xml"]); !bytes.Contains([]byte(got), []byte(`anchor="ctr"`)) {
+		t.Errorf("written slide has no anchor=\"ctr\":\n%s", got)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Master bodyStyle space-before. <a:spcBef><a:spcPct val="20000"/> is a
+// percentage of the line — 20% of a 28pt level's 33.6pt line is 6.72pt, the
+// gap between every pair of paragraphs on slide32, which used to vanish
+// because only spcPts was understood and only for runs, never inherited.
+// ---------------------------------------------------------------------------
+
+const spcBefMaster = `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<p:sldMaster xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships" xmlns:p="http://schemas.openxmlformats.org/presentationml/2006/main">
+  <p:cSld>
+    <p:spTree>
+      <p:nvGrpSpPr><p:cNvPr id="1" name=""/><p:cNvGrpSpPr/><p:nvPr/></p:nvGrpSpPr>
+      <p:grpSpPr/>
+    </p:spTree>
+  </p:cSld>
+  <p:clrMap bg1="lt1" tx1="dk1" bg2="lt2" tx2="dk2" accent1="accent1" accent2="accent2" accent3="accent3" accent4="accent4" accent5="accent5" accent6="accent6" hlink="hlink" folHlink="folHlink"/>
+  <p:sldLayoutIdLst/>
+  <p:txStyles>
+    <p:bodyStyle>
+      <a:lvl1pPr><a:spcBef><a:spcPct val="20000"/></a:spcBef><a:defRPr sz="2800"/></a:lvl1pPr>
+    </p:bodyStyle>
+  </p:txStyles>
+</p:sldMaster>`
+
+func TestMasterSpaceBeforeReachesParagraphs(t *testing.T) {
+	parts := zipParts(t, writeToBytes(t, New()))
+	parts["ppt/slides/slide1.xml"] = []byte(bodyPrSlide(masterLevelSlideShape))
+	parts["ppt/slideMasters/slideMaster1.xml"] = []byte(spcBefMaster)
+	pkg := buildZip(t, parts)
+	pres, err := (&PPTXReader{}).ReadFromReader(bytes.NewReader(pkg), int64(len(pkg)))
+	if err != nil {
+		t.Fatalf("read the package: %v", err)
+	}
+	ph, ok := firstShapeOfType[*PlaceholderShape](pres)
+	if !ok {
+		t.Fatal("no body placeholder found")
+	}
+	paras := ph.GetParagraphs()
+	if len(paras) != 2 {
+		t.Fatalf("got %d paragraphs, want 2", len(paras))
+	}
+	// 28pt line × 1.2 × 20% = 6.72pt = 672 hundredths.
+	if got := paras[0].spaceBefore; got != 672 {
+		t.Errorf("level-0 paragraph spaceBefore = %d, want 672 (20%% of a 28pt line)", got)
+	}
+	// The write half: the baked value survives as absolute points.
+	parts2 := zipParts(t, writeToBytes(t, pres))
+	if got := string(parts2["ppt/slides/slide1.xml"]); !bytes.Contains([]byte(got), []byte(`<a:spcBef><a:spcPts val="672"/>`)) {
+		t.Errorf("written slide has no spcPts val=\"672\":\n%s", got)
+	}
+}
+
+// PowerPoint applies space before the *first* paragraph of a text body too,
+// so the renderer must not skip it the way it skips nothing else.
+func TestFirstParagraphSpaceBeforeShiftsInk(t *testing.T) {
+	fc := NewFontCache()
+	firstInkRow := func(spaceBefore int) int {
+		pres := New()
+		shape := pres.GetActiveSlide().CreateRichTextShape()
+		shape.BaseShape.SetOffsetX(400000).SetOffsetY(400000)
+		shape.BaseShape.SetWidth(6000000).SetHeight(2000000)
+		run := shape.CreateTextRun("H")
+		run.GetFont().SetName("Arial").SetSize(24)
+		run.GetFont().Color = NewColor("000000")
+		shape.GetParagraphs()[0].spaceBefore = spaceBefore
+		opts := DefaultRenderOptions()
+		opts.Width = 640
+		opts.FontCache = fc
+		img, err := pres.SlideToImage(0, opts)
+		if err != nil {
+			t.Fatalf("render: %v", err)
+		}
+		rect := emuRect(t, pres, 400000, 400000, 6000000, 2000000, 640)
+		for y := rect.Min.Y; y < rect.Max.Y; y++ {
+			for x := rect.Min.X; x < rect.Max.X; x++ {
+				r, g, b, a := img.At(x, y).RGBA()
+				if a != 0 && (r+g+b)/3 < 20000 {
+					return y
+				}
+			}
+		}
+		return rect.Max.Y
+	}
+	plain := firstInkRow(0)
+	spaced := firstInkRow(1000) // 10pt: 8-9px at this scale
+	if spaced-plain < 5 {
+		t.Errorf("first paragraph ink row moved %d px with spaceBefore=1000 (%d vs %d); the first paragraph's space was skipped", spaced-plain, spaced, plain)
+	}
+}
+
+// An auto-numbered list keeps counting across the unnumbered sub-paragraphs
+// nested under its items: the count is per outline level. slide35 rendered
+// "1. 1. 1. 1. 1." because any non-numbered paragraph reset the only counter.
+func TestAutoNumberCountsPerLevel(t *testing.T) {
+	mk := func(level int, b *Bullet) *Paragraph {
+		p := NewParagraph()
+		p.alignment = NewAlignment()
+		p.alignment.Level = level
+		p.bullet = b
+		return p
+	}
+	number := func() *Bullet {
+		return &Bullet{Type: BulletTypeAutoNum, StartAt: 1, NumFormat: NumFormatArabicPeriod}
+	}
+	paras := []*Paragraph{
+		mk(0, number()),
+		mk(1, &Bullet{Type: BulletTypeNone}),
+		mk(0, number()),
+		mk(0, number()),
+	}
+	got := bulletOrdinals(paras)
+	want := []int{1, 0, 2, 3}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Fatalf("ordinals = %v, want %v", got, want)
+		}
+	}
+}
+
+// A tab inside a run advances to the next one-inch tab stop instead of
+// drawing the control character — the face has no glyph for it, so the text
+// used to grow a .notdef box (slide35's sub-bullets open with a tab, and the
+// "Memory:\t224 MB" info tables align on them).
+func TestTabJumpsToTheNextStop(t *testing.T) {
+	fc := NewFontCache()
+	columns := func(text string) []bool {
+		pres := New()
+		shape := pres.GetActiveSlide().CreateRichTextShape()
+		shape.BaseShape.SetOffsetX(200000).SetOffsetY(200000)
+		shape.BaseShape.SetWidth(6000000).SetHeight(800000)
+		run := shape.CreateTextRun(text)
+		run.GetFont().SetName("Arial").SetSize(20)
+		run.GetFont().Color = NewColor("000000")
+		opts := DefaultRenderOptions()
+		opts.Width = 640
+		opts.FontCache = fc
+		img, err := pres.SlideToImage(0, opts)
+		if err != nil {
+			t.Fatalf("render %q: %v", text, err)
+		}
+		rect := emuRect(t, pres, 200000, 200000, 6000000, 800000, 640)
+		cols := make([]bool, rect.Dx())
+		for y := rect.Min.Y; y < rect.Max.Y; y++ {
+			for x := rect.Min.X; x < rect.Max.X; x++ {
+				r, g, b, a := img.At(x, y).RGBA()
+				if a != 0 && (r+g+b)/3 < 20000 {
+					cols[x-rect.Min.X] = true
+				}
+			}
+		}
+		return cols
+	}
+	lastInk := func(cols []bool) int {
+		for i := len(cols) - 1; i >= 0; i-- {
+			if cols[i] {
+				return i
+			}
+		}
+		return -1
+	}
+	firstInk := func(cols []bool) int {
+		for i := range cols {
+			if cols[i] {
+				return i
+			}
+		}
+		return -1
+	}
+	plainCols := columns("AB")
+	plainEnd := lastInk(plainCols)
+	// Plain glyphs sit together: the whole word spans a couple of letters.
+	if plainEnd-firstInk(plainCols) > 30 {
+		t.Errorf("plain AB spans %d px, want adjacent glyphs", plainEnd-firstInk(plainCols))
+	}
+	tabEnd := lastInk(columns("A\tB"))
+	// One inch is ≥40px at these scales. If the tab jumped, "B" starts a full
+	// stop later; if the tab was skipped or drawn as a narrow tofu box, "B"
+	// sits within a glyph width of "A".
+	if tabEnd-plainEnd < 30 {
+		t.Errorf("tabbed text's last ink column = %d vs %d for plain AB; the tab advanced %d px, want a full stop (~≥40px) — a skipped or tofu-drawn tab advances nothing",
+			tabEnd, plainEnd, tabEnd-plainEnd)
+	}
+}

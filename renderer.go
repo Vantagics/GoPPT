@@ -5285,10 +5285,10 @@ func (r *renderer) measureParagraphsHeight(paragraphs []*Paragraph, w, h int, an
 	}
 
 	totalH := 0
-	for i, li := range allLines {
-		if i > 0 {
-			totalH += li.spaceBefore
-		}
+	for _, li := range allLines {
+		// spaceBefore applies to every paragraph, the first included — same
+		// as the draw path.
+		totalH += li.spaceBefore
 		lh := li.lineHeight
 		if li.lineSpacing < 0 {
 			lh = int(float64(lh) * float64(-li.lineSpacing) / 100000.0)
@@ -5445,10 +5445,10 @@ func (r *renderer) drawParagraphs(paragraphs []*Paragraph, x, y, w, h int, ancho
 
 	// Calculate total height
 	totalH := 0
-	for i, li := range allLines {
-		if i > 0 {
-			totalH += li.spaceBefore
-		}
+	for _, li := range allLines {
+		// spaceBefore only ever rides the first line of a paragraph, and
+		// PowerPoint applies it before the first paragraph too — no skip.
+		totalH += li.spaceBefore
 		lh := li.line.lineHeight
 		if li.lineSpacing < 0 {
 			// spcPct: negative value, percentage * 1000 (e.g. -150000 = 150%)
@@ -5475,10 +5475,10 @@ func (r *renderer) drawParagraphs(paragraphs []*Paragraph, x, y, w, h int, ancho
 	}
 
 	curY := startY
-	for i, li := range allLines {
-		if i > 0 {
-			curY += li.spaceBefore
-		}
+	for _, li := range allLines {
+		// Same rule as the height measure above: every paragraph carries its
+		// spaceBefore, the first one included.
+		curY += li.spaceBefore
 
 		lh := li.line.lineHeight
 		if li.lineSpacing < 0 {
@@ -5534,6 +5534,57 @@ func (r *renderer) drawParagraphs(paragraphs []*Paragraph, x, y, w, h int, ancho
 				} else if run.font.Subscript {
 					runBaseline += int(r.fontSizePixels(run.font)*0.25 + 0.5)
 				}
+			}
+
+			// Tab characters: PowerPoint advances to the next default tab
+			// stop — one inch from the paragraph's text origin — instead of
+			// drawing the control character, which the face has no glyph for
+			// and which otherwise comes out as a .notdef box (slide35's
+			// sub-bullets open with a tab, as do the "Memory:\t224 MB" info
+			// tables). Runs with tabs take a dedicated path; shadows on
+			// tabbed runs are not supported here.
+			if strings.Contains(run.text, "\t") {
+				startX := drawX
+				tabPx := r.emuToPixelX(914400)
+				if tabPx < 1 {
+					tabPx = 1
+				}
+				segs := strings.Split(run.text, "\t")
+				for si, seg := range segs {
+					if seg != "" {
+						sd := &font.Drawer{
+							Dst:  r.img,
+							Src:  image.NewUniform(drawSrc(fc)),
+							Face: run.face,
+							Dot:  fixed.P(drawX, runBaseline),
+						}
+						sd.DrawString(seg)
+						if run.font != nil && run.font.Bold {
+							sd.Dot = fixed.P(drawX+1, runBaseline)
+							sd.DrawString(seg)
+						}
+						if run.font != nil && run.font.Underline != UnderlineNone {
+							uy := runBaseline + 2
+							w := measureStringWithKern(run.face, seg).Ceil()
+							r.drawUnderline(drawX, drawX+w, uy, fc, run.font.Underline)
+						}
+						drawX += measureStringWithKern(run.face, seg).Ceil()
+					}
+					if si < len(segs)-1 {
+						// The tab jumps to the next one-inch stop, measured
+						// from the text area's left edge — not from lineX,
+						// which already carries the paragraph's margin and
+						// indent (a level-1 sub-bullet's first tab must land
+						// on its marL, one stop out, not two).
+						off := drawX - x
+						drawX = x + (off/tabPx+1)*tabPx
+					}
+				}
+				if run.font != nil && run.font.Strikethrough {
+					sy := runBaseline - li.line.ascent/3
+					r.drawLine(startX, sy, drawX, sy, fc)
+				}
+				continue
 			}
 
 			// Run-level text shadow: the glyph pass is repeated offset along
@@ -5760,34 +5811,53 @@ func (r *renderer) drawUnderline(x1, x2, y int, c color.RGBA, style UnderlineTyp
 // Without it buildBulletRun read the same StartAt for every paragraph and a
 // numbered list rendered as "1. 1. 1.".
 //
+// The count is kept per outline level: a numbered list at level 0 is not
+// broken by the indented bullet-less or character-bulleted paragraphs under
+// its items (slide35's "1. … 2. …" interleaved with unnumbered sub-points),
+// only by another numbered paragraph at the same level with a different
+// format. Two other breaks remain: a paragraph with no bullet or a character
+// bullet ends its own level's list, and — see below — numbered paragraphs
+// restart their own level only.
+//
 // A sequence is broken by a paragraph with no bullet, a character bullet, or a
 // different number format — a new list then starts from its own startAt. Both
 // the measuring passes and the drawing pass call this, so they cannot disagree
 // about how wide the bullet is.
 func bulletOrdinals(paragraphs []*Paragraph) []int {
 	ordinals := make([]int, len(paragraphs))
-	format := ""
-	running := 0
+	type seq struct {
+		format  string
+		running int
+	}
+	state := map[int]*seq{}
 	for i, para := range paragraphs {
+		level := 0
+		if para.alignment != nil && para.alignment.Level > 0 {
+			level = para.alignment.Level
+		}
 		b := para.bullet
 		if b == nil || (b.Type != BulletTypeNumeric && b.Type != BulletTypeAutoNum) {
-			format, running = "", 0
+			// The break ends only this level's list; the numbered list one
+			// level out continues over it.
+			delete(state, level)
 			continue
 		}
 		num := b.NumFormat
 		if num == "" {
 			num = defaultNumFormat
 		}
-		if running == 0 || num != format {
-			running = b.StartAt
+		s := state[level]
+		if s == nil || num != s.format {
+			running := b.StartAt
 			if running < defaultBulletStart {
 				running = defaultBulletStart
 			}
-			format = num
+			s = &seq{format: num, running: running}
+			state[level] = s
 		} else {
-			running++
+			s.running++
 		}
-		ordinals[i] = running
+		ordinals[i] = s.running
 	}
 	return ordinals
 }
