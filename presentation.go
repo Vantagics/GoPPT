@@ -23,6 +23,28 @@ type Presentation struct {
 	// themeColors maps scheme color names (dk1, dk2, lt1, lt2, accent1..accent6,
 	// hlink, folHlink) to ARGB hex strings (e.g. "FF000000").
 	themeColors map[string]string
+	// themeFonts maps the font references a theme declares to real typeface
+	// names: "+mj-lt" (major latin), "+mj-ea", "+mj-cs", "+mn-lt", "+mn-ea",
+	// "+mn-cs". They are references into theme1.xml's <a:fontScheme>, not names,
+	// and a reference stored as a name is a font no file matches.
+	themeFonts map[string]string
+	// masterTextStyles is the slide master's <p:txStyles>: the font, alignment
+	// and indentation a placeholder inherits when neither the slide nor the
+	// layout says anything. Read once, because every slide shares it.
+	masterTextStyles *masterTextStyles
+	// tableStyles holds ppt/tableStyles.xml keyed by style GUID, and
+	// defaultTableStyle is the list's def — the fallback for a table that
+	// names no style. A cell that declares no fill of its own takes the
+	// style's fill for its band.
+	tableStyles       map[string]*tableStyle
+	defaultTableStyle string
+	// masterPlaceholders is the geometry the slide master gives each
+	// placeholder. It is the last rung before the renderer's own default and
+	// is frequently the only rung that answers at all.
+	masterPlaceholders []layoutPlaceholder
+	// masterRead records that the master was looked for, so a master without
+	// placeholders is not re-read for every slide.
+	masterRead bool
 }
 
 // New creates a new Presentation with one default blank slide.

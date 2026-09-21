@@ -325,7 +325,14 @@ func applyPPrAttrs(p *Paragraph, attrs []xml.Attr) {
 		// The attribute block below needs somewhere to put the values, and the
 		// renderer treats a missing Alignment the same way it treats a default
 		// one, so building it here keeps a hand-built paragraph readable.
-		p.alignment = NewAlignment()
+		//
+		// It is deliberately left zero rather than NewAlignment(), whose
+		// Horizontal is HorizontalLeft. Stating "left" for a paragraph whose
+		// markup stated nothing is a value the file does not contain: it makes
+		// the writer emit algn="l" on save, and it hid the master's algn="ctr"
+		// from the inheritance ladder, because a title that had already been
+		// told "left" looks like one that was told on purpose.
+		p.alignment = &Alignment{}
 	}
 	for _, attr := range attrs {
 		switch attr.Name.Local {
@@ -618,6 +625,25 @@ func (r *PPTXReader) parseSlideXML(decoder *xml.Decoder, slide *Slide, rels []xm
 		// effectLst / outerShdw tracking
 		inEffectLst bool
 		inOuterShdw bool
+
+		// <a:clrChange> inside a picture's <a:blip>: a per-pixel colour
+		// replacement the composited photo depends on.
+		inClrChange bool
+		inClrFrom   bool
+		inClrTo     bool
+		clrFromHex  string // 6 hex digits, the colour being replaced
+		clrToHex    string // 6 hex digits, the replacement colour
+		clrToAlpha  int    // 1/1000 of a percent; -1 when none declared
+
+		// <p:style> fill/line references: the theme styling a shape falls
+		// back to when its own <p:spPr> declares neither.
+		inFillRef       bool
+		inLnRef         bool
+		styleFillScheme string // scheme colour name, e.g. "accent1"
+		styleLnScheme   string
+
+		// <a:tableStyleId> character data
+		inTableStyleID bool
 	}
 
 	state := &parseState{}
@@ -685,6 +711,10 @@ func (r *PPTXReader) parseSlideXML(decoder *xml.Decoder, slide *Slide, rels []xm
 	var pendingBorder *Border
 	var pendingHeadEnd *LineEnd
 	var pendingTailEnd *LineEnd
+
+	// lineColorExplicit records that the connector's <a:ln> declared its own
+	// colour; only then does the <p:style> lnRef stay out of the way.
+	var lineColorExplicit bool
 
 	// Deferred adjustment values from avLst
 	var pendingAdjustValues map[string]int
@@ -837,6 +867,11 @@ func (r *PPTXReader) parseSlideXML(decoder *xml.Decoder, slide *Slide, rels []xm
 					prstGeom = ""
 					shapeRotation = 0
 					pendingCustomPath = nil
+					lineColorExplicit = false
+					state.inFillRef = false
+					state.inLnRef = false
+					state.styleFillScheme = ""
+					state.styleLnScheme = ""
 				}
 			case "graphicFrame":
 				if state.inSpTree {
@@ -873,6 +908,30 @@ func (r *PPTXReader) parseSlideXML(decoder *xml.Decoder, slide *Slide, rels []xm
 					currentTable = NewTableShape(0, 0)
 					currentTable.rows = nil
 					currentTableRow = -1
+				}
+			case "tblPr":
+				if state.inTbl && currentTable != nil {
+					for _, attr := range t.Attr {
+						v := attr.Value == "1" || attr.Value == "true"
+						switch attr.Name.Local {
+						case "firstRow":
+							currentTable.firstRow = v
+						case "lastRow":
+							currentTable.lastRow = v
+						case "firstCol":
+							currentTable.firstCol = v
+						case "lastCol":
+							currentTable.lastCol = v
+						case "bandRow":
+							currentTable.bandRow = v
+						case "bandCol":
+							currentTable.bandCol = v
+						}
+					}
+				}
+			case "tableStyleId":
+				if state.inTbl && currentTable != nil {
+					state.inTableStyleID = true
 				}
 			case "gridCol":
 				if state.inTbl && currentTable != nil {
@@ -1260,10 +1319,11 @@ func (r *PPTXReader) parseSlideXML(decoder *xml.Decoder, slide *Slide, rels []xm
 					if currentParagraph.bullet == nil {
 						currentParagraph.bullet = NewBullet()
 					}
-					for _, attr := range t.Attr {
-						if attr.Name.Local == "typeface" {
-							currentParagraph.bullet.Font = attr.Value
-						}
+					// A bullet font is a typeface like any other, theme
+					// reference included: PowerPoint writes "+mj-lt" here as
+					// readily as it does on a run.
+					if n := typefaceOf(pres, t.Attr); n != "" {
+						currentParagraph.bullet.Font = n
 					}
 				}
 			case "buSzPct":
@@ -1592,7 +1652,20 @@ func (r *PPTXReader) parseSlideXML(decoder *xml.Decoder, slide *Slide, rels []xm
 			case "srgbClr":
 				state.inSrgbClr = true
 				lastColor = nil
-				if state.inGs {
+				if state.inClrFrom || state.inClrTo {
+					// The colour a <a:clrChange> rule replaces or paints
+					// with. Captured as hex, not as a Color — no alpha is
+					// implied until the rule's own <a:alpha> says so.
+					for _, attr := range t.Attr {
+						if attr.Name.Local == "val" {
+							if state.inClrFrom {
+								state.clrFromHex = attr.Value
+							} else {
+								state.clrToHex = attr.Value
+							}
+						}
+					}
+				} else if state.inGs {
 					// Gradient stop color
 					for _, attr := range t.Attr {
 						if attr.Name.Local == "val" {
@@ -1673,6 +1746,7 @@ func (r *PPTXReader) parseSlideXML(decoder *xml.Decoder, slide *Slide, rels []xm
 							c := NewColor("FF" + attr.Value)
 							if state.inCxnSp && currentLine != nil {
 								currentLine.lineColor = c
+								lineColorExplicit = true
 								lastColor = &currentLine.lineColor
 							} else if state.inSp {
 								if pendingBorder == nil {
@@ -1768,6 +1842,7 @@ func (r *PPTXReader) parseSlideXML(decoder *xml.Decoder, slide *Slide, rels []xm
 					lastColor = &currentFont.Color
 				} else if state.inSolidFill && state.inLn && !state.inRunProps {
 					if state.inCxnSp && currentLine != nil {
+						lineColorExplicit = true
 						currentLine.lineColor = c
 						lastColor = &currentLine.lineColor
 					} else if state.inSp {
@@ -1813,6 +1888,22 @@ func (r *PPTXReader) parseSlideXML(decoder *xml.Decoder, slide *Slide, rels []xm
 			case "schemeClr":
 				state.inSrgbClr = true // reuse for alpha child handling
 				lastColor = nil
+				if state.inFillRef || state.inLnRef {
+					// The colour the style reference points at. Captured by
+					// name and resolved when <p:style> closes, because a
+					// reference is a fallback, not a property: an explicit
+					// fill in <p:spPr> still outranks it.
+					for _, attr := range t.Attr {
+						if attr.Name.Local == "val" {
+							if state.inFillRef {
+								state.styleFillScheme = attr.Value
+							} else {
+								state.styleLnScheme = attr.Value
+							}
+						}
+					}
+					break
+				}
 				if pres != nil && pres.themeColors != nil {
 					var schemeName string
 					for _, attr := range t.Attr {
@@ -1869,6 +1960,7 @@ func (r *PPTXReader) parseSlideXML(decoder *xml.Decoder, slide *Slide, rels []xm
 							currentFont.Color = c
 							lastColor = &currentFont.Color
 						} else if state.inSolidFill && state.inLn && !state.inRunProps {
+							lineColorExplicit = true
 							if state.inCxnSp && currentLine != nil {
 								currentLine.lineColor = c
 								lastColor = &currentLine.lineColor
@@ -1966,6 +2058,7 @@ func (r *PPTXReader) parseSlideXML(decoder *xml.Decoder, slide *Slide, rels []xm
 					} else if state.inSolidFill && state.inRunProps && currentFont != nil {
 						currentFont.Color = c
 						lastColor = &currentFont.Color
+						lineColorExplicit = true
 					} else if state.inSolidFill && state.inLn && !state.inRunProps {
 						if state.inCxnSp && currentLine != nil {
 							currentLine.lineColor = c
@@ -2011,6 +2104,18 @@ func (r *PPTXReader) parseSlideXML(decoder *xml.Decoder, slide *Slide, rels []xm
 					}
 				}
 			case "alpha":
+				if state.inClrTo {
+					// The replacement's own opacity — <a:alpha val="0"/> is
+					// PowerPoint's "knock the colour out entirely".
+					for _, attr := range t.Attr {
+						if attr.Name.Local == "val" {
+							if v, err := strconv.Atoi(attr.Value); err == nil {
+								state.clrToAlpha = v
+							}
+						}
+					}
+					break
+				}
 				// <a:alpha val="67000"/> means 67% opacity
 				if state.inSrgbClr && lastColor != nil {
 					for _, attr := range t.Attr {
@@ -2082,43 +2187,31 @@ func (r *PPTXReader) parseSlideXML(decoder *xml.Decoder, slide *Slide, rels []xm
 				}
 			case "latin":
 				if state.inRunProps && currentFont != nil {
-					for _, attr := range t.Attr {
-						if attr.Name.Local == "typeface" && !strings.HasPrefix(attr.Value, "+") {
-							currentFont.Name = attr.Value
-						}
+					if n := typefaceOf(pres, t.Attr); n != "" {
+						currentFont.Name = n
 					}
 				} else if state.inDefRPr && state.inLstStyleLvl1 && lstStyleFont != nil {
-					for _, attr := range t.Attr {
-						if attr.Name.Local == "typeface" && !strings.HasPrefix(attr.Value, "+") {
-							lstStyleFont.Name = attr.Value
-						}
+					if n := typefaceOf(pres, t.Attr); n != "" {
+						lstStyleFont.Name = n
 					}
 				} else if state.inDefRPr && defFont != nil {
-					for _, attr := range t.Attr {
-						if attr.Name.Local == "typeface" && !strings.HasPrefix(attr.Value, "+") {
-							defFont.Name = attr.Value
-						}
+					if n := typefaceOf(pres, t.Attr); n != "" {
+						defFont.Name = n
 					}
 				}
 			case "ea":
 				// East Asian font
 				if state.inRunProps && currentFont != nil {
-					for _, attr := range t.Attr {
-						if attr.Name.Local == "typeface" && !strings.HasPrefix(attr.Value, "+") {
-							currentFont.NameEA = attr.Value
-						}
+					if n := typefaceOf(pres, t.Attr); n != "" {
+						currentFont.NameEA = n
 					}
 				} else if state.inDefRPr && state.inLstStyleLvl1 && lstStyleFont != nil {
-					for _, attr := range t.Attr {
-						if attr.Name.Local == "typeface" && !strings.HasPrefix(attr.Value, "+") {
-							lstStyleFont.NameEA = attr.Value
-						}
+					if n := typefaceOf(pres, t.Attr); n != "" {
+						lstStyleFont.NameEA = n
 					}
 				} else if state.inDefRPr && defFont != nil {
-					for _, attr := range t.Attr {
-						if attr.Name.Local == "typeface" && !strings.HasPrefix(attr.Value, "+") {
-							defFont.NameEA = attr.Value
-						}
+					if n := typefaceOf(pres, t.Attr); n != "" {
+						defFont.NameEA = n
 					}
 				}
 			case "t":
@@ -2260,6 +2353,33 @@ func (r *PPTXReader) parseSlideXML(decoder *xml.Decoder, slide *Slide, rels []xm
 					if v, ok := intAttrValue(t, "amt"); ok {
 						bgAlpha = v
 					}
+				}
+			case "clrChange":
+				// <a:clrChange><a:clrFrom>…</a:clrFrom><a:clrTo>…</a:clrTo>
+				// </a:clrChange> is a child of <a:blip> and recolours the
+				// picture's pixels: everything in clrFrom becomes clrTo. The
+				// target usually carries <a:alpha val="0"/>, which is how
+				// PowerPoint writes "make this colour transparent" — stacked
+				// photos depend on that to composite. Parsed only for a
+				// picture; a blip fill on a shape or a background is still
+				// left alone (recorded gap).
+				if state.inPic && currentDrawing != nil {
+					state.inClrChange = true
+					state.inClrFrom = false
+					state.inClrTo = false
+					state.clrFromHex = ""
+					state.clrToHex = ""
+					state.clrToAlpha = -1
+				}
+			case "clrFrom":
+				if state.inClrChange {
+					state.inClrFrom = true
+					state.inClrTo = false
+				}
+			case "clrTo":
+				if state.inClrChange {
+					state.inClrTo = true
+					state.inClrFrom = false
 				}
 			case "srcRect":
 				if state.inPic && currentDrawing != nil {
@@ -2570,9 +2690,32 @@ func (r *PPTXReader) parseSlideXML(decoder *xml.Decoder, slide *Slide, rels []xm
 					}
 				}
 			case "style":
-				// <p:style> element inside <p:sp> — provides default styling
-				if state.inSp && !state.inSpPr && !state.inTxBody {
+				// <p:style> element inside <p:sp> or <p:cxnSp> — provides
+				// default styling
+				if (state.inSp || state.inCxnSp) && !state.inSpPr && !state.inTxBody {
 					state.inStyle = true
+					state.inFillRef = false
+					state.inLnRef = false
+					state.styleFillScheme = ""
+					state.styleLnScheme = ""
+				}
+			case "fillRef":
+				// <a:fillRef idx="N"><a:schemeClr val="accent1"/></a:fillRef>
+				// — the theme fill style the shape inherits. The idx picks a
+				// style from the theme's fill style list (1 subtle … 3
+				// intense); only its colour is taken here, applied as a solid
+				// fill, because the real style bodies are gradients the theme
+				// defines (recorded gap).
+				if state.inStyle {
+					state.inFillRef = true
+					state.styleFillScheme = ""
+				}
+			case "lnRef":
+				// <a:lnRef idx="N"><a:schemeClr val="…"/></a:lnRef> — same
+				// idea for the outline.
+				if state.inStyle {
+					state.inLnRef = true
+					state.styleLnScheme = ""
 				}
 			case "fontRef":
 				// <a:fontRef> inside <p:style> — provides default text color
@@ -2583,6 +2726,9 @@ func (r *PPTXReader) parseSlideXML(decoder *xml.Decoder, slide *Slide, rels []xm
 
 		case xml.CharData:
 			text := string(t)
+			if state.inTableStyleID && currentTable != nil {
+				currentTable.styleGUID += text
+			}
 			if (state.inTcText || state.inText) && currentParagraph != nil {
 				tr := currentParagraph.CreateTextRun(text)
 				if currentFont != nil {
@@ -2912,6 +3058,27 @@ func (r *PPTXReader) parseSlideXML(decoder *xml.Decoder, slide *Slide, rels []xm
 					currentRichText = nil
 					state.isPlaceholder = false
 				}
+			case "clrFrom":
+				state.inClrFrom = false
+			case "clrTo":
+				state.inClrTo = false
+			case "clrChange":
+				if state.inClrChange {
+					state.inClrChange = false
+					// A rule with no source colour replaces nothing; keep
+					// the order the file wrote them in, because stacked
+					// photos can chain several knock-outs.
+					if currentDrawing != nil && state.clrFromHex != "" {
+						currentDrawing.recolors = append(currentDrawing.recolors, colorReplace{
+							From:    state.clrFromHex,
+							To:      state.clrToHex,
+							ToAlpha: state.clrToAlpha,
+						})
+					}
+					state.clrFromHex = ""
+					state.clrToHex = ""
+					state.clrToAlpha = -1
+				}
 			case "pic":
 				if state.inPic {
 					state.inPic = false
@@ -3042,8 +3209,16 @@ func (r *PPTXReader) parseSlideXML(decoder *xml.Decoder, slide *Slide, rels []xm
 					}
 					graphicDataURI = ""
 				}
+			case "tableStyleId":
+				state.inTableStyleID = false
+				if currentTable != nil {
+					currentTable.styleGUID = strings.TrimSpace(currentTable.styleGUID)
+				}
 			case "tbl":
 				state.inTbl = false
+				if currentTable != nil {
+					applyTableStyleFill(currentTable, pres)
+				}
 			case "tr":
 				state.inTr = false
 			case "tc":
@@ -3196,6 +3371,36 @@ func (r *PPTXReader) parseSlideXML(decoder *xml.Decoder, slide *Slide, rels []xm
 			case "style":
 				state.inStyle = false
 				state.inFontRef = false
+				state.inFillRef = false
+				state.inLnRef = false
+				// The style reference is a fallback: only where the shape's
+				// own <p:spPr> declared nothing does the theme colour become
+				// the fill. Applied to the pending values so the shape that
+				// <p:sp> closes next picks them up through its usual path.
+				if state.inSp && pres != nil && pendingShapeFill == nil && state.styleFillScheme != "" {
+					if argb, ok := pres.themeColors[state.styleFillScheme]; ok && argb != "" {
+						pendingShapeFill = NewFill()
+						pendingShapeFill.SetSolid(NewColor(argb))
+					}
+				}
+				if state.inSp && pres != nil && pendingBorder == nil && state.styleLnScheme != "" {
+					if argb, ok := pres.themeColors[state.styleLnScheme]; ok && argb != "" {
+						pendingBorder = NewBorder()
+						pendingBorder.Style = BorderSolid
+						pendingBorder.Width = 1 // the theme's subtle line weight, rounded to points
+						pendingBorder.Color = NewColor(argb)
+					}
+				}
+				// A connector's colour lives on its <a:ln> too, but when the
+				// ln declares only a width — the way PowerPoint writes themed
+				// arrows — the colour the lnRef names is all there is.
+				if state.inCxnSp && currentLine != nil && pres != nil && !lineColorExplicit && state.styleLnScheme != "" {
+					if argb, ok := pres.themeColors[state.styleLnScheme]; ok && argb != "" {
+						currentLine.lineColor = NewColor(argb)
+					}
+				}
+				state.styleFillScheme = ""
+				state.styleLnScheme = ""
 			case "fontRef":
 				state.inFontRef = false
 			case "t":
@@ -3489,6 +3694,12 @@ func (r *PPTXReader) applyLayoutInheritance(zr *zip.Reader, slide *Slide, rels [
 	layoutRelsPath := strings.Replace(layoutPath, "slideLayouts/", "slideLayouts/_rels/", 1) + ".rels"
 	layoutRels, _ := r.readRelationships(zr, layoutRelsPath)
 
+	// The master sits one rung above the layout and is the same for every slide
+	// that shares it, so it is read once and cached on the presentation.
+	if !pres.masterRead {
+		r.readMaster(zr, layoutRels, pres)
+	}
+
 	// Parse layout images and non-placeholder text shapes, prepend to slide (behind slide content)
 	layoutImages := r.parseLayoutImages(data, layoutRels, zr, layoutPath, pres)
 	if len(layoutImages) > 0 {
@@ -3496,7 +3707,7 @@ func (r *PPTXReader) applyLayoutInheritance(zr *zip.Reader, slide *Slide, rels [
 	}
 
 	// Parse layout to extract placeholder definitions
-	layoutPHs := r.parseLayoutPlaceholders(data, pres)
+	layoutPHs := r.parsePlaceholderDefs(data, pres)
 
 	// Also parse layout background
 	layoutBg, bgImage := r.parseLayoutBackground(data, layoutRels, zr, layoutPath, pres)
@@ -3523,97 +3734,401 @@ func (r *PPTXReader) applyLayoutInheritance(zr *zip.Reader, slide *Slide, rels [
 		}
 	}
 
-	if len(layoutPHs) == 0 {
-		return
-	}
-
-	// Apply layout properties to slide placeholders
+	// Apply inherited properties to slide placeholders. The ladder, farthest
+	// ancestor first, is master <p:txStyles> → master placeholder → layout
+	// placeholder → the slide itself. Every step below fills in only what the
+	// rungs nearer the slide left at the library's default, so applying them in
+	// this order lets each nearer rung win.
 	for _, shape := range slide.shapes {
 		ph, ok := shape.(*PlaceholderShape)
 		if !ok {
 			continue
 		}
 
-		// Find matching layout placeholder by type and idx
-		var match *layoutPlaceholder
-		for i := range layoutPHs {
-			lp := &layoutPHs[i]
-			if lp.phType == string(ph.phType) && lp.phIdx == ph.phIdx {
-				match = lp
-				break
-			}
-			// Also match by type alone if idx is 0 (default)
-			if lp.phType == string(ph.phType) && ph.phIdx == 0 && lp.phIdx == 0 {
-				match = lp
-				break
-			}
-		}
-		if match == nil {
-			// Try matching by type only (ignoring idx)
-			for i := range layoutPHs {
-				lp := &layoutPHs[i]
-				if lp.phType == string(ph.phType) {
-					match = lp
+		match := matchPlaceholderDef(layoutPHs, ph)
+		masterMatch := matchPlaceholderDef(pres.masterPlaceholders, ph)
+
+		// Geometry takes the nearest definition that has any, rather than
+		// applying the master first and locking the layout out. Both are empty
+		// for the title in a deck PowerPoint wrote, so the master is often the
+		// only rung that answers at all: without it a title placeholder is drawn
+		// at 0,0 with zero size, which shrinks it, moves it left and re-wraps it.
+		if ph.width == 0 && ph.height == 0 {
+			for _, def := range []*layoutPlaceholder{match, masterMatch} {
+				if def != nil && (def.extCX != 0 || def.extCY != 0) {
+					ph.offsetX = def.offX
+					ph.offsetY = def.offY
+					ph.width = def.extCX
+					ph.height = def.extCY
 					break
 				}
 			}
 		}
-		if match == nil {
-			continue
-		}
 
-		// Apply position/size if placeholder has zero size
-		if ph.width == 0 && ph.height == 0 {
-			ph.offsetX = match.offX
-			ph.offsetY = match.offY
-			ph.width = match.extCX
-			ph.height = match.extCY
-		}
+		// Text insets: layout preferred, then master. Same reasoning as above,
+		// but here the guard on insetsSet makes the order self-enforcing.
+		applyPlaceholderInsets(ph, match)
+		applyPlaceholderInsets(ph, masterMatch)
 
-		// Apply text insets from layout if not set on the placeholder
-		if !ph.insetsSet && match.insetsSet {
-			ph.insetLeft = match.insetLeft
-			ph.insetRight = match.insetRight
-			ph.insetTop = match.insetTop
-			ph.insetBottom = match.insetBottom
-			ph.insetsSet = true
-		}
+		// Fonts, farthest first so that each nearer rung can still override.
+		applyMasterTextStyles(ph, pres.masterTextStyles)
+		applyPlaceholderFont(ph, masterMatch)
+		applyPlaceholderFont(ph, match)
+	}
+}
 
-		// Apply font properties to text runs that have default fonts
-		if match.fontName != "" || match.fontEA != "" || match.fontSize > 0 {
-			for _, para := range ph.paragraphs {
-				for _, elem := range para.elements {
-					tr, ok := elem.(*TextRun)
-					if !ok || tr.font == nil {
-						continue
-					}
-					// Apply layout font if the run has default Calibri/size=10
-					if tr.font.Name == "Calibri" && match.fontName != "" {
-						tr.font.Name = match.fontName
-					}
-					if tr.font.NameEA == "" && match.fontEA != "" {
-						tr.font.NameEA = match.fontEA
-					}
-					if (tr.font.Size == 18 || tr.font.Size <= 10) && match.fontSize > 0 {
-						tr.font.Size = match.fontSize
-					}
-					if match.fontBold {
-						tr.font.Bold = true
-					}
-					if match.fontColor.ARGB != "" && match.fontColor.ARGB != "FF000000" {
-						// Only apply if run has default black color
-						if tr.font.Color.ARGB == "FF000000" {
-							tr.font.Color = match.fontColor
-						}
-					}
-				}
+// runSizeIsDefault reports whether a run is still carrying a size the reader
+// substituted for markup that declared none.
+//
+// There are two such sizes and both have to be recognised: 18, which the reader
+// assigns a placeholder run with no sz, and 10, which NewFont starts at. Testing
+// only for 10 is what left a 44pt title at 18pt even once the master was read.
+func runSizeIsDefault(size int) bool { return size == 18 || size <= 10 }
+
+// matchPlaceholderDef finds the definition a slide placeholder inherits from.
+//
+// The match is by type and index, then by type alone: a layout rarely numbers
+// its single title, and PowerPoint treats the unnumbered one as the match.
+func matchPlaceholderDef(defs []layoutPlaceholder, ph *PlaceholderShape) *layoutPlaceholder {
+	for i := range defs {
+		d := &defs[i]
+		if d.phType == string(ph.phType) && d.phIdx == ph.phIdx {
+			return d
+		}
+	}
+	for i := range defs {
+		if defs[i].phType == string(ph.phType) {
+			return &defs[i]
+		}
+	}
+	return nil
+}
+
+// applyPlaceholderInsets copies a definition's text insets onto the placeholder
+// if the placeholder has not been given any of its own.
+func applyPlaceholderInsets(ph *PlaceholderShape, def *layoutPlaceholder) {
+	if ph == nil || def == nil || ph.insetsSet || !def.insetsSet {
+		return
+	}
+	ph.insetLeft = def.insetLeft
+	ph.insetRight = def.insetRight
+	ph.insetTop = def.insetTop
+	ph.insetBottom = def.insetBottom
+	ph.insetsSet = true
+}
+
+// applyPlaceholderFont copies a definition's font onto the runs of ph that have
+// not been given one of their own.
+//
+// "Have not been given one" is read off the library's own defaults, because the
+// reader cannot tell a run that declared Calibri 10 from one that declared
+// nothing: it fills in both the same way. 18 is the size the reader assigns a
+// placeholder run with no sz, 10 is what NewFont starts at.
+func applyPlaceholderFont(ph *PlaceholderShape, def *layoutPlaceholder) {
+	if ph == nil || def == nil {
+		return
+	}
+	if def.fontName == "" && def.fontEA == "" && def.fontSize == 0 && !def.fontBold {
+		return
+	}
+	for _, para := range ph.paragraphs {
+		for _, elem := range para.elements {
+			tr, ok := elem.(*TextRun)
+			if !ok || tr.font == nil {
+				continue
+			}
+			if tr.font.Name == "Calibri" && def.fontName != "" {
+				tr.font.Name = def.fontName
+			}
+			if tr.font.NameEA == "" && def.fontEA != "" {
+				tr.font.NameEA = def.fontEA
+			}
+			if runSizeIsDefault(tr.font.Size) && def.fontSize > 0 {
+				tr.font.Size = def.fontSize
+			}
+			if def.fontBold {
+				tr.font.Bold = true
+			}
+			if def.fontColor.ARGB != "" && def.fontColor.ARGB != "FF000000" && tr.font.Color.ARGB == "FF000000" {
+				tr.font.Color = def.fontColor
 			}
 		}
 	}
 }
 
-// parseLayoutPlaceholders extracts placeholder definitions from a slide layout XML.
-func (r *PPTXReader) parseLayoutPlaceholders(data []byte, pres *Presentation) []layoutPlaceholder {
+// masterLevelStyle is one <a:lvlNpPr> of a slide master's <p:titleStyle>,
+// <p:bodyStyle> or <p:otherStyle>.
+//
+// This is where a real deck's placeholder text is actually styled. A slide says
+// <p:ph type="title"/> and one run of text; the layout's placeholder
+// <a:lstStyle> is usually empty; the 44pt centred title comes from the master
+// and nowhere else. Reading none of it leaves the title at the library default,
+// which both shrinks it and moves it left — and because the default measures
+// differently, it wraps onto a second line that PowerPoint never draws.
+type masterLevelStyle struct {
+	fontName string
+	fontEA   string
+	size     int // points; 0 means the master says nothing
+	bold     bool
+	italic   bool
+	align    string
+	marL     int64
+	indent   int64
+	color    Color
+}
+
+// masterTextStyles is a slide master's <p:txStyles>, indexed by outline level
+// 1..9: title is <p:titleStyle>, body <p:bodyStyle>, other <p:otherStyle>.
+type masterTextStyles struct {
+	title [10]*masterLevelStyle
+	body  [10]*masterLevelStyle
+	other [10]*masterLevelStyle
+}
+
+// styleFor walks the ladder PowerPoint walks: the style a placeholder of this
+// type inherits at this outline level, falling back to level 1 and then to the
+// "other" list, both of which PowerPoint does too.
+func (m *masterTextStyles) styleFor(phType string, level int) *masterLevelStyle {
+	if m == nil {
+		return nil
+	}
+	table := m.body
+	if phType == "title" || phType == "ctrTitle" {
+		table = m.title
+	}
+	if level < 1 || level > 9 {
+		level = 1
+	}
+	if s := table[level]; s != nil {
+		return s
+	}
+	if s := table[1]; s != nil {
+		return s
+	}
+	if s := m.other[level]; s != nil {
+		return s
+	}
+	return m.other[1]
+}
+
+// readMaster reads the slide master the layout points at: the placeholder
+// geometry and the <p:txStyles> a placeholder inherits when neither the slide
+// nor the layout gives it either.
+//
+// Both are read together and once, because they come from the same part and are
+// the same for every slide that shares the master.
+func (r *PPTXReader) readMaster(zr *zip.Reader, layoutRels []xmlRelForRead, pres *Presentation) {
+	pres.masterRead = true
+	path := ""
+	for _, rel := range layoutRels {
+		if rel.Type == relTypeSlideMaster {
+			path = rel.Target
+			break
+		}
+	}
+	if path == "" {
+		path = "ppt/slideMasters/slideMaster1.xml"
+	} else if !strings.HasPrefix(path, "ppt/") {
+		path = resolveRelativePath("ppt/slideLayouts", path)
+	}
+	data, err := readFileFromZip(zr, path)
+	if err != nil {
+		pres.masterTextStyles = &masterTextStyles{}
+		return
+	}
+	pres.masterPlaceholders = r.parsePlaceholderDefs(data, pres)
+	pres.masterTextStyles = parseMasterTextStyles(data, pres)
+}
+
+// parseMasterTextStyles reads <p:txStyles> out of a slide master.
+func parseMasterTextStyles(data []byte, pres *Presentation) *masterTextStyles {
+	m := &masterTextStyles{}
+	decoder := xml.NewDecoder(bytes.NewReader(data))
+
+	var table *[10]*masterLevelStyle
+	var cur *masterLevelStyle
+	inDefRPr := false
+	inSolidFill := false
+
+	for {
+		token, err := decoder.Token()
+		if err != nil {
+			break
+		}
+
+		switch t := token.(type) {
+		case xml.StartElement:
+			switch t.Name.Local {
+			case "titleStyle":
+				table = &m.title
+			case "bodyStyle":
+				table = &m.body
+			case "otherStyle":
+				table = &m.other
+			case "lvl1pPr", "lvl2pPr", "lvl3pPr", "lvl4pPr", "lvl5pPr",
+				"lvl6pPr", "lvl7pPr", "lvl8pPr", "lvl9pPr":
+				if table == nil {
+					continue
+				}
+				lvl := int(t.Name.Local[3] - '0')
+				cur = &masterLevelStyle{}
+				table[lvl] = cur
+				// The alignment, the margins and the indent are attributes of
+				// the level element itself: a list style has no <a:pPr> child
+				// to carry them, unlike a paragraph in a text body. Reading
+				// them off a child left the title's algn="ctr" unread, so the
+				// title kept the left alignment it had been defaulted to.
+				//
+				// The attributes go through the same reader the slide and
+				// layout scanners use; a third hand-rolled one would drift
+				// from them.
+				p := NewParagraph()
+				applyPPrAttrs(p, t.Attr)
+				cur.align = string(p.alignment.Horizontal)
+				cur.marL = p.alignment.MarginLeft
+				cur.indent = p.alignment.Indent
+			case "defRPr":
+				inDefRPr = true
+				if cur == nil {
+					continue
+				}
+				for _, attr := range t.Attr {
+					switch attr.Name.Local {
+					case "sz":
+						if v, err := strconv.Atoi(attr.Value); err == nil {
+							cur.size = v / 100
+						}
+					case "b":
+						cur.bold = attr.Value == "1" || attr.Value == "true"
+					case "i":
+						cur.italic = attr.Value == "1" || attr.Value == "true"
+					}
+				}
+			case "latin":
+				if inDefRPr && cur != nil {
+					if n := typefaceOf(pres, t.Attr); n != "" {
+						cur.fontName = n
+					}
+				}
+			case "ea":
+				if inDefRPr && cur != nil {
+					if n := typefaceOf(pres, t.Attr); n != "" {
+						cur.fontEA = n
+					}
+				}
+			case "solidFill":
+				inSolidFill = true
+			case "srgbClr":
+				if inSolidFill && cur != nil {
+					for _, attr := range t.Attr {
+						if attr.Name.Local == "val" {
+							cur.color = NewColor("FF" + attr.Value)
+						}
+					}
+				}
+			case "schemeClr":
+				if inSolidFill && cur != nil && pres != nil {
+					for _, attr := range t.Attr {
+						if attr.Name.Local != "val" {
+							continue
+						}
+						if argb, ok := pres.themeColors[attr.Value]; ok && argb != "" {
+							cur.color = NewColor(argb)
+						}
+					}
+				}
+			}
+
+		case xml.EndElement:
+			switch t.Name.Local {
+			case "defRPr":
+				inDefRPr = false
+			case "solidFill":
+				inSolidFill = false
+			case "lvl1pPr", "lvl2pPr", "lvl3pPr", "lvl4pPr", "lvl5pPr",
+				"lvl6pPr", "lvl7pPr", "lvl8pPr", "lvl9pPr":
+				cur = nil
+			case "titleStyle", "bodyStyle", "otherStyle":
+				table = nil
+			case "txStyles":
+				return m
+			}
+		}
+	}
+	return m
+}
+
+// applyMasterTextStyles is the master rung of the inheritance ladder: it fills
+// in what neither the slide nor the layout said. Everything here is a fallback
+// — a paragraph or run that already carries a value keeps it, because the
+// layout and the slide are nearer ancestors than the master.
+func applyMasterTextStyles(ph *PlaceholderShape, m *masterTextStyles) {
+	if ph == nil || m == nil {
+		return
+	}
+	for _, para := range ph.paragraphs {
+		// lvl is 0-based on the paragraph, lvlNpPr is 1-based on the master:
+		// a level-0 paragraph is styled by lvl1pPr, a level-1 one by lvl2pPr.
+		level := 1
+		if para.alignment != nil && para.alignment.Level > 0 {
+			level = para.alignment.Level + 1
+		}
+		s := m.styleFor(string(ph.phType), level)
+		if s == nil {
+			continue
+		}
+
+		if para.alignment == nil {
+			para.alignment = NewAlignment()
+		}
+		if para.alignment.Horizontal == "" && s.align != "" {
+			para.alignment.Horizontal = HorizontalAlignment(s.align)
+		}
+		if para.alignment.MarginLeft == 0 && s.marL != 0 {
+			para.alignment.MarginLeft = s.marL
+		}
+		if para.alignment.Indent == 0 && s.indent != 0 {
+			para.alignment.Indent = s.indent
+		}
+
+		for _, elem := range para.elements {
+			tr, ok := elem.(*TextRun)
+			if !ok || tr.font == nil {
+				continue
+			}
+			if tr.font.Name == "Calibri" && s.fontName != "" {
+				tr.font.Name = s.fontName
+			}
+			if tr.font.NameEA == "" && s.fontEA != "" {
+				tr.font.NameEA = s.fontEA
+			}
+			// 18 is the size the reader gives a placeholder run whose markup
+			// declared none, 10 is what NewFont starts at.
+			if runSizeIsDefault(tr.font.Size) && s.size > 0 {
+				tr.font.Size = s.size
+			}
+			if s.bold {
+				tr.font.Bold = true
+			}
+			if s.italic {
+				tr.font.Italic = true
+			}
+			if s.color.ARGB != "" && s.color.ARGB != "FF000000" && tr.font.Color.ARGB == "FF000000" {
+				tr.font.Color = s.color
+			}
+		}
+	}
+}
+
+// parsePlaceholderDefs extracts placeholder definitions from a slide layout or
+// a slide master XML.
+//
+// One function serves both because they are the same markup: a master's
+// <p:sp> with a <p:ph> carries the geometry a placeholder inherits, and so does
+// a layout's. The master is the farther rung of the ladder, and it is the only
+// one that answers for the title in a deck whose layout leaves the title's
+// <p:spPr/> empty — which is not rare, it is what PowerPoint writes.
+func (r *PPTXReader) parsePlaceholderDefs(data []byte, pres *Presentation) []layoutPlaceholder {
 	decoder := xml.NewDecoder(bytes.NewReader(data))
 	var phs []layoutPlaceholder
 
@@ -3797,19 +4312,19 @@ func (r *PPTXReader) parseLayoutPlaceholders(data []byte, pres *Presentation) []
 					}
 				}
 			case "latin":
+				// The layout's placeholder font is the one place that used to
+				// store "+mj-lt" verbatim, so a layout inherited a font name
+				// that no font file answers to and the run fell back — with
+				// the fallback's metrics, which move where lines wrap.
 				if inDefRPr {
-					for _, attr := range t.Attr {
-						if attr.Name.Local == "typeface" {
-							fontName = attr.Value
-						}
+					if n := typefaceOf(pres, t.Attr); n != "" {
+						fontName = n
 					}
 				}
 			case "ea":
 				if inDefRPr {
-					for _, attr := range t.Attr {
-						if attr.Name.Local == "typeface" {
-							fontEA = attr.Value
-						}
+					if n := typefaceOf(pres, t.Attr); n != "" {
+						fontEA = n
 					}
 				}
 			}
@@ -4454,42 +4969,30 @@ func (r *PPTXReader) parseLayoutImages(data []byte, rels []xmlRelForRead, zr *zi
 				}
 			case "latin":
 				if inDefRPr && lstStyleFont != nil {
-					for _, attr := range t.Attr {
-						if attr.Name.Local == "typeface" && !strings.HasPrefix(attr.Value, "+") {
-							lstStyleFont.Name = attr.Value
-						}
+					if n := typefaceOf(pres, t.Attr); n != "" {
+						lstStyleFont.Name = n
 					}
 				} else if inPPrDefRPr && defFont != nil {
-					for _, attr := range t.Attr {
-						if attr.Name.Local == "typeface" && !strings.HasPrefix(attr.Value, "+") {
-							defFont.Name = attr.Value
-						}
+					if n := typefaceOf(pres, t.Attr); n != "" {
+						defFont.Name = n
 					}
 				} else if inRunProps && currentFont != nil {
-					for _, attr := range t.Attr {
-						if attr.Name.Local == "typeface" && !strings.HasPrefix(attr.Value, "+") {
-							currentFont.Name = attr.Value
-						}
+					if n := typefaceOf(pres, t.Attr); n != "" {
+						currentFont.Name = n
 					}
 				}
 			case "ea":
 				if inDefRPr && lstStyleFont != nil {
-					for _, attr := range t.Attr {
-						if attr.Name.Local == "typeface" && !strings.HasPrefix(attr.Value, "+") {
-							lstStyleFont.NameEA = attr.Value
-						}
+					if n := typefaceOf(pres, t.Attr); n != "" {
+						lstStyleFont.NameEA = n
 					}
 				} else if inPPrDefRPr && defFont != nil {
-					for _, attr := range t.Attr {
-						if attr.Name.Local == "typeface" && !strings.HasPrefix(attr.Value, "+") {
-							defFont.NameEA = attr.Value
-						}
+					if n := typefaceOf(pres, t.Attr); n != "" {
+						defFont.NameEA = n
 					}
 				} else if inRunProps && currentFont != nil {
-					for _, attr := range t.Attr {
-						if attr.Name.Local == "typeface" && !strings.HasPrefix(attr.Value, "+") {
-							currentFont.NameEA = attr.Value
-						}
+					if n := typefaceOf(pres, t.Attr); n != "" {
+						currentFont.NameEA = n
 					}
 				}
 			case "br":

@@ -328,6 +328,50 @@ func countNearColorOutside(img image.Image, outer, inner image.Rectangle, want c
 	return countNearColorInExcept(img, outer, inner, want, tolerance)
 }
 
+// countLabelInk counts pixels inside rect that are nearer the label colour than
+// the placeholder's own fill.
+//
+// A fixed colour tolerance cannot answer "was a label drawn here", because how
+// close a glyph gets to its own colour depends on the face's weight. At the
+// sizes the shrink-to-fit path descends to, a light face's stems reach roughly
+// 70% coverage while a heavier one reaches the full colour, so a tolerance
+// tuned to the heavier face reports zero ink for the lighter one — and this
+// check would then be testing the installed font rather than the renderer.
+//
+// Comparing against the fill instead is weight-independent: every pixel is a
+// blend of the text and the fill, so "nearer the text than the fill" says the
+// glyph covered more than half of it. It still separates the label from the
+// frame and the fill, which is all this test needs to know.
+func countLabelInk(img image.Image, rect image.Rectangle, text, fill color.RGBA) int {
+	rect = rect.Intersect(img.Bounds())
+	dist := func(r, g, b uint8, c color.RGBA) int {
+		worst := 0
+		for _, d := range []int{int(r) - int(c.R), int(g) - int(c.G), int(b) - int(c.B)} {
+			if d < 0 {
+				d = -d
+			}
+			if d > worst {
+				worst = d
+			}
+		}
+		return worst
+	}
+	n := 0
+	for y := rect.Min.Y; y < rect.Max.Y; y++ {
+		for x := rect.Min.X; x < rect.Max.X; x++ {
+			r, g, b, a := img.At(x, y).RGBA()
+			if a>>8 < 8 {
+				continue
+			}
+			r8, g8, b8 := uint8(r>>8), uint8(g>>8), uint8(b>>8)
+			if dist(r8, g8, b8, text) < dist(r8, g8, b8, fill) {
+				n++
+			}
+		}
+	}
+	return n
+}
+
 func countNearColorInExcept(img image.Image, outer, inner image.Rectangle, want color.RGBA, tolerance int) int {
 	outer = outer.Intersect(img.Bounds())
 	n := 0
@@ -393,8 +437,11 @@ func TestUnsupportedPlaceholderLabelStaysInsideFrame(t *testing.T) {
 
 			// Tolerance 60 keeps the amber frame out of the match, so only glyph
 			// pixels count.
+			// The label has to actually appear: a shrink-to-fit path that
+			// silently gives up leaves the frame saying nothing about what
+			// was not rendered.
 			if c.drawn {
-				if n := countNearColorIn(img, box.Inset(4), unsupportedText, 60); n == 0 {
+				if n := countLabelInk(img, box.Inset(4), unsupportedText, unsupportedFill); n == 0 {
 					t.Errorf("no label text inside %v; the shrink-to-fit path drew nothing", box)
 				}
 			}

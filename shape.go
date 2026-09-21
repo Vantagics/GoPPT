@@ -373,10 +373,17 @@ type ParagraphElement interface {
 }
 
 // NewParagraph creates a new paragraph.
+//
+// The alignment starts empty rather than at NewAlignment's left: a paragraph
+// that has not been told where to put its text is not the same thing as one
+// that was told to put it on the left, and the difference is what lets a
+// placeholder inherit its alignment from its layout and master. The renderer
+// draws an empty alignment on the left, so nothing looks different — but the
+// writer can still tell that the document never said.
 func NewParagraph() *Paragraph {
 	return &Paragraph{
 		elements:  make([]ParagraphElement, 0),
-		alignment: NewAlignment(),
+		alignment: &Alignment{},
 	}
 }
 
@@ -489,6 +496,21 @@ type DrawingShape struct {
 	cropTop    int
 	cropRight  int
 	cropBottom int
+	// recolors holds the <a:clrChange> rules the file attaches to the blip,
+	// in document order. Stacked photos knock their background colour out
+	// with one and depend on the transparency surviving the composite.
+	recolors []colorReplace
+}
+
+// colorReplace is one <a:clrChange> rule: source pixels whose RGB equals From
+// (6 hex digits) are repainted To, and ToAlpha is the target's opacity in
+// 1/1000 of a percent (-1 when the target declares none, i.e. keep the source
+// pixel's alpha). A ToAlpha of 0 is how PowerPoint writes "make this colour
+// transparent".
+type colorReplace struct {
+	From    string
+	To      string
+	ToAlpha int
 }
 
 func (d *DrawingShape) GetType() ShapeType { return ShapeTypeDrawing }
@@ -920,6 +942,15 @@ type TableShape struct {
 	numCols    int
 	colWidths  []int64 // individual column widths in EMU (from gridCol)
 	rowHeights []int64 // individual row heights in EMU (from tr)
+	// <a:tblPr> flags and the style reference. They decide which parts of the
+	// table style — first row, banded rows, edge columns — reach which cells.
+	firstRow  bool
+	lastRow   bool
+	firstCol  bool
+	lastCol   bool
+	bandRow   bool
+	bandCol   bool
+	styleGUID string
 }
 
 func (t *TableShape) GetType() ShapeType { return ShapeTypeTable }

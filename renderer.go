@@ -1157,6 +1157,13 @@ func (r *renderer) renderDrawing(s *DrawingShape) {
 		return
 	}
 
+	// <a:clrChange> recolours source pixels before anything else sees them:
+	// photos stacked on top of each other knock their background out with it
+	// and rely on the transparency surviving the crop and the scale.
+	if len(s.recolors) > 0 {
+		srcImg = applyColorReplaces(srcImg, s.recolors)
+	}
+
 	// Apply srcRect crop if set (values are in 1/1000 of a percent)
 	if s.cropLeft > 0 || s.cropTop > 0 || s.cropRight > 0 || s.cropBottom > 0 {
 		bounds := srcImg.Bounds()
@@ -1207,6 +1214,75 @@ func (r *renderer) renderDrawing(s *DrawingShape) {
 	} else {
 		drawImg(r)
 	}
+}
+
+// applyColorReplaces applies a picture's <a:clrChange> rules to its decoded
+// pixels, in the order the file wrote them, first match wins per pixel.
+//
+// The comparison is on non-premultiplied colour: a rule names the pixel's
+// colour as stored, not as alpha-scaled, and the replacement may well change
+// the alpha (a knock-out sets it to zero), which would be lost on premultiplied
+// values.
+func applyColorReplaces(src image.Image, rules []colorReplace) image.Image {
+	type rule struct {
+		fr, fg, fb uint8
+		tr, tg, tb uint8
+		ta         float64 // -1: keep the source pixel's alpha
+	}
+	parsed := make([]rule, 0, len(rules))
+	for _, cr := range rules {
+		from, okFrom := hex6(cr.From)
+		to, okTo := hex6(cr.To)
+		if !okFrom || !okTo {
+			continue
+		}
+		ta := -1.0
+		if cr.ToAlpha >= 0 {
+			ta = float64(cr.ToAlpha) / 100000.0
+		}
+		parsed = append(parsed, rule{from[0], from[1], from[2], to[0], to[1], to[2], ta})
+	}
+	if len(parsed) == 0 {
+		return src
+	}
+	b := src.Bounds()
+	dst := image.NewNRGBA(image.Rect(0, 0, b.Dx(), b.Dy()))
+	draw.Draw(dst, dst.Bounds(), src, b.Min, draw.Src)
+	for py := 0; py < b.Dy(); py++ {
+		for px := 0; px < b.Dx(); px++ {
+			i := dst.PixOffset(px, py)
+			r, g, bl, a := dst.Pix[i], dst.Pix[i+1], dst.Pix[i+2], dst.Pix[i+3]
+			for _, u := range parsed {
+				if r == u.fr && g == u.fg && bl == u.fb {
+					r, g, bl = u.tr, u.tg, u.tb
+					if u.ta >= 0 {
+						a = uint8(u.ta*255.0 + 0.5)
+					}
+					break
+				}
+			}
+			dst.Pix[i], dst.Pix[i+1], dst.Pix[i+2], dst.Pix[i+3] = r, g, bl, a
+		}
+	}
+	return dst
+}
+
+// hex6 parses six hex digits into an RGB triple. It is the form both
+// <a:srgbClr val="..."> and the recolour rules on a drawing use.
+func hex6(s string) ([3]uint8, bool) {
+	var out [3]uint8
+	if len(s) != 6 {
+		return out, false
+	}
+	for i := 0; i < 3; i++ {
+		hi := hexVal(s[i*2])
+		lo := hexVal(s[i*2+1])
+		if hi < 0 || lo < 0 {
+			return out, false
+		}
+		out[i] = uint8(hi<<4 | lo)
+	}
+	return out, true
 }
 
 func (r *renderer) renderAutoShape(s *AutoShape) {
@@ -2585,6 +2661,42 @@ func (r *renderer) renderTable(s *TableShape) {
 	}
 
 	pad := 3
+	// A <a:tr> height is a *minimum*: PowerPoint grows a row to fit its
+	// tallest cell's text plus the cell insets. Honouring the declared height
+	// alone makes every later row sit higher than PowerPoint puts it, and the
+	// offset compounds down the table.
+	const defCellInsEMU = 45720 // PowerPoint's default top/bottom inset
+	insPx := r.emuToPixelY(defCellInsEMU) * 2
+	for row := 0; row < s.numRows && row < len(s.rows); row++ {
+		need := 0
+		for ci, cell := range s.rows[row] {
+			if cell == nil || cell.hMerge || cell.vMerge || len(cell.paragraphs) == 0 {
+				continue
+			}
+			c0 := ci
+			c1 := ci + cell.colSpan
+			if c1 > s.numCols {
+				c1 = s.numCols
+			}
+			if c1 <= c0 || c1 >= len(colX) {
+				continue
+			}
+			cw := colX[c1] - colX[c0]
+			if cw < 10 {
+				cw = 10
+			}
+			th := r.measureParagraphsHeight(cell.paragraphs, cw-2*pad, 1<<20, TextAnchorNone, true)
+			if th+insPx > need {
+				need = th + insPx
+			}
+		}
+		if need > 0 && rowY[row+1]-rowY[row] < need {
+			grow := need - (rowY[row+1] - rowY[row])
+			for k := row + 1; k <= s.numRows; k++ {
+				rowY[k] += grow
+			}
+		}
+	}
 
 	for row := 0; row < s.numRows; row++ {
 		if row >= len(s.rows) {

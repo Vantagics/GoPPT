@@ -93,7 +93,11 @@ func (r *PPTXReader) ReadFromReader(reader io.ReaderAt, size int64) (pres *Prese
 	_ = r.readCustomProperties(zr, pres)
 
 	// Read theme colors (non-fatal)
-	r.readThemeColors(zr, pres)
+	r.readTheme(zr, pres)
+
+	// Read the table style list (non-fatal) — tables reference their fills
+	// through it by GUID.
+	r.readTableStyles(zr, pres)
 
 	// Read presentation.xml to get slide list and layout
 	slideRels, err := r.readPresentation(zr, pres)

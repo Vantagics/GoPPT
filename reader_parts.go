@@ -320,22 +320,29 @@ func (r *PPTXReader) readPresentation(zr *zip.Reader, pres *Presentation) ([]str
 
 // --- Theme Colors ---
 
-// readThemeColors reads the theme XML and extracts the color scheme.
-// It populates pres.themeColors with mappings like "dk1" → "FF000000".
-func (r *PPTXReader) readThemeColors(zr *zip.Reader, pres *Presentation) {
-	// Try common theme paths
+// readTheme reads the theme XML and extracts the color scheme and the font
+// scheme. Both hang off the same part, so both are read from the same bytes:
+// the colors decide what "accent1" means, the fonts decide what "+mj-lt" means,
+// and a deck that uses either without the other renders in the wrong face or
+// the wrong colour.
+func (r *PPTXReader) readTheme(zr *zip.Reader, pres *Presentation) {
 	var data []byte
-	var err error
 	for _, path := range []string{"ppt/theme/theme1.xml", "ppt/theme/theme2.xml"} {
-		data, err = readFileFromZip(zr, path)
+		b, err := readFileFromZip(zr, path)
 		if err == nil {
+			data = b
 			break
 		}
 	}
 	if data == nil {
 		return
 	}
+	r.parseThemeColors(data, pres)
+	r.parseThemeFonts(data, pres)
+}
 
+// parseThemeColors populates pres.themeColors with mappings like "dk1" → "FF000000".
+func (r *PPTXReader) parseThemeColors(data []byte, pres *Presentation) {
 	pres.themeColors = make(map[string]string)
 	decoder := xml.NewDecoder(bytes.NewReader(data))
 
@@ -396,4 +403,106 @@ func (r *PPTXReader) readThemeColors(zr *zip.Reader, pres *Presentation) {
 			}
 		}
 	}
+}
+
+// parseThemeFonts populates pres.themeFonts from the theme's <a:fontScheme>:
+//
+//	<a:fontScheme><a:majorFont><a:latin typeface="Calibri Light"/>…
+//
+// A theme reference is "+mj" or "+mn" (major/minor) followed by the script it
+// picks — "lt" (latin), "ea" (East Asian), "cs" (complex script). A deck that
+// inherits one is the common case rather than the exception: a placeholder with
+// no font of its own is drawn in the theme's major or minor face, so without
+// this map every such run is drawn in whatever the font cache falls back to,
+// and because the fallback measures differently, lines wrap in the wrong place.
+func (r *PPTXReader) parseThemeFonts(data []byte, pres *Presentation) {
+	pres.themeFonts = make(map[string]string)
+	decoder := xml.NewDecoder(bytes.NewReader(data))
+
+	var scope string // "majorFont" or "minorFont" while inside one
+	inScriptFont := false
+
+	for {
+		token, err := decoder.Token()
+		if err != nil {
+			return
+		}
+
+		switch t := token.(type) {
+		case xml.StartElement:
+			switch t.Name.Local {
+			case "majorFont", "minorFont":
+				scope = t.Name.Local
+			case "font":
+				// <a:font script="Jpan"> overrides one script inside a
+				// major/minor font. Honouring it would mean tracking the
+				// script of every run, so it is skipped rather than applied
+				// to every script at once.
+				inScriptFont = true
+			case "latin", "ea", "cs":
+				if scope == "" || inScriptFont {
+					continue
+				}
+				prefix := "+mn"
+				if scope == "majorFont" {
+					prefix = "+mj"
+				}
+				for _, attr := range t.Attr {
+					if attr.Name.Local != "typeface" || attr.Value == "" {
+						continue
+					}
+					pres.themeFonts[prefix+"-"+themeFontScriptSuffix(t.Name.Local)] = attr.Value
+				}
+			}
+		case xml.EndElement:
+			switch t.Name.Local {
+			case "font":
+				inScriptFont = false
+			case "majorFont", "minorFont":
+				scope = ""
+			case "fontScheme":
+				return
+			}
+		}
+	}
+}
+
+func themeFontScriptSuffix(local string) string {
+	switch local {
+	case "ea":
+		return "ea"
+	case "cs":
+		return "cs"
+	default:
+		return "lt"
+	}
+}
+
+// resolveThemeTypeface turns a typeface attribute into a name a font file can
+// be found for, resolving <a:fontScheme> references and dropping the ones this
+// deck's theme does not answer.
+func resolveThemeTypeface(pres *Presentation, typeface string) string {
+	if typeface == "" {
+		return ""
+	}
+	if !strings.HasPrefix(typeface, "+") {
+		return typeface
+	}
+	if pres == nil {
+		return ""
+	}
+	return pres.themeFonts[typeface]
+}
+
+// typefaceOf is resolveThemeTypeface for one element's attributes: <a:latin>,
+// <a:ea>, <a:cs> and <a:buFont> all carry the font as typeface="…". It returns
+// "" for an element that names nothing drawable, so callers can tell "no font
+// given" from "a font given" without repeating the reference test at every site.
+func typefaceOf(pres *Presentation, attrs []xml.Attr) string {
+	for _, attr := range attrs {
+		if attr.Name.Local == "typeface" {
+			return resolveThemeTypeface(pres, attr.Value)
+		}
+	}
+	return ""
 }
