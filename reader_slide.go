@@ -2769,9 +2769,18 @@ func (r *PPTXReader) parseSlideXML(decoder *xml.Decoder, slide *Slide, rels []xm
 				// intense); only its colour is taken here, applied as a solid
 				// fill, because the real style bodies are gradients the theme
 				// defines (recorded gap).
+				//
+				// idx="0" means *no* theme fill: the scheme colour inside the
+				// element is a placeholder PowerPoint ignores. Treating it as
+				// a real fill painted slide34's un-filled rightBrace solid
+				// accent1 — PowerPoint draws only its outline.
 				if state.inStyle {
-					state.inFillRef = true
-					state.styleFillScheme = ""
+					if fillRefIdx(t) == 0 {
+						state.inFillRef = false
+					} else {
+						state.inFillRef = true
+						state.styleFillScheme = ""
+					}
 				}
 			case "lnRef":
 				// <a:lnRef idx="N"><a:schemeClr val="…"/></a:lnRef> — same
@@ -3599,6 +3608,14 @@ func intAttrValue(t xml.StartElement, local string) (int, bool) {
 		}
 	}
 	return 0, false
+}
+
+// fillRefIdx reads the idx of an <a:fillRef>; zero when absent. idx="0" is
+// the theme's "no fill" entry, which is why the missing attribute also reads
+// as zero.
+func fillRefIdx(t xml.StartElement) int {
+	v, _ := intAttrValue(t, "idx")
+	return v
 }
 
 // cropFromAttrs reads the l/t/r/b of an <a:srcRect>. The values are signed

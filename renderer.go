@@ -1932,8 +1932,43 @@ func (r *renderer) renderAutoShapeBorder(s *AutoShape, x, y, w, h int) {
 		r.drawWedgeRoundRectCalloutBorder(x, y, w, h, bc, pw, s.adjustValues)
 	case AutoShapeArc:
 		r.renderArcBorder(s, x, y, w, h, bc, pw)
+	case AutoShapeRightBrace, AutoShapeLeftBrace:
+		r.drawBrace(s.shapeType, x, y, w, h, bc, pw, s.adjustValues)
 	default:
 		r.drawRectBorder(image.Rect(x, y, x+w, y+h), bc, pw, s.border.Style)
+	}
+}
+
+// drawBrace strokes a rightBrace/leftBrace preset: a corner hook curving into
+// a centre spine and mirroring back out at the bottom. OOXML geometry —
+// x1 = adj1·min(w,h)/100000 (hook depth and roundness), the spine sits at
+// w−x1 (right) or x1 (left), y1 = adj2·(h/2)/100000 down from the top edge,
+// y2 = h−y1. Each hook is one cubic Bezier; the OOXML path declares fill
+// none, so a brace is outline-only by default.
+func (r *renderer) drawBrace(t AutoShapeType, x, y, w, h int, c color.RGBA, pw int, adj map[string]int) {
+	adj1, adj2 := 8333, 50000
+	if adj != nil {
+		if v, ok := adj["adj1"]; ok {
+			adj1 = v
+		}
+		if v, ok := adj["adj2"]; ok {
+			adj2 = v
+		}
+	}
+	fx, fy := float64(x), float64(y)
+	fw, fh := float64(w), float64(h)
+	x1 := math.Min(fw, fh) * float64(adj1) / 100000.0
+	y1 := fh / 2 * float64(adj2) / 100000.0
+	y2 := fh - y1
+	if t == AutoShapeRightBrace {
+		x2 := fw - x1
+		r.drawCubicBezierAA(fx, fy, fx+x1, fy, fx+x2, fy+y1-x1, fx+x2, fy+y1, c, pw)
+		r.drawLineThick(int(math.Round(fx+x2)), int(math.Round(fy+y1)), int(math.Round(fx+x2)), int(math.Round(fy+y2)), c, pw)
+		r.drawCubicBezierAA(fx+x2, fy+y2, fx+x2, fy+y2+x1, fx+x1, fy+fh, fx, fy+fh, c, pw)
+	} else {
+		r.drawCubicBezierAA(fx+fw, fy, fx+fw-x1, fy, fx+x1, fy+y1-x1, fx+x1, fy+y1, c, pw)
+		r.drawLineThick(int(math.Round(fx+x1)), int(math.Round(fy+y1)), int(math.Round(fx+x1)), int(math.Round(fy+y2)), c, pw)
+		r.drawCubicBezierAA(fx+x1, fy+y2, fx+x1, fy+y2+x1, fx+fw-x1, fy+fh, fx+fw, fy+fh, c, pw)
 	}
 }
 

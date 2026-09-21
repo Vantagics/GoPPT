@@ -737,6 +737,8 @@ const (
 	AutoShapeArc                   AutoShapeType = "arc"
 	AutoShapeBentArrow             AutoShapeType = "bentArrow"
 	AutoShapeUturnArrow            AutoShapeType = "uturnArrow"
+	AutoShapeLeftBrace             AutoShapeType = "leftBrace"
+	AutoShapeRightBrace            AutoShapeType = "rightBrace"
 	AutoShapeMathEqual             AutoShapeType = "mathEqual"
 	AutoShapeCurvedRightArrow      AutoShapeType = "curvedRightArrow"
 	AutoShapeCurvedLeftArrow       AutoShapeType = "curvedLeftArrow"

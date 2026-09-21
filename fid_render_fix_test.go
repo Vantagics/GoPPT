@@ -10,6 +10,7 @@ import (
 	"testing"
 
 	"golang.org/x/image/font/basicfont"
+	"math"
 )
 
 // Regression tests for the fidelity fixes that came out of the
@@ -1749,4 +1750,149 @@ func TestDeclaredSpcPctIsReadFromPPr(t *testing.T) {
 	if !strings.Contains(out, `<a:spcBef><a:spcPct val="20000"/></a:spcBef>`) {
 		t.Errorf("written slide lost the spcPct declaration:\n%s", out)
 	}
+}
+
+// A fillRef idx="0" is the theme's "no fill" entry: the scheme colour inside
+// is a placeholder PowerPoint ignores. slide34's rightBrace named
+// <a:fillRef idx="0"><a:schemeClr val="accent1"/> and was read as a solid
+// accent1 shape, which the renderer then painted as a full bounding box —
+// PowerPoint draws only the brace outline.
+func TestFillRefIdxZeroMeansNoFill(t *testing.T) {
+	zero := `
+<p:sp>
+  <p:nvSpPr><p:cNvPr id="2" name="Unfilled"/><p:cNvSpPr/><p:nvPr/></p:nvSpPr>
+  <p:spPr>
+    <a:xfrm><a:off x="500000" y="500000"/><a:ext cx="300000" cy="2000000"/></a:xfrm>
+    <a:prstGeom prst="rightBrace"><a:avLst><a:gd name="adj1" fmla="val 26110"/><a:gd name="adj2" fmla="val 50000"/></a:avLst></a:prstGeom>
+    <a:ln w="25400"><a:solidFill><a:srgbClr val="ED7D31"/></a:solidFill></a:ln>
+  </p:spPr>
+  <p:txBody><a:bodyPr rtlCol="0" anchor="ctr"/><a:lstStyle/><a:p><a:pPr algn="ctr"/><a:endParaRPr lang="en-US"/></a:p></p:txBody>
+  <p:style>
+    <a:lnRef idx="1"><a:schemeClr val="accent1"/></a:lnRef>
+    <a:fillRef idx="0"><a:schemeClr val="accent1"/></a:fillRef>
+  </p:style>
+</p:sp>
+<p:sp>
+  <p:nvSpPr><p:cNvPr id="3" name="Filled"/><p:cNvSpPr/><p:nvPr/></p:nvSpPr>
+  <p:spPr>
+    <a:xfrm><a:off x="1500000" y="500000"/><a:ext cx="300000" cy="2000000"/></a:xfrm>
+    <a:prstGeom prst="rightBrace"><a:avLst/></a:prstGeom>
+  </p:spPr>
+  <p:txBody><a:bodyPr rtlCol="0" anchor="ctr"/><a:lstStyle/><a:p><a:pPr algn="ctr"/><a:endParaRPr lang="en-US"/></a:p></p:txBody>
+  <p:style>
+    <a:lnRef idx="1"><a:schemeClr val="accent1"/></a:lnRef>
+    <a:fillRef idx="1"><a:schemeClr val="accent1"/></a:fillRef>
+  </p:style>
+</p:sp>`
+	parts := zipParts(t, writeToBytes(t, New()))
+	parts["ppt/slides/slide1.xml"] = []byte(bodyPrSlide(zero))
+	pkg := buildZip(t, parts)
+	pres, err := (&PPTXReader{}).ReadFromReader(bytes.NewReader(pkg), int64(len(pkg)))
+	if err != nil {
+		t.Fatalf("read the package: %v", err)
+	}
+	var unfilled, filled *AutoShape
+	for _, sh := range pres.GetAllSlides()[0].GetShapes() {
+		if s, ok := sh.(*AutoShape); ok {
+			if unfilled == nil {
+				unfilled = s
+			} else {
+				filled = s
+			}
+		}
+	}
+	if unfilled == nil || filled == nil {
+		t.Fatalf("fixture shapes missing: unfilled=%v filled=%v", unfilled != nil, filled != nil)
+	}
+	if unfilled.fill != nil {
+		t.Errorf("fillRef idx=0 produced a fill %+v; the theme's zero entry means no fill", unfilled.fill)
+	}
+	if filled.fill == nil || filled.fill.Type != FillSolid {
+		t.Errorf("fillRef idx=1 lost its theme fill: %+v", filled.fill)
+	}
+	if filled.fill != nil && filled.fill.Color != (Color{ARGB: "FF4472C4"}) {
+		t.Errorf("fillRef idx=1 colour = %s, want FF4472C4 (accent1)", filled.fill.Color.ARGB)
+	}
+}
+
+// The brace presets must be stroked along the brace outline — a spine plus
+// two hooks — not filled as a bounding box, and not stroked as a rectangle.
+func TestBracePresetsStrokeTheOutline(t *testing.T) {
+	brace := `
+<p:sp>
+  <p:nvSpPr><p:cNvPr id="2" name="B1"/><p:cNvSpPr/><p:nvPr/></p:nvSpPr>
+  <p:spPr>
+    <a:xfrm><a:off x="500000" y="500000"/><a:ext cx="300000" cy="2000000"/></a:xfrm>
+    <a:prstGeom prst="rightBrace"><a:avLst><a:gd name="adj1" fmla="val 26110"/><a:gd name="adj2" fmla="val 50000"/></a:avLst></a:prstGeom>
+    <a:ln w="25400"><a:solidFill><a:srgbClr val="000000"/></a:solidFill></a:ln>
+  </p:spPr>
+  <p:txBody><a:bodyPr rtlCol="0" anchor="ctr"/><a:lstStyle/><a:p><a:pPr algn="ctr"/><a:endParaRPr lang="en-US"/></a:p></p:txBody>
+  <p:style>
+    <a:lnRef idx="1"><a:schemeClr val="accent1"/></a:lnRef>
+    <a:fillRef idx="0"><a:schemeClr val="accent1"/></a:fillRef>
+  </p:style>
+</p:sp>`
+	parts := zipParts(t, writeToBytes(t, New()))
+	parts["ppt/slides/slide1.xml"] = []byte(bodyPrSlide(brace))
+	pkg := buildZip(t, parts)
+	pres, err := (&PPTXReader{}).ReadFromReader(bytes.NewReader(pkg), int64(len(pkg)))
+	if err != nil {
+		t.Fatalf("read the package: %v", err)
+	}
+	var braceShape *AutoShape
+	for _, sh := range pres.GetAllSlides()[0].GetShapes() {
+		if s, ok := sh.(*AutoShape); ok && s.shapeType == AutoShapeRightBrace {
+			braceShape = s
+		}
+	}
+	if braceShape == nil {
+		t.Fatal("the brace was not read as an AutoShape rightBrace")
+	}
+	opts := DefaultRenderOptions()
+	opts.Width = 640
+	opts.FontCache = NewFontCache()
+	img, err := pres.SlideToImage(0, opts)
+	if err != nil {
+		t.Fatalf("render: %v", err)
+	}
+	rect := emuRect(t, pres, 500000, 500000, 300000, 2000000, opts.Width)
+	x0, y0 := rect.Min.X, rect.Min.Y
+	wpx, hpx := rect.Dx(), rect.Dy()
+	x1 := int(math.Min(float64(wpx), float64(hpx)) * 26110.0 / 100000.0)
+	spine := x0 + wpx - x1 // the rightBrace spine, adj2=50000 puts it mid-height
+	ink := func(x, y int) bool {
+		r, g, b, a := img.At(x, y).RGBA()
+		return a != 0 && (r+g+b)/3 < 20000
+	}
+	// The spine has ink where it crosses mid-height.
+	if !anyInkAround(img, spine, y0+hpx/2, ink) {
+		t.Errorf("no ink at the spine (x=%d, y=%d)", spine, y0+hpx/2)
+	}
+	// The interior off the spine stays empty — no bounding-box fill, no
+	// rectangle stroke: the box interior is far from spine and hooks.
+	midX := x0 + wpx/2
+	if spine-midX > 6 {
+		for dx := -2; dx <= 2; dx++ {
+			for dy := -2; dy <= 2; dy++ {
+				if ink(midX+dx, y0+hpx/2+dy) {
+					t.Errorf("ink at the brace interior (x=%d, y=%d): the shape was filled or boxed", midX, y0+hpx/2)
+				}
+			}
+		}
+	}
+	// The top-left corner has the hook reaching for it.
+	if !anyInkAround(img, x0, y0, ink) {
+		t.Errorf("no hook ink at the top-left corner (x=%d, y=%d)", x0, y0)
+	}
+}
+
+func anyInkAround(img image.Image, x, y int, ink func(int, int) bool) bool {
+	for dx := -3; dx <= 3; dx++ {
+		for dy := -3; dy <= 3; dy++ {
+			if ink(x+dx, y+dy) {
+				return true
+			}
+		}
+	}
+	return false
 }
