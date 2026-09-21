@@ -1301,6 +1301,21 @@ func (r *PPTXReader) parseSlideXML(decoder *xml.Decoder, slide *Slide, rels []xm
 					state.inPPr = true
 					applyPPrAttrs(currentParagraph, t.Attr)
 				}
+			case "endParaRPr":
+				// A runless paragraph still ends with run properties, and its
+				// sz is the only size stated anywhere in it — PowerPoint draws
+				// the empty line box at that height and resolves its inherited
+				// space percentage against it. Self-closing in practice, but
+				// the attribute is read on Start either way.
+				if (state.inParagraph || state.inTcParagraph) && currentParagraph != nil {
+					for _, attr := range t.Attr {
+						if attr.Name.Local == "sz" {
+							if v, err := strconv.Atoi(attr.Value); err == nil {
+								currentParagraph.endParaRPrSize = v
+							}
+						}
+					}
+				}
 			case "buNone":
 				if state.inPPr && currentParagraph != nil {
 					b := NewBullet()
@@ -4034,10 +4049,15 @@ type masterLevelStyle struct {
 	color    Color
 	// Space before each paragraph, in hundredths of a point — the units the
 	// paragraph model stores spcPts in. A master usually declares it as a
-	// percentage of the line (<a:spcPct val="20000"/>), which is converted
-	// here with the level's own font size (a line is 1.2× the size), so the
-	// paragraph carries an absolute value afterwards like any other.
+	// percentage of the line (<a:spcPct val="20000"/>), which is resolved at
+	// layout time against the paragraph's own run size — the COM variants on
+	// slide34 proved the base is the run's size and not the level's defRPr
+	// (enlarging defRPr 28→48pt moved nothing), so a percentage cannot be
+	// turned into points here where only the level size is known.
 	spcBef int
+	// spcBefPct keeps the raw percentage when the level declared spcPct
+	// rather than spcPts; applyMasterTextStyles defers it to the paragraph.
+	spcBefPct int
 	// The level's bullet, exactly as the master declares it: buChar carries
 	// the character and buFont its typeface, buAutoNum an ordered list (with
 	// its startAt), buNone an explicit "no bullet". An empty buChar with no
@@ -4289,16 +4309,15 @@ func parseMasterTextStyles(data []byte, pres *Presentation) *masterTextStyles {
 				inSpcBef = false
 			case "lvl1pPr", "lvl2pPr", "lvl3pPr", "lvl4pPr", "lvl5pPr",
 				"lvl6pPr", "lvl7pPr", "lvl8pPr", "lvl9pPr":
-				// Now the level's defRPr has been seen, a percentage space
-				// can finally be turned into points: the percentage is of
-				// the font size itself — 20000 of a 28pt level is 560
-				// (5.6pt in hundredths). The 1.2 line-height factor an
-				// earlier round multiplied in is disproven by the COM
-				// experiment on slide35: the inherited gap between its
-				// paragraphs measures 20% × 32pt (14px), not 20% × 1.2 ×
-				// 32pt (17px).
-				if cur != nil && cur.spcBef == 0 && spcBefPct > 0 && cur.size > 0 {
-					cur.spcBef = int(float64(cur.size) * float64(spcBefPct) / 100000 * 100)
+				// Keep the percentage raw: the base it rides is the
+				// paragraph's own run size — slide34's COM variants moved
+				// every gap by 20% × 1.2 × 32pt when the master's 20% was
+				// tripled, and by nothing when the level's defRPr grew — so
+				// resolving it here against the level size (the old bake)
+				// fixed the number for the wrong reason and starved every
+				// paragraph whose runs differ from the level default.
+				if cur != nil && cur.spcBef == 0 && spcBefPct > 0 {
+					cur.spcBefPct = spcBefPct
 				}
 				cur = nil
 			case "titleStyle", "bodyStyle", "otherStyle":
@@ -4353,9 +4372,15 @@ func applyMasterTextStyles(ph *PlaceholderShape, m *masterTextStyles) {
 		// one line) shows PowerPoint keeps the first paragraph flush with the
 		// text inset unless the paragraph itself declares spacing. A declared
 		// spcPts already sits in spaceBefore, a declared spcPct in
-		// spaceBeforePct; both apply to the first paragraph.
-		if pi > 0 && para.spaceBefore == 0 && para.spaceBeforePct == 0 && s.spcBef > 0 {
-			para.spaceBefore = s.spcBef
+		// spaceBeforePct; both apply to the first paragraph. The master's own
+		// percentage stays raw — its base is the paragraph's run size at
+		// layout time, not the level's defRPr (slide34's vB variant).
+		if pi > 0 && para.spaceBefore == 0 && para.spaceBeforePct == 0 {
+			if s.spcBef > 0 {
+				para.spaceBefore = s.spcBef
+			} else if s.spcBefPct > 0 {
+				para.inheritedSpaceBeforePct = s.spcBefPct
+			}
 		}
 
 		// Bullets inherit on the same ladder. A paragraph that declared
@@ -5374,6 +5399,19 @@ func (r *PPTXReader) parseLayoutImages(data []byte, rels []xmlRelForRead, zr *zi
 				if inParagraph && currentParagraph != nil {
 					inPPr = true
 					applyPPrAttrs(currentParagraph, t.Attr)
+				}
+			case "endParaRPr":
+				// Same read as the slide scanner: an empty paragraph's only
+				// size statement lives here, and the layout scanner must not
+				// drop it or its empty lines collapse to the fallback height.
+				if inParagraph && currentParagraph != nil {
+					for _, attr := range t.Attr {
+						if attr.Name.Local == "sz" {
+							if v, err := strconv.Atoi(attr.Value); err == nil {
+								currentParagraph.endParaRPrSize = v
+							}
+						}
+					}
 				}
 			case "r":
 				if inParagraph {

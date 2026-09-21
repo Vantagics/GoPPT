@@ -377,6 +377,21 @@ type Paragraph struct {
 	// paragraph's own font size. Declared spacing — pts or pct — applies to
 	// the first paragraph too; only the master-inherited value does not.
 	spaceBeforePct int
+	// inheritedSpaceBeforePct holds a master <a:spcPct> deferred to layout
+	// time. The percentage rides the line (1.2 × the font size) and the size
+	// it follows is the run's, not the master level's defRPr — slide34's COM
+	// variants: tripling the master's 20% moved every gap by 2 × 17.5px
+	// (20% × 1.2 × 32pt runs), enlarging the level's defRPr 28→48pt moved
+	// nothing. Resolving here rather than baking at read time is what keeps
+	// that run-size base, which the reader cannot know for every paragraph.
+	inheritedSpaceBeforePct int
+	// endParaRPrSize is the sz attribute of a trailing <a:endParaRPr> in
+	// hundredths of a point (0 = none). An empty paragraph has no runs, so
+	// this is the only place its font size is stated: PowerPoint sizes the
+	// empty line box from it (slide34: an 18pt endParaRPr draws a 48px line,
+	// and doubling its sz doubled the group gap by exactly that line) and
+	// resolves the empty paragraph's inherited space percentage against it.
+	endParaRPrSize int
 }
 
 // ParagraphElement is the interface for paragraph content.

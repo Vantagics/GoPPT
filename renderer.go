@@ -5385,6 +5385,12 @@ func (r *renderer) applyLnSpcReduction(lh int) int {
 // and enlarging them fivefold both rendered bit-identical to the original —
 // PowerPoint ignores a first paragraph's space-before whether it was declared
 // on the paragraph or inherited from the master.
+//
+// The declared and the inherited percentage resolve differently, each pinned
+// by its own variant experiment: a declared spcPct is a percentage of the
+// font size itself (slide35's 20% measured 14px on 32pt runs), while the
+// master-inherited one rides the whole line — 1.2 × the size (slide34's
+// tripled 20% moved every gap by 2 × 17.5px on the same 32pt runs).
 func (r *renderer) paraSpaceBefore(para *Paragraph, firstPara bool) int {
 	if firstPara {
 		return 0
@@ -5393,16 +5399,70 @@ func (r *renderer) paraSpaceBefore(para *Paragraph, firstPara bool) int {
 		return para.spaceBefore
 	}
 	if para.spaceBeforePct > 0 {
-		sizePt := 18.0
-		for _, elem := range para.elements {
-			if tr, ok := elem.(*TextRun); ok && tr.font != nil && tr.font.Size > 0 {
-				sizePt = float64(tr.font.Size)
-				break
-			}
+		return int(r.paragraphFontSize(para) * float64(para.spaceBeforePct) / 100000.0 * 100)
+	}
+	if para.inheritedSpaceBeforePct > 0 {
+		// The inherited percentage rides the whole line and inherits every
+		// factor the line rides: 1.2 × the run size, then the normAutofit
+		// levers. slide35 is the proof that the levers apply: its master
+		// 20% over 32pt runs measures 14.2px = 20% × 1.2 × 32 × 0.925
+		// (fontScale) × 0.9 (lnSpcReduction) — the exact value the old
+		// level-based bake produced by coincidence (20% × 32 = 6.4pt),
+		// which is how round 23 concluded the 1.2 did not exist. slide34
+		// (empty autofit) isolates the 1.2: tripling the pct moved every
+		// gap by 2 × 17.5px and enlarging the level's defRPr moved nothing.
+		v := r.paragraphFontSize(para) * 1.2 * float64(para.inheritedSpaceBeforePct) / 100000.0 * 100
+		if r.fontScale > 0 && r.fontScale != 1.0 {
+			v *= r.fontScale
 		}
-		return int(sizePt * float64(para.spaceBeforePct) / 100000.0 * 100)
+		if r.lnSpcReduction > 0 {
+			v *= 1.0 - r.lnSpcReduction
+		}
+		return int(v)
 	}
 	return para.spaceBefore
+}
+
+// paragraphFontSize is the size a paragraph's spacing percentages resolve
+// against: the first sized run; for a runless paragraph the endParaRPr size
+// (slide34's empty paragraph resolves its 20% against the 18pt endParaRPr —
+// doubling that sz doubled the gap component); a fallback otherwise.
+func (r *renderer) paragraphFontSize(para *Paragraph) float64 {
+	for _, elem := range para.elements {
+		if tr, ok := elem.(*TextRun); ok && tr.font != nil && tr.font.Size > 0 {
+			return float64(tr.font.Size)
+		}
+	}
+	if para.endParaRPrSize > 0 {
+		return float64(para.endParaRPrSize) / 100.0
+	}
+	return 18.0
+}
+
+// emptyParagraphLineHeight sizes a runless paragraph's line box. The old
+// hard-coded 14px is why slide34's inter-group gap measured 66px against the
+// export's 99px: PowerPoint draws the empty line at the endParaRPr size —
+// its 18pt endParaRPr gives a 48px line, and vC (sz 1800→3600) grew the gap
+// by exactly that line's height. The height comes from the same win metrics
+// the real lines use, through whatever face the default resolution picks.
+func (r *renderer) emptyParagraphLineHeight(para *Paragraph) int {
+	if para.endParaRPrSize <= 0 {
+		return 14
+	}
+	sizePt := float64(para.endParaRPrSize) / 100.0
+	f := NewFont()
+	f.Size = int(sizePt + 0.5)
+	if r.fontCache != nil {
+		_, used, _ := r.resolveFace(f, r.fontSizePixels(f), false)
+		if a, d, ok := r.fontCache.WinVerticalMetrics(used, r.fontSizePixels(f), false, false); ok {
+			lh := int(a + d + 0.5)
+			if lh > 0 {
+				return lh
+			}
+		}
+	}
+	// No cache or no vitals: approximate the line as 1.2 × the size.
+	return r.hundredthPtToPixelY(int(sizePt * 120))
 }
 
 // measureParagraphsHeight estimates the total pixel height needed to render
@@ -5452,7 +5512,7 @@ func (r *renderer) measureParagraphsHeight(paragraphs []*Paragraph, w, h int, an
 			lines = r.wrapRunLineWithIndent(paraRuns, firstLineW, baseW)
 		}
 		if len(lines) == 0 {
-			lines = []textLine{{lineHeight: 14}}
+			lines = []textLine{{lineHeight: r.emptyParagraphLineHeight(para)}}
 		}
 		for i, line := range lines {
 			li := lineInfo{
@@ -5599,7 +5659,7 @@ func (r *renderer) drawParagraphs(paragraphs []*Paragraph, x, y, w, h int, ancho
 		}
 		if len(lines) == 0 {
 			// Empty paragraph still takes space
-			lines = []textLine{{lineHeight: 14}}
+			lines = []textLine{{lineHeight: r.emptyParagraphLineHeight(para)}}
 		}
 
 		for i, line := range lines {

@@ -689,11 +689,19 @@ func (w *PPTXWriter) writeParagraphXMLAt(para *Paragraph, indent string) string 
 		bulletXML = w.writeBulletXMLAt(para.bullet, inner)
 	}
 
+	// A runless paragraph's only size statement is its <a:endParaRPr>; the
+	// reader parses it and the renderer sizes the empty line from it, so a
+	// save that drops it shrinks every empty paragraph back to the fallback.
+	endPara := ""
+	if para.endParaRPrSize > 0 {
+		endPara = inner + fmt.Sprintf(`<a:endParaRPr sz="%d"/>`, para.endParaRPrSize) + "\n"
+	}
+
 	return fmt.Sprintf(`%s<a:p>
 %s<a:pPr%s>%s%s
 %s</a:pPr>
-%s%s</a:p>
-`, indent, inner, attrs, spacing, bulletXML, inner, elementsXML.String(), indent)
+%s%s%s</a:p>
+`, indent, inner, attrs, spacing, bulletXML, inner, elementsXML.String(), endPara, indent)
 }
 
 // writeTextRunXML renders a text run inside a shape's <p:txBody>.

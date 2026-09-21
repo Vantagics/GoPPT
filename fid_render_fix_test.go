@@ -771,19 +771,29 @@ func TestMasterSpaceBeforeReachesParagraphs(t *testing.T) {
 	// experiment behind the rule: an explicit spcPts 0 on the first paragraph
 	// moved nothing in PowerPoint's own render (it was already flush), the
 	// same element on the second paragraph moved that line up by the full
-	// inherited amount. The percentage is of the font size itself — 20% of a
-	// 28pt level = 560 hundredths (5.6pt); the 1.2 line factor over-shot the
-	// measured 14px gap on slide35 by 20%.
+	// inherited amount. The percentage is kept raw here and resolved at
+	// layout time: its base is the paragraph's run size — slide34's variants
+	// moved every gap by 20% × 1.2 × 32pt when the master's 20% was tripled
+	// and by nothing when the level's defRPr grew — riding the 1.2 line.
 	if got := paras[0].spaceBefore; got != 0 {
 		t.Errorf("first paragraph spaceBefore = %d, want 0 (inherited spacing skips paragraph one)", got)
 	}
-	if got := paras[1].spaceBefore; got != 560 {
-		t.Errorf("second paragraph spaceBefore = %d, want 560 (20%% of a 28pt level)", got)
+	if got := paras[0].inheritedSpaceBeforePct; got != 0 {
+		t.Errorf("first paragraph inherited pct = %d, want 0", got)
 	}
-	// The write half: the baked value survives as absolute points.
-	parts2 := zipParts(t, writeToBytes(t, pres))
-	if got := string(parts2["ppt/slides/slide1.xml"]); !bytes.Contains([]byte(got), []byte(`<a:spcBef><a:spcPts val="560"/>`)) {
-		t.Errorf("written slide has no spcPts val=\"560\":\n%s", got)
+	if got := paras[1].spaceBefore; got != 0 {
+		t.Errorf("second paragraph spaceBefore = %d, want 0 (the pct stays raw)", got)
+	}
+	if got := paras[1].inheritedSpaceBeforePct; got != 20000 {
+		t.Errorf("second paragraph inherited pct = %d, want 20000", got)
+	}
+	// The layout half: 28pt runs × 1.2 line × 20% = 672 hundredths (6.72pt).
+	r := &renderer{}
+	if got := r.paraSpaceBefore(paras[1], false); got != 672 {
+		t.Errorf("resolved spaceBefore = %d, want 672 (20%% × 1.2 × 28pt)", got)
+	}
+	if got := r.paraSpaceBefore(paras[0], true); got != 0 {
+		t.Errorf("resolved first-paragraph spaceBefore = %d, want 0", got)
 	}
 }
 
@@ -1895,4 +1905,185 @@ func anyInkAround(img image.Image, x, y int, ink func(int, int) bool) bool {
 		}
 	}
 	return false
+}
+
+// ---------------------------------------------------------------------------
+// Round 26: the inherited spcPct rides the line (1.2 x the run size), and an
+// empty paragraph's line box is sized by its <a:endParaRPr>.
+// ---------------------------------------------------------------------------
+
+// masterLevelSlideShape with the runs sized explicitly: the base of the
+// master's percentage is this run size, not the level's defRPr.
+const masterLevelSlideShape32 = `
+<p:sp>
+  <p:nvSpPr>
+    <p:cNvPr id="4" name="Body Placeholder"/>
+    <p:cNvSpPr><a:spLocks noGrp="1"/></p:cNvSpPr>
+    <p:nvPr><p:ph type="body" idx="1"/></p:nvPr>
+  </p:nvSpPr>
+  <p:spPr>
+    <a:xfrm><a:off x="500000" y="500000"/><a:ext cx="4000000" cy="3000000"/></a:xfrm>
+  </p:spPr>
+  <p:txBody>
+    <a:bodyPr/>
+    <a:lstStyle/>
+    <a:p><a:r><a:rPr lang="en-US" sz="3200"/><a:t>LEVEL0</a:t></a:r></a:p>
+    <a:p><a:pPr lvl="1"/><a:r><a:rPr lang="en-US" sz="3200"/><a:t>LEVEL1</a:t></a:r></a:p>
+  </p:txBody>
+</p:sp>`
+
+// TestInheritedSpaceBeforeBaseIsTheRunSize pins the discriminator the bake
+// could never express: slide34's vB variant enlarged the master level's
+// defRPr 2800 -> 4800 and no gap moved, while tripling the pct moved every
+// gap by 2 x 17.5px on 32pt runs. So the deferred percentage resolves
+// against the paragraph's run size (x1.2 line), not the level size.
+func TestInheritedSpaceBeforeBaseIsTheRunSize(t *testing.T) {
+	parts := zipParts(t, writeToBytes(t, New()))
+	parts["ppt/slides/slide1.xml"] = []byte(bodyPrSlide(masterLevelSlideShape32))
+	parts["ppt/slideMasters/slideMaster1.xml"] = []byte(spcBefMaster)
+	pkg := buildZip(t, parts)
+	pres, err := (&PPTXReader{}).ReadFromReader(bytes.NewReader(pkg), int64(len(pkg)))
+	if err != nil {
+		t.Fatalf("read the package: %v", err)
+	}
+	ph, ok := firstShapeOfType[*PlaceholderShape](pres)
+	if !ok {
+		t.Fatal("no body placeholder found")
+	}
+	paras := ph.GetParagraphs()
+	if len(paras) != 2 {
+		t.Fatalf("got %d paragraphs, want 2", len(paras))
+	}
+	if got := paras[1].inheritedSpaceBeforePct; got != 20000 {
+		t.Fatalf("second paragraph inherited pct = %d, want 20000", got)
+	}
+	r := &renderer{}
+	if got := r.paraSpaceBefore(paras[1], false); got != 768 {
+		t.Errorf("resolved spaceBefore = %d, want 768 (20%% x 1.2 x the 32pt run, not the 28pt level)", got)
+	}
+}
+
+// TestEndParaRPrSizesTheEmptyLine covers the reader and writer halves: an
+// empty paragraph's only size statement is its trailing endParaRPr, slide34's
+// group separator carries sz="1800", and a save that drops it shrinks the
+// empty line back to the fallback on the next read.
+const endParaSlideShape = `
+<p:sp>
+  <p:nvSpPr>
+    <p:cNvPr id="4" name="Body Placeholder"/>
+    <p:cNvSpPr><a:spLocks noGrp="1"/></p:cNvSpPr>
+    <p:nvPr><p:ph type="body" idx="1"/></p:nvPr>
+  </p:nvSpPr>
+  <p:spPr>
+    <a:xfrm><a:off x="500000" y="500000"/><a:ext cx="4000000" cy="3000000"/></a:xfrm>
+  </p:spPr>
+  <p:txBody>
+    <a:bodyPr/>
+    <a:lstStyle/>
+    <a:p><a:r><a:rPr lang="en-US"/><a:t>BEFORE</a:t></a:r></a:p>
+    <a:p><a:pPr lvl="1"/><a:endParaRPr lang="en-US" sz="1800"/></a:p>
+    <a:p><a:r><a:rPr lang="en-US"/><a:t>AFTER</a:t></a:r></a:p>
+  </p:txBody>
+</p:sp>`
+
+func TestEndParaRPrSizesTheEmptyLine(t *testing.T) {
+	parts := zipParts(t, writeToBytes(t, New()))
+	parts["ppt/slides/slide1.xml"] = []byte(bodyPrSlide(endParaSlideShape))
+	pkg := buildZip(t, parts)
+	pres, err := (&PPTXReader{}).ReadFromReader(bytes.NewReader(pkg), int64(len(pkg)))
+	if err != nil {
+		t.Fatalf("read the package: %v", err)
+	}
+	ph, ok := firstShapeOfType[*PlaceholderShape](pres)
+	if !ok {
+		t.Fatal("no body placeholder found")
+	}
+	paras := ph.GetParagraphs()
+	if len(paras) != 3 {
+		t.Fatalf("got %d paragraphs, want 3", len(paras))
+	}
+	if got := paras[1].endParaRPrSize; got != 1800 {
+		t.Errorf("empty paragraph endParaRPrSize = %d, want 1800", got)
+	}
+	if got := paras[0].endParaRPrSize; got != 0 {
+		t.Errorf("paragraph with runs endParaRPrSize = %d, want 0", got)
+	}
+	// The write half: the size survives the save.
+	parts2 := zipParts(t, writeToBytes(t, pres))
+	if got := string(parts2["ppt/slides/slide1.xml"]); !bytes.Contains([]byte(got), []byte(`<a:endParaRPr sz="1800"/>`)) {
+		t.Errorf("written slide lost the endParaRPr size://n%s", got)
+	}
+}
+
+// TestLayoutScannerReadsEndParaRPr keeps the second scanner in step: a layout
+// text box's paragraphs must not lose their endParaRPr size. The layout
+// scanner only builds shapes whose body carries a run, so the size rides
+// behind one.
+func TestLayoutScannerReadsEndParaRPr(t *testing.T) {
+	rt := layoutShape(t, "", `<a:r><a:rPr lang="en-US"/><a:t>X</a:t></a:r><a:endParaRPr lang="en-US" sz="1800"/>`)
+	if got := rt.paragraphs[0].endParaRPrSize; got != 1800 {
+		t.Errorf("layout scanner endParaRPrSize = %d, want 1800", got)
+	}
+}
+
+// TestEmptyParagraphLineHeightFollowsEndParaRPr is the render half: the empty
+// paragraph between two inked lines grows the gap by its endParaRPr line
+// height. slide34's COM variants: the 18pt endParaRPr draws a 48px line, and
+// doubling its sz doubled the group gap by exactly that amount.
+func TestEmptyParagraphLineHeightFollowsEndParaRPr(t *testing.T) {
+	gap := func(endParaHundredths int) int {
+		pres := New()
+		shape := pres.GetActiveSlide().CreateRichTextShape()
+		shape.BaseShape.SetOffsetX(400000).SetOffsetY(200000)
+		shape.BaseShape.SetWidth(6000000).SetHeight(6000000)
+		first := shape.GetParagraphs()[0]
+		run := first.CreateTextRun("Hamburgefonstiv")
+		run.GetFont().SetName("Arial").SetSize(24)
+		run.GetFont().Color = NewColor("000000")
+		empty := shape.CreateParagraph()
+		empty.endParaRPrSize = endParaHundredths
+		last := shape.CreateParagraph()
+		run2 := last.CreateTextRun("Hamburgefonstiv")
+		run2.GetFont().SetName("Arial").SetSize(24)
+		run2.GetFont().Color = NewColor("000000")
+		opts := DefaultRenderOptions()
+		opts.Width = 1600
+		opts.FontCache = NewFontCache()
+		img, err := pres.SlideToImage(0, opts)
+		if err != nil {
+			t.Fatalf("render: %v", err)
+		}
+		rect := emuRect(t, pres, 400000, 200000, 6000000, 6000000, 1600)
+		var bands [][2]int
+		start := -1
+		for y := rect.Min.Y; y < rect.Max.Y; y++ {
+			ink := false
+			for x := rect.Min.X; x < rect.Max.X; x++ {
+				r, g, b, a := img.At(x, y).RGBA()
+				if a != 0 && (r+g+b)/3 < 20000 {
+					ink = true
+					break
+				}
+			}
+			if ink && start < 0 {
+				start = y
+			} else if !ink && start >= 0 {
+				bands = append(bands, [2]int{start, y - 1})
+				start = -1
+			}
+		}
+		if len(bands) != 2 {
+			t.Fatalf("endPara %d: got %d ink bands, want 2", endParaHundredths, len(bands))
+		}
+		return bands[1][0] - bands[0][1] - 1
+	}
+	gapFallback := gap(0)
+	gap18 := gap(1800)
+	gap36 := gap(3600)
+	if gap18-gapFallback < 20 {
+		t.Errorf("18pt endParaRPr grew the gap by %dpx over the 14px fallback; the empty line must ride the endParaRPr size", gap18-gapFallback)
+	}
+	if gap36-gap18 < 25 {
+		t.Errorf("doubling the endParaRPr sz grew the gap by only %dpx; the empty line height must scale with it", gap36-gap18)
+	}
 }
