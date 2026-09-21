@@ -2148,3 +2148,56 @@ func TestEmptyParagraphLineHeightIsTwelveTenthsSize(t *testing.T) {
 		t.Errorf("empty line without endParaRPr = %d, want the 14px fallback", got)
 	}
 }
+
+// TestBaselineRidesTheUnroundedAscent pins round 28: normAutofit's two levers
+// (fontScale and lnSpcReduction) both act on the win ascent, and PowerPoint
+// applies them to the *unrounded* metric. Reading the already-rounded ascent
+// back rounds twice and costs a pixel of baseline per line — a cost only
+// autofit pages pay. The fixture is slide35 of the comparison deck: a 32pt
+// body whose win ascent is 67.71px, 62.63px after fontScale 0.925, and 56.37px
+// after a further 10% line-space reduction. The export puts the first line's
+// glyph tops at 248 and we were drawing 252; one of those four pixels is this
+// double rounding (63 -> 57 instead of 62.63 -> 56). With no reduction the two
+// paths must agree exactly, or every non-autofit slide on earth moves.
+func TestBaselineRidesTheUnroundedAscent(t *testing.T) {
+	r := &renderer{scaleX: 1600.0 / 9144000.0, scaleY: 1200.0 / 6858000.0}
+	// Calibri at 32pt on a 4:3 deck, fontScale already folded into the metric.
+	line := textLine{ascent: 63, ascentF: 62.63, hasCJK: false}
+
+	r.lnSpcReduction = 0.1
+	if got := r.baselineOffset(line); got != 56 {
+		t.Errorf("baseline offset under both levers = %d, want 56 (62.63 x 0.9); "+
+			"rounding before the second lever would say 57", got)
+	}
+
+	// No reduction: the unrounded path must reproduce the integer one, so
+	// that slides without normAutofit are untouched.
+	r.lnSpcReduction = 0
+	if got := r.baselineOffset(line); got != 63 {
+		t.Errorf("baseline offset with no reduction = %d, want 63 (the rounded ascent)", got)
+	}
+
+	// A CJK line keeps the rounded ascent whatever the levers say.
+	r.lnSpcReduction = 0.1
+	cjk := textLine{ascent: 63, ascentF: 62.63, hasCJK: true}
+	if got := r.baselineOffset(cjk); got != 57 {
+		t.Errorf("CJK baseline offset = %d, want 57 (the rounded ascent, levers applied once)", got)
+	}
+
+	// buildTextLine must carry the unrounded value through, and fall back to
+	// the integer one when a run was stamped without it.
+	r.lnSpcReduction = 0.1
+	full := r.buildTextLine([]textRun{{text: "x", font: &Font{Name: "Calibri", Size: 32},
+		winAsc: 63, winDesc: 18, winAscF: 62.63, winDescF: 18.4}})
+	if full.ascentF != 62.63 {
+		t.Errorf("textLine.ascentF = %v, want 62.63 carried through", full.ascentF)
+	}
+	if got := r.baselineOffset(full); got != 56 {
+		t.Errorf("built line baseline offset = %d, want 56", got)
+	}
+	stamped := r.buildTextLine([]textRun{{text: "x", font: &Font{Name: "Calibri", Size: 32},
+		winAsc: 63, winDesc: 18}})
+	if got := r.baselineOffset(stamped); got != 57 {
+		t.Errorf("baseline offset for a run stamped with integers only = %d, want 57", got)
+	}
+}

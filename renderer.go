@@ -5094,7 +5094,7 @@ func (r *renderer) buildParaTextRuns(elements []ParagraphElement) []textRun {
 				}
 				measures[textClassLatin] = r.getMeasureFace(faceFont)
 				if a, d, ok := r.fontCache.WinVerticalMetrics(faceFont.Name, scaledPt, faceFont.Bold, faceFont.Italic); ok {
-					wins[textClassLatin] = textWin{asc: int(a + 0.5), desc: int(d + 0.5)}
+					wins[textClassLatin] = textWin{asc: int(a + 0.5), desc: int(d + 0.5), ascF: a, descF: d}
 				}
 				// Face selection is driven by the characters in this run, not by
 				// the declared font names: a name that resolves can still lack
@@ -5105,7 +5105,7 @@ func (r *renderer) buildParaTextRuns(elements []ParagraphElement) []textRun {
 					measures[textClassCJK], _ = r.getCJKMeasureFace(faceFont, e.text)
 					r.noteCJKFont(f, used)
 					if a, d, ok := r.fontCache.WinVerticalMetrics(used, scaledPt, faceFont.Bold, faceFont.Italic); ok {
-						wins[textClassCJK] = textWin{asc: int(a + 0.5), desc: int(d + 0.5)}
+						wins[textClassCJK] = textWin{asc: int(a + 0.5), desc: int(d + 0.5), ascF: a, descF: d}
 					}
 				}
 				if containsSymbol(e.text) {
@@ -5114,7 +5114,7 @@ func (r *renderer) buildParaTextRuns(elements []ParagraphElement) []textRun {
 					measures[textClassSymbol], _ = r.getSymbolMeasureFace(faceFont, e.text)
 					r.noteSymbolFont(f, used)
 					if a, d, ok := r.fontCache.WinVerticalMetrics(used, scaledPt, faceFont.Bold, faceFont.Italic); ok {
-						wins[textClassSymbol] = textWin{asc: int(a + 0.5), desc: int(d + 0.5)}
+						wins[textClassSymbol] = textWin{asc: int(a + 0.5), desc: int(d + 0.5), ascF: a, descF: d}
 					}
 				}
 				runs = append(runs, r.splitRunByClass(e.text, f, faces, measures, wins)...)
@@ -5132,6 +5132,8 @@ func (r *renderer) buildParaTextRuns(elements []ParagraphElement) []textRun {
 					if a, d, ok := r.fontCache.WinVerticalMetrics(faceFont.Name, r.fontSizePixels(faceFont), faceFont.Bold, faceFont.Italic); ok {
 						tr.winAsc = int(a + 0.5)
 						tr.winDesc = int(d + 0.5)
+						tr.winAscF = a
+						tr.winDescF = d
 					}
 				}
 				runs = append(runs, tr)
@@ -5192,6 +5194,8 @@ func (r *renderer) splitRunByClass(text string, f *Font, faces, measures [numTex
 			width:       measureStringWithKern(face, seg).Ceil(),
 			winAsc:      wins[class].asc,
 			winDesc:     wins[class].desc,
+			winAscF:     wins[class].ascF,
+			winDescF:    wins[class].descF,
 		})
 	}
 
@@ -5242,6 +5246,11 @@ type textRun struct {
 	// back to face.Metrics in buildTextLine.
 	winAsc  int
 	winDesc int
+	// The same pair before rounding. normAutofit's two levers both act on
+	// the ascent, and PowerPoint applies them to the unrounded metric —
+	// rounding between the two is a one-pixel-per-line loss (round 28).
+	winAscF  float64
+	winDescF float64
 }
 
 // textWin carries the win-metric pair for one text class through
@@ -5249,6 +5258,10 @@ type textRun struct {
 type textWin struct {
 	asc  int
 	desc int
+	// Unrounded pair, carried so the autofit levers can be applied to it
+	// (round 28).
+	ascF  float64
+	descF float64
 }
 
 // mface returns the face to use for measurement. If a dedicated measure face
@@ -5267,6 +5280,12 @@ type textLine struct {
 	ascent     int
 	descent    int
 	lineHeight int
+	// Unrounded win ascent/descent for the line: the levers must be applied
+	// to these, not to the rounded ascent (round 28). Left at zero for CJK
+	// lines, whose baseline placement the golden image still arbitrates.
+	ascentF  float64
+	descendF float64
+	hasCJK   bool
 }
 
 // buildTextLine measures a slice of textRuns and returns a textLine.
@@ -5308,12 +5327,26 @@ func (r *renderer) buildTextLine(runs []textRun) textLine {
 			// GDI metrics recorded at face-creation time — PowerPoint's
 			// baseline placement. These win over the hhea-derived
 			// face.Metrics, which sit a line-gap (and for fonts like
-			// Calibri a fifth of an em) away from them.
+			// Calibri a fifth of an em) away from them. The float form is
+			// kept beside the integer one: the baseline is the metric
+			// after *both* autofit levers, and rounding it before the
+			// second lever is applied costs a pixel per line that only
+			// autofit pages pay (slide35: 62.63 → 63 → 56.7 → 57 where
+			// PowerPoint draws 56.37 → 56).
 			hasWin = true
-			if run.winAsc > tl.ascent {
+			af, df := run.winAscF, run.winDescF
+			if af <= 0 {
+				af = float64(run.winAsc)
+			}
+			if df <= 0 {
+				df = float64(run.winDesc)
+			}
+			if af > tl.ascentF {
+				tl.ascentF = af
 				tl.ascent = run.winAsc
 			}
-			if run.winDesc > tl.descent {
+			if df > tl.descendF {
+				tl.descendF = df
 				tl.descent = run.winDesc
 			}
 			if h := run.winAsc + run.winDesc; h > maxHeight {
@@ -5392,6 +5425,7 @@ func (r *renderer) buildTextLine(runs []textRun) textLine {
 	if tl.lineHeight < 1 {
 		tl.lineHeight = 14
 	}
+	tl.hasCJK = hasCJK
 	return tl
 }
 
@@ -5407,6 +5441,29 @@ func (r *renderer) applyLnSpcReduction(lh int) int {
 		return lh
 	}
 	return int(float64(lh)*(1.0-r.lnSpcReduction) + 0.5)
+}
+
+// baselineOffset is how far below the line top the baseline sits.
+//
+// normAutofit's fontScale and lnSpcReduction both act on the win ascent, and
+// PowerPoint applies them to the unrounded metric. Rounding between the two
+// levers — which is what reading the already-rounded ascent back does — costs
+// a pixel of baseline per line, and only autofit pages pay it: slide35's 32pt
+// body measures 62.63px after fontScale, rounds to 63, then to 57 after the
+// reduction, where the export shows 56.37 → 56 (round 28).
+//
+// CJK lines keep the rounded path: the win metrics that place their baseline
+// are the ones the golden image was tuned against, and this round's evidence
+// (a Latin deck) says nothing about them.
+func (r *renderer) baselineOffset(l textLine) int {
+	if l.ascentF > 0 && !l.hasCJK {
+		f := l.ascentF
+		if r.lnSpcReduction > 0 {
+			f *= 1.0 - r.lnSpcReduction
+		}
+		return int(f + 0.5)
+	}
+	return r.applyLnSpcReduction(l.ascent)
 }
 
 // paraSpaceBefore resolves a paragraph's space-before to hundredths of a
@@ -5776,7 +5833,7 @@ func (r *renderer) drawParagraphs(paragraphs []*Paragraph, x, y, w, h int, ancho
 		// The baseline sits ascent-scaled below the line top: lnSpcReduction
 		// shrinks the ascent along with the advance (see applyLnSpcReduction),
 		// which is what lifts the first line's glyphs toward the inset.
-		baseline := curY + r.applyLnSpcReduction(li.line.ascent)
+		baseline := curY + r.baselineOffset(li.line)
 
 		// Draw each run
 		drawX := lineX
@@ -6269,6 +6326,8 @@ func (r *renderer) buildBulletRun(b *Bullet, para *Paragraph, ordinal int) textR
 		if a, d, ok := r.fontCache.WinVerticalMetrics(bulletFont.Name, r.fontSizePixels(bulletFont), bulletFont.Bold, bulletFont.Italic); ok {
 			br.winAsc = int(a + 0.5)
 			br.winDesc = int(d + 0.5)
+			br.winAscF = a
+			br.winDescF = d
 		}
 	}
 	return br
