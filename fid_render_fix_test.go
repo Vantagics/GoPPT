@@ -773,6 +773,117 @@ func TestMasterSpaceBeforeReachesParagraphs(t *testing.T) {
 	}
 }
 
+// A paragraph that declares no bullet inherits the master bodyStyle's bullet
+// for its level: slide32's sub-bullets are <a:pPr marL indent> with no bullet
+// child at all, and the "•" comes from the master and nowhere else. A
+// paragraph that did declare one — <a:buChar>, <a:buAutoNum> or <a:buNone> —
+// keeps it, and an empty paragraph draws no glyph even when a bullet would be
+// inherited, because PowerPoint renders no bullet for a paragraph with no runs.
+const bulletMaster = `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<p:sldMaster xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships" xmlns:p="http://schemas.openxmlformats.org/presentationml/2006/main">
+  <p:cSld>
+    <p:spTree>
+      <p:nvGrpSpPr><p:cNvPr id="1" name=""/><p:cNvGrpSpPr/><p:nvPr/></p:nvGrpSpPr>
+      <p:grpSpPr/>
+    </p:spTree>
+  </p:cSld>
+  <p:clrMap bg1="lt1" tx1="dk1" bg2="lt2" tx2="dk2" accent1="accent1" accent2="accent2" accent3="accent3" accent4="accent4" accent5="accent5" accent6="accent6" hlink="hlink" folHlink="folHlink"/>
+  <p:sldLayoutIdLst/>
+  <p:txStyles>
+    <p:titleStyle><a:lvl1pPr><a:defRPr sz="4400"/></a:lvl1pPr></p:titleStyle>
+    <p:bodyStyle>
+      <a:lvl1pPr>
+        <a:buFont typeface="Arial" pitchFamily="34" charset="0"/>
+        <a:buChar char="•"/>
+        <a:defRPr sz="3200"/>
+      </a:lvl1pPr>
+      <a:lvl2pPr>
+        <a:buFont typeface="Courier New"/>
+        <a:buChar char="»"/>
+        <a:defRPr sz="2800"/>
+      </a:lvl2pPr>
+      <a:lvl3pPr>
+        <a:buNone/>
+        <a:defRPr sz="2400"/>
+      </a:lvl3pPr>
+    </p:bodyStyle>
+    <p:otherStyle><a:lvl1pPr><a:defRPr sz="1800"/></a:lvl1pPr></p:otherStyle>
+  </p:txStyles>
+</p:sldMaster>`
+
+const bulletSlideShape = `
+<p:sp>
+  <p:nvSpPr>
+    <p:cNvPr id="4" name="Body Placeholder"/>
+    <p:cNvSpPr><a:spLocks noGrp="1"/></p:cNvSpPr>
+    <p:nvPr><p:ph type="body" idx="1"/></p:nvPr>
+  </p:nvSpPr>
+  <p:spPr>
+    <a:xfrm><a:off x="500000" y="500000"/><a:ext cx="4000000" cy="3000000"/></a:xfrm>
+  </p:spPr>
+  <p:txBody>
+    <a:bodyPr/>
+    <a:lstStyle/>
+    <a:p><a:r><a:rPr lang="en-US"/><a:t>INHERIT</a:t></a:r></a:p>
+    <a:p><a:pPr lvl="1"/><a:r><a:rPr lang="en-US"/><a:t>INHERIT2</a:t></a:r></a:p>
+    <a:p><a:pPr><a:buChar char="-"/></a:pPr><a:r><a:rPr lang="en-US"/><a:t>EXPLICIT</a:t></a:r></a:p>
+    <a:p><a:pPr><a:buNone/></a:pPr><a:r><a:rPr lang="en-US"/><a:t>NONE</a:t></a:r></a:p>
+    <a:p><a:endParaRPr lang="en-US"/></a:p>
+  </p:txBody>
+</p:sp>`
+
+func TestMasterBodyStyleBulletIsInherited(t *testing.T) {
+	parts := zipParts(t, writeToBytes(t, New()))
+	parts["ppt/slides/slide1.xml"] = []byte(bodyPrSlide(bulletSlideShape))
+	parts["ppt/slideMasters/slideMaster1.xml"] = []byte(bulletMaster)
+	pkg := buildZip(t, parts)
+	pres, err := (&PPTXReader{}).ReadFromReader(bytes.NewReader(pkg), int64(len(pkg)))
+	if err != nil {
+		t.Fatalf("read the package: %v", err)
+	}
+	ph, ok := firstShapeOfType[*PlaceholderShape](pres)
+	if !ok {
+		t.Fatal("no body placeholder found")
+	}
+	paras := ph.GetParagraphs()
+	if len(paras) != 5 {
+		t.Fatalf("got %d paragraphs, want 5", len(paras))
+	}
+
+	assertChar := func(p *Paragraph, wantChar, wantFont string, label string) {
+		t.Helper()
+		b := p.GetBullet()
+		if b == nil {
+			t.Errorf("%s: bullet = nil, want a character bullet drawing %q", label, wantChar)
+			return
+		}
+		if b.Type != BulletTypeChar || b.Style != wantChar {
+			t.Errorf("%s: bullet = type %d style %q, want a character bullet drawing %q", label, b.Type, b.Style, wantChar)
+		}
+		if b.Font != wantFont {
+			t.Errorf("%s: bullet font = %q, want %q", label, b.Font, wantFont)
+		}
+	}
+	assertChar(paras[0], "•", "Arial", "level-0 paragraph")
+	assertChar(paras[1], "»", "Courier New", "level-1 paragraph")
+	assertChar(paras[2], "-", "", "explicit buChar paragraph")
+	if b := paras[3].GetBullet(); b != nil && b.Type != BulletTypeNone {
+		t.Errorf("buNone paragraph: bullet type = %d, want None", b.Type)
+	}
+	if b := paras[4].GetBullet(); b != nil && b.Type != BulletTypeNone {
+		t.Errorf("empty paragraph: bullet type = %d, want None (no glyph for a runless paragraph)", b.Type)
+	}
+
+	// Structural half: what the reader baked in must survive a save, in the
+	// element order the schema fixes (buFont before buChar).
+	got := string(zipParts(t, writeToBytes(t, pres))["ppt/slides/slide1.xml"])
+	for _, want := range []string{`<a:buFont typeface="Arial"/>`, `<a:buChar char="•"/>`, `<a:buChar char="-"/>`, `<a:buNone/>`} {
+		if !strings.Contains(got, want) {
+			t.Errorf("written slide lost %q:\n%s", want, got)
+		}
+	}
+}
+
 // PowerPoint applies space before the *first* paragraph of a text body too,
 // so the renderer must not skip it the way it skips nothing else.
 func TestFirstParagraphSpaceBeforeShiftsInk(t *testing.T) {
@@ -902,5 +1013,129 @@ func TestTabJumpsToTheNextStop(t *testing.T) {
 	if tabEnd-plainEnd < 30 {
 		t.Errorf("tabbed text's last ink column = %d vs %d for plain AB; the tab advanced %d px, want a full stop (~≥40px) — a skipped or tofu-drawn tab advances nothing",
 			tabEnd, plainEnd, tabEnd-plainEnd)
+	}
+}
+
+// PowerPoint draws the bullet at marL+indent but starts the text at marL —
+// the bullet is followed by something tab-like, not by its own advance. The
+// renderer used to flow the text right after the bullet glyph, so every
+// bulleted line sat a bullet-width too far left (slide34's "–" lists).
+//
+// The reference is the same paragraph without a bullet: its text starts on
+// marL by construction, so the bulleted render must put its text ink on the
+// same columns regardless of where the bullet itself lands.
+func TestBulletTextLandsOnTheMargin(t *testing.T) {
+	fc := NewFontCache()
+	// The text face (Calibri) is deliberately shorter than the bullet face
+	// (Arial): PowerPoint sizes the line by its text, so a tall bullet face
+	// must not push the line's baseline down.
+	build := func(bulleted bool) [][]bool {
+		pres := New()
+		shape := pres.GetActiveSlide().CreateRichTextShape()
+		shape.BaseShape.SetOffsetX(200000).SetOffsetY(200000)
+		shape.BaseShape.SetWidth(6000000).SetHeight(800000)
+		run := shape.CreateTextRun("Wed")
+		run.GetFont().SetName("Calibri").SetSize(20)
+		run.GetFont().Color = NewColor("000000")
+		para := shape.GetParagraphs()[0]
+		if bulleted {
+			para.bullet = &Bullet{Type: BulletTypeChar, Style: "•", Font: "Arial"}
+		}
+		// One inch of margin, half an inch of hanging indent: 64px and 32px
+		// at this render scale. The bullet pen sits at inset+32px; the text
+		// must land on inset+64px either way.
+		para.alignment = NewAlignment()
+		para.alignment.MarginLeft = 914400
+		para.alignment.Indent = -457200
+
+		opts := DefaultRenderOptions()
+		opts.Width = 640
+		opts.FontCache = fc
+		img, err := pres.SlideToImage(0, opts)
+		if err != nil {
+			t.Fatalf("render: %v", err)
+		}
+		grid := make([][]bool, 480)
+		for y := range grid {
+			grid[y] = make([]bool, 640)
+		}
+		for y := 0; y < 480; y++ {
+			for x := 0; x < 640; x++ {
+				r, g, b, a := img.At(x, y).RGBA()
+				if a != 0 && (r+g+b)/3 < 20000 {
+					grid[y][x] = true
+				}
+			}
+		}
+		return grid
+	}
+	firstInk := func(grid [][]bool) int {
+		for x := range grid[0] {
+			for y := range grid {
+				if grid[y][x] {
+					return x
+				}
+			}
+		}
+		return -1
+	}
+	// First ink row strictly to the right of column from: the text glyph's
+	// top edge, unaffected by the bullet's ink.
+	firstRowFrom := func(grid [][]bool, from int) int {
+		for y := range grid {
+			for x := from; x < len(grid[y]); x++ {
+				if grid[y][x] {
+					return y
+				}
+			}
+		}
+		return -1
+	}
+	plainGrid := build(false)
+	plainAt := firstInk(plainGrid)
+	plainRow := firstRowFrom(plainGrid, plainAt)
+
+	// The bulleted render carries the bullet's own ink first; find where the
+	// text begins by skipping the leading gap between the bullet and it.
+	bulletedGrid := build(true)
+	bulletedCols := make([]bool, len(bulletedGrid[0]))
+	for y := range bulletedGrid {
+		for x, on := range bulletedGrid[y] {
+			if on {
+				bulletedCols[x] = true
+			}
+		}
+	}
+	gap := -1
+	sawInk := false
+	var textAt int
+	for i, on := range bulletedCols {
+		if on {
+			if !sawInk {
+				sawInk = true
+			} else if gap >= 0 {
+				textAt = i
+				break
+			}
+			gap = -1
+		} else if sawInk {
+			if gap < 0 {
+				gap = 0
+			}
+			gap++
+		}
+	}
+	if textAt <= 0 {
+		t.Fatal("no second ink interval found after the bullet")
+	}
+	if d := textAt - plainAt; d < 29 || d > 35 {
+		t.Errorf("bulleted text starts %d px after the plain paragraph's first line (%d vs %d), want one hang = 32 px; the text is riding the bullet's own advance instead of starting on marL", d, textAt, plainAt)
+	}
+	// Vertical: the taller bullet face must not grow the line box. With the
+	// bullet's metrics counted, the text's baseline (and its ink) slides
+	// down by the ascent difference.
+	textRow := firstRowFrom(bulletedGrid, textAt)
+	if d := textRow - plainRow; d < -1 || d > 1 {
+		t.Errorf("bulleted text ink row = %d vs %d plain; the bullet face's metrics grew the line box and pushed the text down %d px", textRow, plainRow, d)
 	}
 }

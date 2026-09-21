@@ -3958,6 +3958,16 @@ type masterLevelStyle struct {
 	// here with the level's own font size (a line is 1.2× the size), so the
 	// paragraph carries an absolute value afterwards like any other.
 	spcBef int
+	// The level's bullet, exactly as the master declares it: buChar carries
+	// the character and buFont its typeface, buAutoNum an ordered list (with
+	// its startAt), buNone an explicit "no bullet". An empty buChar with no
+	// auto-num and no buNone means the level declares nothing, and the
+	// paragraph keeps whatever nearer rung of the ladder gave it.
+	buChar    string
+	buFont    string
+	buAutoNum string
+	buStartAt int
+	buNone    bool
 }
 
 // masterTextStyles is a slide master's <p:txStyles>, indexed by outline level
@@ -4134,6 +4144,40 @@ func parseMasterTextStyles(data []byte, pres *Presentation) *masterTextStyles {
 						}
 					}
 				}
+			case "buChar":
+				// The bullet elements are children of the level element, next
+				// to spcBef and defRPr — the same grammar a paragraph's pPr
+				// uses, one rung up the ladder.
+				if cur != nil {
+					for _, attr := range t.Attr {
+						if attr.Name.Local == "char" {
+							cur.buChar = attr.Value
+						}
+					}
+				}
+			case "buFont":
+				if cur != nil {
+					if n := typefaceOf(pres, t.Attr); n != "" {
+						cur.buFont = n
+					}
+				}
+			case "buNone":
+				if cur != nil {
+					cur.buNone = true
+				}
+			case "buAutoNum":
+				if cur != nil {
+					for _, attr := range t.Attr {
+						switch attr.Name.Local {
+						case "type":
+							cur.buAutoNum = attr.Value
+						case "startAt":
+							if v, err := strconv.Atoi(attr.Value); err == nil {
+								cur.buStartAt = v
+							}
+						}
+					}
+				}
 			case "srgbClr":
 				if inSolidFill && cur != nil {
 					for _, attr := range t.Attr {
@@ -4220,6 +4264,45 @@ func applyMasterTextStyles(ph *PlaceholderShape, m *masterTextStyles) {
 		// takes the master's value.
 		if para.spaceBefore == 0 && s.spcBef > 0 {
 			para.spaceBefore = s.spcBef
+		}
+
+		// Bullets inherit on the same ladder. A paragraph that declared
+		// nothing (bullet == nil) takes the level's bullet; one that declared
+		// <a:buChar>, <a:buAutoNum> or <a:buNone> keeps it — the reader marks
+		// buNone as a bullet of type None, so a non-nil bullet always means
+		// "the slide spoke". A paragraph with no runs stays bulletless too:
+		// PowerPoint draws no glyph for an empty paragraph, only the line.
+		if para.bullet == nil {
+			hasText := false
+			for _, elem := range para.elements {
+				if _, ok := elem.(*TextRun); ok {
+					hasText = true
+					break
+				}
+			}
+			if hasText {
+				switch {
+				case s.buChar != "":
+					b := NewBullet()
+					b.Type = BulletTypeChar
+					b.Style = s.buChar
+					if s.buFont != "" {
+						b.Font = s.buFont
+					}
+					para.bullet = b
+				case s.buAutoNum != "":
+					b := NewBullet()
+					b.Type = BulletTypeNumeric
+					b.NumFormat = s.buAutoNum
+					if s.buStartAt > 0 {
+						b.StartAt = s.buStartAt
+					}
+					if s.buFont != "" {
+						b.Font = s.buFont
+					}
+					para.bullet = b
+				}
+			}
 		}
 
 		for _, elem := range para.elements {

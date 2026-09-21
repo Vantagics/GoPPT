@@ -5143,6 +5143,12 @@ type textRun struct {
 	face        font.Face // render face (HintingFull) for drawing
 	measureFace font.Face // measure face (HintingNone) for layout; nil falls back to face
 	width       int
+	// isBullet marks the prefix run buildBulletRun creates. A bullet takes
+	// its metrics from whatever face it draws with — often Arial, where the
+	// master's buFont points — and that face's ascent can exceed the text
+	// face's. PowerPoint sizes a line by its text, not its bullet, so line
+	// metrics ignore bullet runs and the glyph rides the text baseline.
+	isBullet bool
 }
 
 // mface returns the face to use for measurement. If a dedicated measure face
@@ -5169,7 +5175,30 @@ func (r *renderer) buildTextLine(runs []textRun) textLine {
 	tl.runs = runs
 	maxHeight := 0 // track font's recommended line-to-line height (includes line gap)
 	hasCJK := false
+	// A bullet run must not contribute to the line's metrics when real text
+	// shares the line: the bullet's face (the master's buFont, often Arial)
+	// can be taller than the text face and would push every glyph down. When
+	// the line holds nothing else, the bullet is all there is and keeps its
+	// own metrics.
+	textRuns := runs
+	hasTextRun := false
 	for _, run := range runs {
+		if !run.isBullet {
+			hasTextRun = true
+			break
+		}
+	}
+	if hasTextRun {
+		textRuns = make([]textRun, 0, len(runs))
+		for _, run := range runs {
+			if !run.isBullet {
+				textRuns = append(textRuns, run)
+			} else {
+				tl.width += run.width
+			}
+		}
+	}
+	for _, run := range textRuns {
 		tl.width += run.width
 		if run.face == nil {
 			continue
@@ -5243,11 +5272,8 @@ func (r *renderer) measureParagraphsHeight(paragraphs []*Paragraph, w, h int, an
 			indent = r.emuToPixelX(para.alignment.Indent)
 		}
 		var paraRuns []textRun
-		if para.bullet != nil && para.bullet.Type != BulletTypeNone {
-			bRun := r.buildBulletRun(para.bullet, para, ordinals[pi])
-			if bRun.text != "" {
-				paraRuns = append(paraRuns, bRun)
-			}
+		if bRun := r.bulletRunFor(para, ordinals[pi], indent); bRun.text != "" {
+			paraRuns = append(paraRuns, bRun)
 		}
 		paraRuns = append(paraRuns, r.buildParaTextRuns(para.elements)...)
 		baseW := w - marginLeft - marginRight
@@ -5319,11 +5345,8 @@ func (r *renderer) measureMaxLineWidth(paragraphs []*Paragraph, w int, wordWrap 
 			indent = r.emuToPixelX(para.alignment.Indent)
 		}
 		var paraRuns []textRun
-		if para.bullet != nil && para.bullet.Type != BulletTypeNone {
-			bRun := r.buildBulletRun(para.bullet, para, ordinals[pi])
-			if bRun.text != "" {
-				paraRuns = append(paraRuns, bRun)
-			}
+		if bRun := r.bulletRunFor(para, ordinals[pi], indent); bRun.text != "" {
+			paraRuns = append(paraRuns, bRun)
 		}
 		paraRuns = append(paraRuns, r.buildParaTextRuns(para.elements)...)
 		baseW := w - marginLeft - marginRight
@@ -5387,11 +5410,8 @@ func (r *renderer) drawParagraphs(paragraphs []*Paragraph, x, y, w, h int, ancho
 		var paraRuns []textRun
 
 		// Bullet run
-		if para.bullet != nil && para.bullet.Type != BulletTypeNone {
-			bRun := r.buildBulletRun(para.bullet, para, ordinals[pi])
-			if bRun.text != "" {
-				paraRuns = append(paraRuns, bRun)
-			}
+		if bRun := r.bulletRunFor(para, ordinals[pi], indent); bRun.text != "" {
+			paraRuns = append(paraRuns, bRun)
 		}
 
 		paraRuns = append(paraRuns, r.buildParaTextRuns(para.elements)...)
@@ -5862,6 +5882,27 @@ func bulletOrdinals(paragraphs []*Paragraph) []int {
 	return ordinals
 }
 
+// bulletRunFor builds the bullet prefix run for a paragraph and pads it so the
+// text lands where PowerPoint puts it. PowerPoint draws the bullet at
+// marL+indent but flows the text from marL — the bullet is followed by
+// something tab-like, not by its own advance. With a hanging indent
+// (indent < 0) that landing is -indent away from the bullet's pen position, so
+// a bullet narrower than the hang is padded to it; a wider one keeps its
+// advance (PowerPoint then tabs to the next stop, which we approximate).
+func (r *renderer) bulletRunFor(para *Paragraph, ordinal, indent int) textRun {
+	if para.bullet == nil || para.bullet.Type == BulletTypeNone {
+		return textRun{}
+	}
+	bRun := r.buildBulletRun(para.bullet, para, ordinal)
+	if bRun.text == "" {
+		return textRun{}
+	}
+	if indent < 0 && bRun.width < -indent {
+		bRun.width = -indent
+	}
+	return bRun
+}
+
 // buildBulletRun creates a textRun for a bullet prefix. ordinal is the number
 // an auto-numbered bullet shows, as returned by bulletOrdinals.
 func (r *renderer) buildBulletRun(b *Bullet, para *Paragraph, ordinal int) textRun {
@@ -5969,10 +6010,11 @@ func (r *renderer) buildBulletRun(b *Bullet, para *Paragraph, ordinal int) textR
 		w += gap
 	}
 	return textRun{
-		text:  text,
-		font:  bulletFont,
-		face:  face,
-		width: w,
+		text:     text,
+		font:     bulletFont,
+		face:     face,
+		width:    w,
+		isBullet: true,
 	}
 }
 
@@ -6463,6 +6505,7 @@ func (r *renderer) wrapRunLine(runs []textRun, maxWidth int) []textLine {
 						face:        run.face,
 						measureFace: run.measureFace,
 						width:       measureStringWithKern(run.face, pText).Ceil(),
+						isBullet:    run.isBullet,
 					})
 				}
 				lines = append(lines, r.buildTextLine(currentRuns))
@@ -6488,6 +6531,7 @@ func (r *renderer) wrapRunLine(runs []textRun, maxWidth int) []textLine {
 				face:        run.face,
 				measureFace: run.measureFace,
 				width:       measureStringWithKern(run.face, pText).Ceil(),
+				isBullet:    run.isBullet,
 			}
 			currentRuns = append(currentRuns, wr)
 			currentWidth += pw
@@ -6599,6 +6643,7 @@ func (r *renderer) wrapRunLineWithIndent(runs []textRun, firstLineWidth, contLin
 						face:        run.face,
 						measureFace: run.measureFace,
 						width:       measureStringWithKern(run.face, pText).Ceil(),
+						isBullet:    run.isBullet,
 					})
 				}
 				lines = append(lines, r.buildTextLine(currentRuns))
