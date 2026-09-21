@@ -492,11 +492,42 @@ var chineseFontAliases = map[string]string{
 
 // registerByFamilyName extracts the font family name from the font's name
 // table and registers it in the cache.
+//
+// A family name does not identify a file. calibri.ttf, calibrib.ttf,
+// calibrii.ttf and calibriz.ttf all report the family "Calibri" and differ only
+// in their subfamily, so registering the family name for each of them leaves
+// whichever one the directory walk reached last holding it. On Windows that is
+// calibriz.ttf, Calibri Bold Italic, so every request for Calibri found a font —
+// findFontKeyLocked returns as soon as the key exists, so nothing reported a
+// substitution — and the whole document was drawn bold italic. Worse, the
+// winner is decided by directory enumeration order, so the same deck rendered
+// differently on different machines and neither matched PowerPoint.
+//
+// The bare family name is therefore the regular face's, and a styled face is
+// registered under the suffixed names findFontKeyLocked already looks for
+// ("calibri bold", "calibri bold italic"). A styled face still claims the bare
+// name when nothing else has, so that a family with only a bold file installed
+// stays reachable rather than resolving to nothing.
 func (fc *FontCache) registerByFamilyName(f *opentype.Font) {
 	familyName, err := f.Name(nil, sfnt.NameIDFamily)
-	if err == nil && familyName != "" {
-		fc.fonts[strings.ToLower(familyName)] = f
+	if err != nil || familyName == "" {
+		return
 	}
+	lower := strings.ToLower(familyName)
+
+	subfamily, subErr := f.Name(nil, sfnt.NameIDSubfamily)
+	subfamily = strings.TrimSpace(subfamily)
+	regular := subErr != nil || subfamily == "" || strings.EqualFold(subfamily, "Regular")
+
+	if regular {
+		fc.fonts[lower] = f
+	} else {
+		if _, taken := fc.fonts[lower]; !taken {
+			fc.fonts[lower] = f
+		}
+		fc.fonts[lower+" "+strings.ToLower(subfamily)] = f
+	}
+
 	// Also register by full name (e.g. "Microsoft YaHei Bold")
 	fullName, err := f.Name(nil, sfnt.NameIDFull)
 	if err == nil && fullName != "" {
