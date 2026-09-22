@@ -248,6 +248,13 @@ type Fill struct {
 	Color    Color
 	EndColor Color // for gradient fills
 	Rotation int   // gradient rotation in degrees
+	// MidColor/MidPos carry a middle gradient stop (MidPos in 0..100000
+	// gradient-vector units, 0 = absent). The Office themes' fill styles are
+	// three-stop gradients whose knee sits well off the straight line between
+	// the ends — dropping it shows as a several-level band across every
+	// fillRef-2 shape. The writer writes it back between the other stops.
+	MidColor Color
+	MidPos   int
 }
 
 // FillType represents the type of fill.

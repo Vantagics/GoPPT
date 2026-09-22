@@ -644,6 +644,12 @@ func (r *PPTXReader) parseSlideXML(decoder *xml.Decoder, slide *Slide, rels []xm
 		inLnRef         bool
 		styleFillScheme string // scheme colour name, e.g. "accent1"
 		styleLnScheme   string
+		styleFillIdx    int             // the fillRef's idx (0 = no theme fill)
+		styleLnIdx      int             // the lnRef's idx (picks the line weight)
+		styleFillOps    []themeColorOp  // transforms on the fillRef's schemeClr
+		styleLnOps      []themeColorOp  // transforms on the lnRef's schemeClr
+		styleOpsTarget  *[]themeColorOp // which of the two the current colour feeds
+		inStyleScheme   bool            // collecting those transforms
 
 		// <a:tableStyleId> character data
 		inTableStyleID bool
@@ -1561,6 +1567,16 @@ func (r *PPTXReader) parseSlideXML(decoder *xml.Decoder, slide *Slide, rels []xm
 				// not place here.
 				if state.inRunProps {
 					currentHyperlink = parseHyperlinkClick(t, rels)
+					// hlinkClick sits after solidFill in CT_TextCharacterProperties,
+					// so by the time it arrives the run colour is whatever the fill
+					// said — and PowerPoint still paints the run in the theme's
+					// hlink colour (slide07: rPr solidFill tx1 renders 0000FF).
+					// A linked run is a themed link, not a coloured run.
+					if currentHyperlink != nil && pres != nil && pres.themeColors != nil {
+						if hl, ok := pres.themeColors["hlink"]; ok && hl != "" && currentFont != nil {
+							currentFont.Color = NewColor(hl)
+						}
+					}
 				}
 			case "rPr":
 				if state.inRun || state.inTcRun {
@@ -1999,7 +2015,20 @@ func (r *PPTXReader) parseSlideXML(decoder *xml.Decoder, slide *Slide, rels []xm
 					// The colour the style reference points at. Captured by
 					// name and resolved when <p:style> closes, because a
 					// reference is a fallback, not a property: an explicit
-					// fill in <p:spPr> still outranks it.
+					// fill in <p:spPr> still outranks it. The transforms on
+					// this schemeClr ride along — a lnRef naming
+					// "dk1 shade 50%" is not plain dk1. Each reference keeps
+					// its own op list: fillRef starts AFTER lnRef inside
+					// <p:style>, and a shared list would let the fill wipe
+					// the line's shade before the line is resolved.
+					state.inStyleScheme = true
+					if state.inFillRef {
+						state.styleFillOps = nil
+						state.styleOpsTarget = &state.styleFillOps
+					} else {
+						state.styleLnOps = nil
+						state.styleOpsTarget = &state.styleLnOps
+					}
 					for _, attr := range t.Attr {
 						if attr.Name.Local == "val" {
 							if state.inFillRef {
@@ -2250,6 +2279,15 @@ func (r *PPTXReader) parseSlideXML(decoder *xml.Decoder, slide *Slide, rels []xm
 				}
 			case "lumMod":
 				// Luminance modulation: multiply luminance by val/100000
+				if state.inStyleScheme {
+					for _, attr := range t.Attr {
+						if attr.Name.Local == "val" {
+							if v, err := strconv.Atoi(attr.Value); err == nil {
+								*state.styleOpsTarget = append(*state.styleOpsTarget, themeColorOp{op: "lumMod", val: float64(v) / 100000.0})
+							}
+						}
+					}
+				}
 				if state.inSrgbClr && lastColor != nil {
 					for _, attr := range t.Attr {
 						if attr.Name.Local == "val" {
@@ -2261,6 +2299,15 @@ func (r *PPTXReader) parseSlideXML(decoder *xml.Decoder, slide *Slide, rels []xm
 				}
 			case "lumOff":
 				// Luminance offset: add val/100000 to luminance
+				if state.inStyleScheme {
+					for _, attr := range t.Attr {
+						if attr.Name.Local == "val" {
+							if v, err := strconv.Atoi(attr.Value); err == nil {
+								*state.styleOpsTarget = append(*state.styleOpsTarget, themeColorOp{op: "lumOff", val: float64(v) / 100000.0})
+							}
+						}
+					}
+				}
 				if state.inSrgbClr && lastColor != nil {
 					for _, attr := range t.Attr {
 						if attr.Name.Local == "val" {
@@ -2272,6 +2319,15 @@ func (r *PPTXReader) parseSlideXML(decoder *xml.Decoder, slide *Slide, rels []xm
 				}
 			case "tint":
 				// Tint: blend toward white by val/100000
+				if state.inStyleScheme {
+					for _, attr := range t.Attr {
+						if attr.Name.Local == "val" {
+							if v, err := strconv.Atoi(attr.Value); err == nil {
+								*state.styleOpsTarget = append(*state.styleOpsTarget, themeColorOp{op: "tint", val: float64(v) / 100000.0})
+							}
+						}
+					}
+				}
 				if state.inSrgbClr && lastColor != nil {
 					for _, attr := range t.Attr {
 						if attr.Name.Local == "val" {
@@ -2283,11 +2339,33 @@ func (r *PPTXReader) parseSlideXML(decoder *xml.Decoder, slide *Slide, rels []xm
 				}
 			case "shade":
 				// Shade: blend toward black by val/100000
+				if state.inStyleScheme {
+					for _, attr := range t.Attr {
+						if attr.Name.Local == "val" {
+							if v, err := strconv.Atoi(attr.Value); err == nil {
+								*state.styleOpsTarget = append(*state.styleOpsTarget, themeColorOp{op: "shade", val: float64(v) / 100000.0})
+							}
+						}
+					}
+				}
 				if state.inSrgbClr && lastColor != nil {
 					for _, attr := range t.Attr {
 						if attr.Name.Local == "val" {
 							if v, err := strconv.Atoi(attr.Value); err == nil {
 								applyShade(lastColor, float64(v)/100000.0)
+							}
+						}
+					}
+				}
+			case "satMod":
+				// Saturation modulation — the Office fill/line styles pair it
+				// with tint/shade on every stop. On the achromatic phClr most
+				// references carry it is a no-op; on accents it is not.
+				if state.inStyleScheme {
+					for _, attr := range t.Attr {
+						if attr.Name.Local == "val" {
+							if v, err := strconv.Atoi(attr.Value); err == nil {
+								*state.styleOpsTarget = append(*state.styleOpsTarget, themeColorOp{op: "satMod", val: float64(v) / 100000.0})
 							}
 						}
 					}
@@ -2874,9 +2952,12 @@ func (r *PPTXReader) parseSlideXML(decoder *xml.Decoder, slide *Slide, rels []xm
 				if state.inStyle {
 					if fillRefIdx(t) == 0 {
 						state.inFillRef = false
+						state.styleFillIdx = 0
 					} else {
 						state.inFillRef = true
 						state.styleFillScheme = ""
+						state.styleFillIdx = fillRefIdx(t)
+						state.styleFillOps = nil
 					}
 				}
 			case "lnRef":
@@ -2885,6 +2966,8 @@ func (r *PPTXReader) parseSlideXML(decoder *xml.Decoder, slide *Slide, rels []xm
 				if state.inStyle {
 					state.inLnRef = true
 					state.styleLnScheme = ""
+					state.styleLnIdx = fillRefIdx(t)
+					state.styleLnOps = nil
 				}
 			case "fontRef":
 				// <a:fontRef> inside <p:style> — provides default text color
@@ -3516,6 +3599,10 @@ func (r *PPTXReader) parseSlideXML(decoder *xml.Decoder, slide *Slide, rels []xm
 				state.inSrgbClr = false
 			case "schemeClr":
 				state.inSrgbClr = false
+				// The transforms a style-reference colour carries are now
+				// complete; they stay pending in styleFillOps/styleLnOps
+				// until <p:style> closes and the fill/line is resolved.
+				state.inStyleScheme = false
 			case "outerShdw":
 				state.inOuterShdw = false
 			case "effectLst":
@@ -3577,27 +3664,43 @@ func (r *PPTXReader) parseSlideXML(decoder *xml.Decoder, slide *Slide, rels []xm
 				// naming lt1 turned the fillRef's accent into white.
 				state.inFillRef = false
 				state.inLnRef = false
+				state.inStyleScheme = false
 			case "style":
 				state.inStyle = false
 				state.inFontRef = false
 				state.inFillRef = false
 				state.inLnRef = false
+				state.inStyleScheme = false
 				// The style reference is a fallback: only where the shape's
 				// own <p:spPr> declared nothing does the theme colour become
 				// the fill. Applied to the pending values so the shape that
 				// <p:sp> closes next picks them up through its usual path.
+				//
+				// The idx is an index into the theme's fillStyleLst, not a
+				// solid-fill instruction: idx 2 is a three-stop gradient
+				// whose stops are the reference colour tinted, and resolving
+				// it as a solid painted every themed gradient text box flat
+				// black (slide07 drew #000 where PowerPoint drew a
+				// 236→188 grey ramp). resolveThemeFillStyle falls back to
+				// the plain solid when no theme styles were parsed.
 				if state.inSp && pres != nil && pendingShapeFill == nil && state.styleFillScheme != "" {
-					if argb, ok := pres.themeColors[state.styleFillScheme]; ok && argb != "" {
-						pendingShapeFill = NewFill()
-						pendingShapeFill.SetSolid(NewColor(argb))
-					}
+					pendingShapeFill = resolveThemeFillStyle(pres, state.styleFillIdx, state.styleFillScheme, state.styleFillOps)
 				}
 				if state.inSp && pres != nil && pendingBorder == nil && state.styleLnScheme != "" {
 					if argb, ok := pres.themeColors[state.styleLnScheme]; ok && argb != "" {
+						lineColor := applyColorOps(NewColor(argb), state.styleLnOps)
+						width := 1 // points
+						if state.styleLnIdx >= 1 && state.styleLnIdx <= len(pres.themeLnStyles) {
+							lnStyle := pres.themeLnStyles[state.styleLnIdx-1]
+							lineColor = applyColorOps(lineColor, lnStyle.ops)
+							if lnStyle.widthEMU > 0 {
+								width = (lnStyle.widthEMU + 6350) / 12700
+							}
+						}
 						pendingBorder = NewBorder()
 						pendingBorder.Style = BorderSolid
-						pendingBorder.Width = 1 // the theme's subtle line weight, rounded to points
-						pendingBorder.Color = NewColor(argb)
+						pendingBorder.Width = width
+						pendingBorder.Color = lineColor
 					}
 				}
 				// A connector's colour lives on its <a:ln> too, but when the

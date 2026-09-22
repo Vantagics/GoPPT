@@ -339,6 +339,250 @@ func (r *PPTXReader) readTheme(zr *zip.Reader, pres *Presentation) {
 	}
 	r.parseThemeColors(data, pres)
 	r.parseThemeFonts(data, pres)
+	r.parseThemeFormatScheme(data, pres)
+}
+
+// themeColorOp is a single colour transform from a theme style body — the
+// children a <a:schemeClr> carries where a style says "phClr". tint and shade
+// mix in linear light, lumMod/lumOff work on HLS luminance, satMod scales HLS
+// saturation (a no-op on the achromatic phClr most stop lists use).
+type themeColorOp struct {
+	op  string
+	val float64 // 0..1 (lumOff: an offset; the rest: a scale)
+}
+
+// themeGradStop is one gradient stop: a position along the gradient vector
+// (0..100000) and the transforms that turn phClr into the stop colour.
+type themeGradStop struct {
+	pos int
+	ops []themeColorOp
+}
+
+// themeFillStyle is one entry of the theme's <a:fillStyleLst>: the Office
+// themes ship a solid, a subtle gradient and an intense one, and a fillRef's
+// idx is a 1-based index into exactly this list.
+type themeFillStyle struct {
+	solid bool
+	stops []themeGradStop
+	angle int // gradient direction in degrees, OOXML convention
+}
+
+// themeLnStyle is one entry of <a:lnStyleLst>: a line weight and the transforms
+// that turn the lnRef's colour into the line colour.
+type themeLnStyle struct {
+	widthEMU int
+	ops      []themeColorOp
+}
+
+// parseThemeFormatScheme reads <a:fmtScheme>'s fill and line style lists.
+// parseThemeColors stops at </a:clrScheme> — deliberately, because everything
+// after it is per-index style bodies, which only a style reference consumes.
+func (r *PPTXReader) parseThemeFormatScheme(data []byte, pres *Presentation) {
+	decoder := xml.NewDecoder(bytes.NewReader(data))
+
+	var (
+		inFillLst, inLnLst, inGrad bool
+		curFill                    *themeFillStyle
+		curLn                      *themeLnStyle
+		curStop                    *themeGradStop
+		inSchemeClr                bool
+		schemeOps                  []themeColorOp
+	)
+	attachOps := func() {
+		switch {
+		case curStop != nil:
+			curStop.ops = schemeOps
+		case curLn != nil && inSchemeClr:
+			curLn.ops = schemeOps
+		}
+		schemeOps = nil
+		inSchemeClr = false
+	}
+
+	for {
+		token, err := decoder.Token()
+		if err != nil {
+			break
+		}
+		switch t := token.(type) {
+		case xml.StartElement:
+			switch t.Name.Local {
+			case "fillStyleLst":
+				inFillLst = true
+			case "lnStyleLst":
+				inLnLst = true
+			case "gradFill":
+				if inFillLst {
+					inGrad = true
+					curFill = &themeFillStyle{}
+				}
+			case "solidFill":
+				if inLnLst && curLn != nil {
+					// the line colour container; ops attach to curLn
+				} else if inFillLst && !inGrad {
+					curFill = &themeFillStyle{solid: true}
+					curFill.stops = append(curFill.stops, themeGradStop{pos: 0})
+				}
+			case "lin":
+				if inGrad {
+					for _, attr := range t.Attr {
+						if attr.Name.Local == "ang" {
+							if v, err := strconv.Atoi(attr.Value); err == nil {
+								curFill.angle = v / 60000
+							}
+						}
+					}
+				}
+			case "gs":
+				if inGrad {
+					curStop = &themeGradStop{}
+					for _, attr := range t.Attr {
+						if attr.Name.Local == "pos" {
+							if v, err := strconv.Atoi(attr.Value); err == nil {
+								curStop.pos = v
+							}
+						}
+					}
+				}
+			case "ln":
+				if inLnLst {
+					curLn = &themeLnStyle{}
+					for _, attr := range t.Attr {
+						if attr.Name.Local == "w" {
+							if v, err := strconv.Atoi(attr.Value); err == nil {
+								curLn.widthEMU = v
+							}
+						}
+					}
+				}
+			case "schemeClr", "srgbClr":
+				if (inGrad && curStop != nil) || (inLnLst && curLn != nil) {
+					inSchemeClr = true
+					schemeOps = nil
+				}
+			case "tint", "shade", "lumMod", "lumOff", "satMod":
+				if inSchemeClr {
+					for _, attr := range t.Attr {
+						if attr.Name.Local == "val" {
+							if v, err := strconv.ParseFloat(attr.Value, 64); err == nil {
+								schemeOps = append(schemeOps, themeColorOp{op: t.Name.Local, val: v / 100000.0})
+							}
+						}
+					}
+				}
+			}
+		case xml.EndElement:
+			switch t.Name.Local {
+			case "gs":
+				if inGrad && curStop != nil {
+					curFill.stops = append(curFill.stops, *curStop)
+					curStop = nil
+				}
+			case "gradFill":
+				if inGrad {
+					pres.themeFillStyles = append(pres.themeFillStyles, *curFill)
+					inGrad = false
+					curFill = nil
+				}
+			case "solidFill":
+				if inFillLst && !inGrad && curFill != nil {
+					pres.themeFillStyles = append(pres.themeFillStyles, *curFill)
+					curFill = nil
+				}
+			case "ln":
+				if inLnLst && curLn != nil {
+					pres.themeLnStyles = append(pres.themeLnStyles, *curLn)
+					curLn = nil
+				}
+			case "schemeClr", "srgbClr":
+				if inSchemeClr {
+					attachOps()
+				}
+			case "fillStyleLst":
+				inFillLst = false
+			case "lnStyleLst":
+				inLnLst = false
+			}
+		}
+	}
+}
+
+// applyColorOps folds a transform list into a colour, in document order. The
+// spaces differ per op (see applyColorTransforms): tint/shade linear,
+// lumMod/lumOff/satMod on the HLS axes.
+func applyColorOps(c Color, ops []themeColorOp) Color {
+	for _, o := range ops {
+		switch o.op {
+		case "tint":
+			applyTint(&c, o.val)
+		case "shade":
+			applyShade(&c, o.val)
+		case "lumMod", "lumOff", "satMod":
+			h, l, s := rgbToHLS(float64(c.GetRed())/255, float64(c.GetGreen())/255, float64(c.GetBlue())/255)
+			switch o.op {
+			case "lumMod":
+				l *= o.val
+			case "lumOff":
+				l += o.val
+			case "satMod":
+				s *= o.val
+			}
+			if l > 1 {
+				l = 1
+			} else if l < 0 {
+				l = 0
+			}
+			if s > 1 {
+				s = 1
+			} else if s < 0 {
+				s = 0
+			}
+			r, g, b := hlsToRGB(h, l, s)
+			c = Color{ARGB: fmtARGB(uint8(r*255+0.5), uint8(g*255+0.5), uint8(b*255+0.5))}
+		}
+	}
+	return c
+}
+
+// resolveThemeFillStyle builds the fill a <p:style> fillRef names: idx picks a
+// body from the theme's fillStyleLst, and every phClr in that body is the
+// reference's scheme colour (with the slide-level transforms already applied —
+// the reference colour, transforms and all, is what gets substituted). With no
+// parsed theme the reference degrades to a solid of its own colour, the
+// pre-r30 reading, so synthetic tests and theme-less decks keep working.
+func resolveThemeFillStyle(pres *Presentation, idx int, scheme string, slideOps []themeColorOp) *Fill {
+	argb, ok := "", false
+	if pres != nil && pres.themeColors != nil {
+		argb, ok = pres.themeColors[scheme]
+	}
+	if !ok || argb == "" {
+		return nil
+	}
+	ph := applyColorOps(NewColor(argb), slideOps)
+	if pres == nil || idx < 1 || idx > len(pres.themeFillStyles) {
+		return NewFill().SetSolid(ph)
+	}
+	style := pres.themeFillStyles[idx-1]
+	if len(style.stops) == 0 {
+		return nil
+	}
+	colors := make([]Color, len(style.stops))
+	for i, st := range style.stops {
+		colors[i] = applyColorOps(ph, st.ops)
+	}
+	f := NewFill()
+	if style.solid || len(colors) == 1 {
+		return f.SetSolid(colors[0])
+	}
+	f.SetGradientLinear(colors[0], colors[len(colors)-1], style.angle)
+	if len(colors) >= 3 {
+		// The model carries two stops; the middle one rides along as an
+		// optional knee so the renderer can reproduce the three-stop
+		// subtlety gradients the Office themes define everywhere.
+		f.MidColor = colors[1]
+		f.MidPos = style.stops[1].pos
+	}
+	return f
 }
 
 // parseThemeColors populates pres.themeColors with mappings like "dk1" → "FF000000".

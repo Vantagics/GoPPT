@@ -3003,6 +3003,16 @@ func (r *renderer) scaleAlpha(c color.RGBA) color.RGBA {
 func (r *renderer) fillGradientLinear(rect image.Rectangle, fill *Fill) {
 	startC := argbToRGBA(fill.Color)
 	endC := argbToRGBA(fill.EndColor)
+	// Optional middle stop: the theme fill styles are three-stop gradients
+	// whose knee (35% or 55% along the vector) sits far enough off the
+	// end-to-end line that a two-stop approximation bands visibly.
+	var midC [4]uint8
+	midT := -1.0
+	if fill.MidPos > 0 && fill.MidPos < 100000 {
+		mc := argbToRGBA(fill.MidColor)
+		midC = [4]uint8{mc.R, mc.G, mc.B, mc.A}
+		midT = float64(fill.MidPos) / 100000.0
+	}
 	w := rect.Dx()
 	h := rect.Dy()
 	if w <= 0 || h <= 0 {
@@ -3039,11 +3049,38 @@ func (r *renderer) fillGradientLinear(rect image.Rectangle, fill *Fill) {
 			} else if t > 1 {
 				t = 1
 			}
-			it := 1 - t
-			pix[off] = uint8(float64(startC.R)*it + float64(endC.R)*t)
-			pix[off+1] = uint8(float64(startC.G)*it + float64(endC.G)*t)
-			pix[off+2] = uint8(float64(startC.B)*it + float64(endC.B)*t)
-			pix[off+3] = uint8(float64(startC.A)*it + float64(endC.A)*t)
+			var outC [4]uint8
+			if midT > 0 && t < midT {
+				seg := t / midT
+				iseg := 1 - seg
+				outC = [4]uint8{
+					uint8(float64(startC.R)*iseg + float64(midC[0])*seg),
+					uint8(float64(startC.G)*iseg + float64(midC[1])*seg),
+					uint8(float64(startC.B)*iseg + float64(midC[2])*seg),
+					uint8(float64(startC.A)*iseg + float64(midC[3])*seg),
+				}
+			} else if midT > 0 {
+				seg := (t - midT) / (1 - midT)
+				iseg := 1 - seg
+				outC = [4]uint8{
+					uint8(float64(midC[0])*iseg + float64(endC.R)*seg),
+					uint8(float64(midC[1])*iseg + float64(endC.G)*seg),
+					uint8(float64(midC[2])*iseg + float64(endC.B)*seg),
+					uint8(float64(midC[3])*iseg + float64(endC.A)*seg),
+				}
+			} else {
+				it := 1 - t
+				outC = [4]uint8{
+					uint8(float64(startC.R)*it + float64(endC.R)*t),
+					uint8(float64(startC.G)*it + float64(endC.G)*t),
+					uint8(float64(startC.B)*it + float64(endC.B)*t),
+					uint8(float64(startC.A)*it + float64(endC.A)*t),
+				}
+			}
+			pix[off] = outC[0]
+			pix[off+1] = outC[1]
+			pix[off+2] = outC[2]
+			pix[off+3] = outC[3]
 			off += 4
 		}
 	}

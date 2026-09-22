@@ -42,6 +42,15 @@ type Presentation struct {
 	// placeholder. It is the last rung before the renderer's own default and
 	// is frequently the only rung that answers at all.
 	masterPlaceholders []layoutPlaceholder
+	// themeFillStyles / themeLnStyles are the theme's <a:fillStyleLst> and
+	// <a:lnStyleLst> bodies. A <p:style> fillRef idx="2" does not name a
+	// colour — it names the SECOND of these bodies, whose stops are phClr
+	// (whatever colour the reference carries) passed through transforms.
+	// Resolving a reference therefore means substituting the colour into the
+	// body, not reading a solid from it; treating idx>1 as a solid fill was
+	// painting theme-gradient text boxes flat black.
+	themeFillStyles []themeFillStyle
+	themeLnStyles   []themeLnStyle
 	// masterRead records that the master was looked for, so a master without
 	// placeholders is not re-read for every slide.
 	masterRead bool
