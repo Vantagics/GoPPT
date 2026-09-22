@@ -20,28 +20,58 @@ import (
 // whole-deck diff percentage.
 
 // ---------------------------------------------------------------------------
-// applyColorTransforms — the HLS folding behind table style band fills.
+// applyColorTransforms — two colour spaces PowerPoint mixes in, and one pair
+// of transforms that is easy to mistake for each other.
 // ---------------------------------------------------------------------------
 
-// Office 2007's "accent1, lighter 40%" is tint 40000, and PowerPoint renders
-// it as #95B3D7. The transform works in HLS luminance, so a wrong scale (an
-// 0-255 value fed where 0-1 was expected, the bug this test guards) collapses
-// everything toward black.
+// <a:tint val="40000"/> mixes the colour toward WHITE in LINEAR LIGHT — the
+// sRGB electro-optical transfer function, i.e. physical light intensity — and
+// val is the weight the ORIGINAL colour keeps: tint 0 is pure white, tint
+// 100000 the untouched input. A COM variant of the comparison deck's accent1
+// table fill measures #D0D8E8 for tint 40000 on #4F81BD. Mixing the
+// gamma-encoded bytes instead lands on #95B3D7, the value this test used to
+// pin from the name alone; that is the trade this assert now guards, and it
+// cost those table fills ~40 RGB counts per channel.
 func TestApplyColorTransformsTint40MatchesOffice(t *testing.T) {
-	got := applyColorTransforms(NewColor("4F81BD"), 0.4, -1, -1, -1)
-	if want := (Color{ARGB: "FF95B3D7"}); got != want {
-		t.Errorf("tint 40%% of 4F81BD = %s, want FF95B3D7", got.ARGB)
+	if got := applyColorTransforms(NewColor("4F81BD"), 0.4, -1, -1, -1); got != (Color{ARGB: "FFD0D8E8"}) {
+		t.Errorf("tint 40%% of 4F81BD = %s, want FFD0D8E8 (a linear-light mix toward white)", got.ARGB)
+	}
+	// The scale counts the input's weight, not the lightening: 0 keeps none of
+	// it and 100% keeps all of it.
+	if got := applyColorTransforms(NewColor("4F81BD"), 0, -1, -1, -1); got != (Color{ARGB: "FFFFFFFF"}) {
+		t.Errorf("tint 0%% = %s, want FFFFFFFF (no weight left to the colour)", got.ARGB)
+	}
+	if got := applyColorTransforms(NewColor("4F81BD"), 1, -1, -1, -1); got != (Color{ARGB: "FF4F81BD"}) {
+		t.Errorf("tint 100%% = %s, want the untouched FF4F81BD", got.ARGB)
 	}
 }
 
-// <a:tint val="40000"/> and <a:lumMod val="60000"/><a:lumOff val="40000"/>
-// are two spellings of the same PowerPoint command, so the two code paths
-// must land on the same colour.
-func TestApplyColorTransformsTintEqualsLumModLumOff(t *testing.T) {
-	viaTint := applyColorTransforms(NewColor("4F81BD"), 0.4, -1, -1, -1)
-	viaLum := applyColorTransforms(NewColor("4F81BD"), -1, -1, 0.6, 0.4)
-	if viaTint != viaLum {
-		t.Errorf("tint path %s != lumMod+lumOff path %s", viaTint.ARGB, viaLum.ARGB)
+// <a:shade> is the same mix toward black, and again only the linear space gets
+// the two fractions right: shading accent1 by 50000 halves every channel's
+// light (#385D8A), by 25000 leaves a quarter of it (#264264). Both were read
+// off PowerPoint's own render of explicit-fill variants.
+func TestApplyColorTransformsShadeMatchesOffice(t *testing.T) {
+	if got := applyColorTransforms(NewColor("4F81BD"), -1, 0.5, -1, -1); got != (Color{ARGB: "FF385D8A"}) {
+		t.Errorf("shade 50%% of 4F81BD = %s, want FF385D8A", got.ARGB)
+	}
+	if got := applyColorTransforms(NewColor("4F81BD"), -1, 0.25, -1, -1); got != (Color{ARGB: "FF264264"}) {
+		t.Errorf("shade 25%% of 4F81BD = %s, want FF264264", got.ARGB)
+	}
+}
+
+// The UI's "accent1, lighter 40%" is NOT written as a tint: it is
+// <a:lumMod val="60000"/><a:lumOff val="40000"/>, and those two operate on HLS
+// luminance — a third value for "40% lighter" again. This file once asserted
+// the two were equal on the strength of the name; the COM variants separate
+// them by ~40 counts per channel, so the inequality is the point now.
+func TestApplyColorTransformsLighter40IsLumModLumOff(t *testing.T) {
+	got := applyColorTransforms(NewColor("4F81BD"), -1, -1, 0.6, 0.4)
+	if want := (Color{ARGB: "FF95B3D7"}); got != want {
+		t.Errorf("lumMod 60%% + lumOff 40%% of 4F81BD = %s, want FF95B3D7", got.ARGB)
+	}
+	if viaTint := applyColorTransforms(NewColor("4F81BD"), 0.4, -1, -1, -1); viaTint == got {
+		t.Errorf("tint path %s == lumMod+lumOff path %s; \"lighter 40%%\" and <a:tint val=\"40000\"/> are different commands on different spaces",
+			viaTint.ARGB, got.ARGB)
 	}
 }
 

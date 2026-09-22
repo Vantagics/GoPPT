@@ -1,6 +1,7 @@
 package gopresentation
 
 import (
+	"math"
 	"strings"
 )
 
@@ -577,22 +578,76 @@ func applyLumOff(c *Color, offset float64) {
 	c.ARGB = c.ARGB[:2] + colorHex(nr) + colorHex(ng) + colorHex(nb)
 }
 
-// applyTint blends the color toward white by the given amount (0-1).
-func applyTint(c *Color, amount float64) {
-	r, g, b := c.GetRed(), c.GetGreen(), c.GetBlue()
-	nr := uint8(float64(r) + (255-float64(r))*amount + 0.5)
-	ng := uint8(float64(g) + (255-float64(g))*amount + 0.5)
-	nb := uint8(float64(b) + (255-float64(b))*amount + 0.5)
-	c.ARGB = c.ARGB[:2] + colorHex(nr) + colorHex(ng) + colorHex(nb)
+// srgbToLinear and linearToSRGB convert one colour channel between sRGB and
+// the linear-light space PowerPoint mixes colours in. The transfer function is
+// the piecewise sRGB EOTF, not a plain 2.2 power: the two disagree by enough to
+// miss a measured channel by one.
+func srgbToLinear(v float64) float64 {
+	if v <= 0.04045 {
+		return v / 12.92
+	}
+	return math.Pow((v+0.055)/1.055, 2.4)
 }
 
-// applyShade blends the color toward black by the given amount (0-1).
+func linearToSRGB(v float64) float64 {
+	if v <= 0.0031308 {
+		return v * 12.92
+	}
+	return 1.055*math.Pow(v, 1.0/2.4) - 0.055
+}
+
+// mixInLinearLight blends a channel toward `target` (1 = white, 0 = black) by
+// `amount` in linear light.
+func mixInLinearLight(v uint8, amount, target float64) uint8 {
+	if amount < 0 {
+		amount = 0
+	}
+	if amount > 1 {
+		amount = 1
+	}
+	lin := amount*srgbToLinear(float64(v)/255.0) + (1-amount)*target
+	if lin < 0 {
+		lin = 0
+	}
+	if lin > 1 {
+		lin = 1
+	}
+	return uint8(linearToSRGB(lin)*255.0 + 0.5)
+}
+
+// applyTint mixes the colour toward white by the given amount (0-1) — where
+// `amount` is the weight of the *original* colour, so a tint of 1 is the colour
+// and a tint of 0 is white.
+//
+// Two things here are not the obvious reading of the spec and were both
+// measured off PowerPoint's own output (the r29 COM probe put a series of
+// explicit tint/shade fills on a table and read the rendered pixels back):
+//
+//  1. The weight. <a:tint val="0"/> renders white and <a:tint val="100000"/>
+//     renders the colour itself, so the percentage counts the colour that
+//     survives, not the white that is added.
+//  2. The space. The blend happens in linear light: accent1 #4F81BD with
+//     tint 40000 is #D0D8E8 on screen, which the linear formula reproduces
+//     exactly, where an sRGB blend at the same weight gives #B8CDE5 and the
+//     old inverted-and-sRGB formula gave #95B3D7. Every channel of every
+//     probe value (tint 0/20000/25000/40000/50000/75000/100000) lands within
+//     one unit.
+func applyTint(c *Color, amount float64) {
+	r, g, b := c.GetRed(), c.GetGreen(), c.GetBlue()
+	c.ARGB = c.ARGB[:2] + colorHex(mixInLinearLight(r, amount, 1.0)) +
+		colorHex(mixInLinearLight(g, amount, 1.0)) +
+		colorHex(mixInLinearLight(b, amount, 1.0))
+}
+
+// applyShade blends the colour toward black by the given amount (0-1), again in
+// linear light. The weight here does count the colour (shade 50000 halves the
+// linear channel: accent1 becomes #385D8A, which both spaces agree is "half",
+// but the space still shows — #264264 for shade 25000 is the linear quarter).
 func applyShade(c *Color, amount float64) {
 	r, g, b := c.GetRed(), c.GetGreen(), c.GetBlue()
-	nr := uint8(float64(r)*amount + 0.5)
-	ng := uint8(float64(g)*amount + 0.5)
-	nb := uint8(float64(b)*amount + 0.5)
-	c.ARGB = c.ARGB[:2] + colorHex(nr) + colorHex(ng) + colorHex(nb)
+	c.ARGB = c.ARGB[:2] + colorHex(mixInLinearLight(r, amount, 0.0)) +
+		colorHex(mixInLinearLight(g, amount, 0.0)) +
+		colorHex(mixInLinearLight(b, amount, 0.0))
 }
 
 func colorHex(v uint8) string {

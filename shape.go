@@ -483,6 +483,13 @@ type TextRun struct {
 	text      string
 	font      *Font
 	hyperlink *Hyperlink
+	// fieldType is the <a:fld type="..."> this run was read from ("" for a
+	// plain <a:r>). A field is evaluated when the deck is displayed, not when
+	// it is parsed: the cached <a:t> inside the element is whatever the last
+	// save saw, so "slidenum" must be re-resolved per slide by the renderer
+	// and written back as a field — not flattened into a literal run — or a
+	// deck saved after reordering shows stale numbers.
+	fieldType string
 }
 
 func (tr *TextRun) GetElementType() string { return "textrun" }
@@ -492,6 +499,12 @@ func (tr *TextRun) GetText() string { return tr.text }
 
 // SetText sets the text content.
 func (tr *TextRun) SetText(text string) { tr.text = text }
+
+// GetFieldType returns the <a:fld> type the run came from ("" for a plain run).
+func (tr *TextRun) GetFieldType() string { return tr.fieldType }
+
+// SetFieldType marks the run as a field of the given type (e.g. "slidenum").
+func (tr *TextRun) SetFieldType(t string) { tr.fieldType = t }
 
 // GetFont returns the font properties.
 func (tr *TextRun) GetFont() *Font { return tr.font }
@@ -518,6 +531,11 @@ type DrawingShape struct {
 	mimeType           string
 	resizeProportional bool
 	alpha              int // alphaModFix amount (0-100000); 0 means fully opaque (default)
+	// <a:lum bright contrast> on the blip, both in 1/1000 of a percent and
+	// both signed. PowerPoint applies them to the picture's pixels; without
+	// them a darkened photo renders at full brightness.
+	lumBright   int
+	lumContrast int
 	// srcRect crop percentages in 1/1000 of a percent (e.g. 56333 = 56.333%)
 	cropLeft   int
 	cropTop    int
@@ -992,6 +1010,11 @@ func NewTableShape(rows, cols int) *TableShape {
 		numRows: rows,
 		numCols: cols,
 		rows:    make([][]*TableCell, rows),
+		// The two flags a table wants by default, and the two the writer has
+		// always emitted: a header row styled by the first-row part of the
+		// table style, and banded rows below it.
+		firstRow: true,
+		bandRow:  true,
 	}
 	for i := 0; i < rows; i++ {
 		table.rows[i] = make([]*TableCell, cols)
@@ -1042,6 +1065,15 @@ type TableCell struct {
 	rowSpan    int
 	hMerge     bool // continuation of horizontal merge (skip rendering)
 	vMerge     bool // continuation of vertical merge (skip rendering)
+	// Cell insets in EMU, -1 when the cell declares none and the table
+	// default applies (0.1" left and right, 0.05" top and bottom). They are
+	// what <a:tcPr marL/marR/marT/marB> carries, and they decide both where
+	// a cell's text starts and how wide it may wrap — getting them wrong
+	// re-wraps every cell and resizes every row.
+	marginL, marginR, marginT, marginB int
+	// anchor is the cell's vertical text anchor, <a:tcPr anchor>: "t", "ctr"
+	// or "b". Empty is the drawing default, which for a table cell is top.
+	anchor string
 }
 
 // CellBorders represents borders for a table cell.
@@ -1065,8 +1097,60 @@ func NewTableCell() *TableCell {
 		},
 		colSpan: 1,
 		rowSpan: 1,
+		// No declared insets: the -1s make the renderer fall back to the
+		// table default rather than to "text flush against the border".
+		marginL: -1,
+		marginR: -1,
+		marginT: -1,
+		marginB: -1,
 	}
 }
+
+// Table cell inset defaults, in EMU: PowerPoint insets a cell's text by 0.1" on
+// the left and right and 0.05" above and below unless the cell says otherwise.
+const (
+	DefaultCellMarginLR = 91440
+	DefaultCellMarginTB = 45720
+)
+
+// SetMargins sets the cell's insets in EMU, as <a:tcPr marL/marR/marT/marB>.
+// A negative value clears that side back to the table default.
+func (tc *TableCell) SetMargins(left, right, top, bottom int) *TableCell {
+	tc.marginL, tc.marginR, tc.marginT, tc.marginB = left, right, top, bottom
+	return tc
+}
+
+// GetMargins returns the cell's insets in EMU and whether it declared any.
+// When it did not, the caller should use DefaultCellMarginLR/TB.
+func (tc *TableCell) GetMargins() (left, right, top, bottom int, set bool) {
+	if tc.marginL < 0 && tc.marginR < 0 && tc.marginT < 0 && tc.marginB < 0 {
+		return 0, 0, 0, 0, false
+	}
+	l, r, t, b := tc.marginL, tc.marginR, tc.marginT, tc.marginB
+	if l < 0 {
+		l = DefaultCellMarginLR
+	}
+	if r < 0 {
+		r = DefaultCellMarginLR
+	}
+	if t < 0 {
+		t = DefaultCellMarginTB
+	}
+	if b < 0 {
+		b = DefaultCellMarginTB
+	}
+	return l, r, t, b, true
+}
+
+// SetAnchor sets the cell's vertical text anchor ("t", "ctr" or "b"); an empty
+// string restores the default.
+func (tc *TableCell) SetAnchor(anchor string) *TableCell {
+	tc.anchor = anchor
+	return tc
+}
+
+// GetAnchor returns the cell's vertical text anchor, empty when unset.
+func (tc *TableCell) GetAnchor() string { return tc.anchor }
 
 // SetText sets the cell text (convenience method).
 func (tc *TableCell) SetText(text string) *TableCell {

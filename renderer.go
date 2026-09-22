@@ -13,6 +13,7 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
+	"strconv"
 	"strings"
 	"unicode"
 
@@ -164,6 +165,7 @@ func (p *Presentation) SlideToImage(slideIndex int, opts *RenderOptions) (img im
 		fontDiag:            opts.FontDiagnostics,
 		onFontFallback:      opts.OnFontFallback,
 		draft:               opts.Draft,
+		slideNumber:         slideIndex + 1,
 	}
 
 	// Fill background
@@ -318,6 +320,10 @@ type renderer struct {
 	// draft skips anti-aliasing, shadows and image smoothing. See
 	// RenderOptions.Draft.
 	draft bool
+	// slideNumber is the 1-based number of the slide being rendered. A
+	// <a:fld type="slidenum"> run evaluates to it at draw time; the cached
+	// <a:t> in the file is whatever the last save saw.
+	slideNumber int
 }
 
 // subRenderer returns a renderer that shares this renderer's configuration but
@@ -1210,6 +1216,13 @@ func (r *renderer) renderDrawing(s *DrawingShape) {
 			ox, oy = 0, 0
 		}
 		scaledImg := tr.scaleForRender(srcImg, w, h)
+		// <a:lum bright contrast> adjusts the picture's own pixels. It is
+		// applied here rather than to the decoded image because it is a
+		// per-channel point operation: scaling first costs one pass over the
+		// destination instead of one over a 2560x1920 photograph.
+		if s.lumBright != 0 || s.lumContrast != 0 {
+			applyLumAdjust(scaledImg, s.lumBright, s.lumContrast)
+		}
 		// Apply alphaModFix opacity if set (value is in 1/1000 of a percent, e.g. 5000 = 5%)
 		if s.alpha > 0 && s.alpha < 100000 {
 			alphaScale := float64(s.alpha) / 100000.0
@@ -2728,13 +2741,10 @@ func (r *renderer) renderTable(s *TableShape) {
 		}
 	}
 
-	pad := 3
 	// A <a:tr> height is a *minimum*: PowerPoint grows a row to fit its
 	// tallest cell's text plus the cell insets. Honouring the declared height
 	// alone makes every later row sit higher than PowerPoint puts it, and the
 	// offset compounds down the table.
-	const defCellInsEMU = 45720 // PowerPoint's default top/bottom inset
-	insPx := r.emuToPixelY(defCellInsEMU) * 2
 	for row := 0; row < s.numRows && row < len(s.rows); row++ {
 		need := 0
 		for ci, cell := range s.rows[row] {
@@ -2753,9 +2763,14 @@ func (r *renderer) renderTable(s *TableShape) {
 			if cw < 10 {
 				cw = 10
 			}
-			th := r.measureParagraphsHeight(cell.paragraphs, cw-2*pad, 1<<20, TextAnchorNone, true)
-			if th+insPx > need {
-				need = th + insPx
+			cl, ct, cr, cb := r.cellInsets(cell)
+			avail := cw - cl - cr
+			if avail < 10 {
+				avail = 10
+			}
+			th := r.measureParagraphsHeight(cell.paragraphs, avail, 1<<20, TextAnchorNone, true)
+			if th+ct+cb > need {
+				need = th + ct + cb
 			}
 		}
 		if need > 0 && rowY[row+1]-rowY[row] < need {
@@ -2800,9 +2815,45 @@ func (r *renderer) renderTable(s *TableShape) {
 			} else {
 				r.drawRect(cellRect, color.RGBA{A: 255}, 1)
 			}
-			r.drawParagraphs(cell.paragraphs, cx+pad, cy+pad, cellW-2*pad, cellH-2*pad, TextAnchorNone, true)
+			cl, ct, cr, cb := r.cellInsets(cell)
+			tw := cellW - cl - cr
+			th := cellH - ct - cb
+			if tw < 1 {
+				tw = 1
+			}
+			if th < 1 {
+				th = 1
+			}
+			// <a:tcPr anchor>: a cell's text sits where the cell says, and
+			// an untouched cell defaults to the top. The bottom-anchored
+			// header row of the r29 deck makes the difference visible.
+			anchor := TextAnchorNone
+			switch cell.anchor {
+			case "t":
+				anchor = TextAnchorTop
+			case "ctr":
+				anchor = TextAnchorMiddle
+			case "b":
+				anchor = TextAnchorBottom
+			}
+			r.drawParagraphs(cell.paragraphs, cx+cl, cy+ct, tw, th, anchor, true)
 		}
 	}
+}
+
+// cellInsets returns a table cell's insets in pixels: left, top, right,
+// bottom. A cell that declares none gets the table default of 0.1" left and
+// right and 0.05" top and bottom, which at 1600px across a 10" slide is 16px
+// and 8px — not the few pixels of slack a table would tolerate, since the
+// insets also narrow the width a cell's text may wrap into.
+func (r *renderer) cellInsets(cell *TableCell) (l, t, right, b int) {
+	ml, mr, mt, mb, ok := cell.GetMargins()
+	if !ok {
+		ml, mr = DefaultCellMarginLR, DefaultCellMarginLR
+		mt, mb = DefaultCellMarginTB, DefaultCellMarginTB
+	}
+	return r.emuToPixelX(int64(ml)), r.emuToPixelY(int64(mt)),
+		r.emuToPixelX(int64(mr)), r.emuToPixelY(int64(mb))
 }
 
 func (r *renderer) renderCellBorders(cb *CellBorders, rect image.Rectangle) {
@@ -5058,7 +5109,16 @@ func (r *renderer) buildParaTextRuns(elements []ParagraphElement) []textRun {
 	for _, elem := range elements {
 		switch e := elem.(type) {
 		case *TextRun:
-			if e.text == "" {
+			// A field run is evaluated here, at draw time: "slidenum" becomes
+			// the number of the slide on the canvas, whatever the file's cached
+			// <a:t> claims. Substituting before the empty check keeps a field
+			// whose cache is empty (and whose run is therefore the paragraph's
+			// only one) from vanishing.
+			text := e.text
+			if e.fieldType == "slidenum" {
+				text = strconv.Itoa(r.slideNumber)
+			}
+			if text == "" {
 				continue
 			}
 			f := e.font
@@ -5077,7 +5137,7 @@ func (r *renderer) buildParaTextRuns(elements []ParagraphElement) []textRun {
 				scaled.Size = int(float64(f.Size)*(2.0/3.0) + 0.5)
 				faceFont = &scaled
 			}
-			if (containsCJK(e.text) || containsSymbol(e.text)) && r.fontCache != nil {
+			if (containsCJK(text) || containsSymbol(text)) && r.fontCache != nil {
 				sizePt := float64(faceFont.Size)
 				if sizePt <= 0 {
 					sizePt = 10
@@ -5099,34 +5159,34 @@ func (r *renderer) buildParaTextRuns(elements []ParagraphElement) []textRun {
 				// Face selection is driven by the characters in this run, not by
 				// the declared font names: a name that resolves can still lack
 				// the glyphs, and then the text draws as empty boxes.
-				if containsCJK(e.text) {
+				if containsCJK(text) {
 					var used string
-					faces[textClassCJK], used = r.getCJKFace(faceFont, e.text)
-					measures[textClassCJK], _ = r.getCJKMeasureFace(faceFont, e.text)
+					faces[textClassCJK], used = r.getCJKFace(faceFont, text)
+					measures[textClassCJK], _ = r.getCJKMeasureFace(faceFont, text)
 					r.noteCJKFont(f, used)
 					if a, d, ok := r.fontCache.WinVerticalMetrics(used, scaledPt, faceFont.Bold, faceFont.Italic); ok {
 						wins[textClassCJK] = textWin{asc: int(a + 0.5), desc: int(d + 0.5), ascF: a, descF: d}
 					}
 				}
-				if containsSymbol(e.text) {
+				if containsSymbol(text) {
 					var used string
-					faces[textClassSymbol], used = r.getSymbolFace(faceFont, e.text)
-					measures[textClassSymbol], _ = r.getSymbolMeasureFace(faceFont, e.text)
+					faces[textClassSymbol], used = r.getSymbolFace(faceFont, text)
+					measures[textClassSymbol], _ = r.getSymbolMeasureFace(faceFont, text)
 					r.noteSymbolFont(f, used)
 					if a, d, ok := r.fontCache.WinVerticalMetrics(used, scaledPt, faceFont.Bold, faceFont.Italic); ok {
 						wins[textClassSymbol] = textWin{asc: int(a + 0.5), desc: int(d + 0.5), ascF: a, descF: d}
 					}
 				}
-				runs = append(runs, r.splitRunByClass(e.text, f, faces, measures, wins)...)
+				runs = append(runs, r.splitRunByClass(text, f, faces, measures, wins)...)
 			} else {
 				face := r.getFace(faceFont)
 				mf := r.getMeasureFace(faceFont)
 				tr := textRun{
-					text:        e.text,
+					text:        text,
 					font:        f,
 					face:        face,
 					measureFace: mf,
-					width:       measureStringWithKern(face, e.text).Ceil(),
+					width:       measureStringWithKern(face, text).Ceil(),
 				}
 				if r.fontCache != nil {
 					if a, d, ok := r.fontCache.WinVerticalMetrics(faceFont.Name, r.fontSizePixels(faceFont), faceFont.Bold, faceFont.Italic); ok {
@@ -7052,6 +7112,55 @@ func getSeriesColor(s *ChartSeries, idx int, palette []color.RGBA) color.RGBA {
 }
 
 // --- Image scaling ---
+
+// applyLumAdjust applies a picture's <a:lum bright contrast> to already-scaled
+// pixels, in place.
+//
+// Both numbers are in 1/1000 of a percent and both were measured off
+// PowerPoint's own output (r29 COM probe: flat-colour pictures, one adjustment
+// each, read back pixel by pixel):
+//
+//   - bright is a plain additive offset on every sRGB channel, bright/100000:
+//     bright 25000 takes black to #3F3F3F and #4F81BD to #8EC0FC, bright
+//     -50000 takes white to #7F7F7F — no gamma, no clamp before the add.
+//   - contrast is an affine about mid-grey, #7F7F7F, whose scale is 1+k below
+//     zero but 1/(1-k) above it: contrast 50000 doubles the distance from
+//     mid-grey (#4F81BD -> #1E82FA), contrast -50000 halves it (#4F81BD ->
+//     #67809E), and -100000 collapses the whole image onto #7F7F7F. The two
+//     branches are what the export shows; a single 1+k or 1/(1-k) on both
+//     sides misses one half badly.
+//
+// Channels clip at 0 and 255, which is how a 50% contrast boost leaves black
+// and white untouched.
+func applyLumAdjust(img *image.RGBA, bright, contrast int) {
+	offset := float64(bright) / 100000.0 * 255.0
+	scale := 1.0
+	if contrast > 0 {
+		scale = 1.0 / (1.0 - float64(contrast)/100000.0)
+	} else if contrast < 0 {
+		scale = 1.0 + float64(contrast)/100000.0
+	}
+	var lut [256]uint8
+	for i := 0; i < 256; i++ {
+		v := (float64(i)-127.5)*scale + 127.5 + offset
+		if v < 0 {
+			v = 0
+		}
+		if v > 255 {
+			v = 255
+		}
+		lut[i] = uint8(v)
+	}
+	b := img.Bounds()
+	for y := b.Min.Y; y < b.Max.Y; y++ {
+		row := img.Pix[img.PixOffset(b.Min.X, y):img.PixOffset(b.Max.X, y)]
+		for i := 0; i+3 < len(row); i += 4 {
+			row[i] = lut[row[i]]
+			row[i+1] = lut[row[i+1]]
+			row[i+2] = lut[row[i+2]]
+		}
+	}
+}
 
 // scaleImageBilinear scales an image to the target width and height using bilinear interpolation.
 func scaleImageBilinear(src image.Image, dstW, dstH int) *image.RGBA {

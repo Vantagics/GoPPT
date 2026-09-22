@@ -717,7 +717,42 @@ func (w *PPTXWriter) writeTextRunXML(tr *TextRun) string {
 // underline, strikethrough, colour, and the hyperlink. The reader reads all of
 // them back, so every load-and-save quietly lost them.
 func (w *PPTXWriter) writeTextRunXMLAt(tr *TextRun, indent string) string {
+	// A run that came from a field goes back as a field: writeFieldRunXMLAt
+	// wraps the same rPr in an <a:fld> so a saved deck keeps the field live.
+	if tr.fieldType != "" {
+		return w.writeFieldRunXMLAt(tr, indent)
+	}
 	inner := indent + "  "
+	return fmt.Sprintf(`%s<a:r>
+%s
+%s<a:t>%s</a:t>
+%s</a:r>
+`, indent, w.runPropsXMLAt(tr, inner), inner, xmlEscape(tr.text), indent)
+}
+
+// fldGUID is the id every field the writer emits carries. The schema wants an
+// ST_Guid there but nothing keys off it — PowerPoint itself reuses one id for
+// every slidenum field in a deck — so a single fixed value serves.
+const fldGUID = "{6C4B7D90-5A1E-4E6F-9C2A-3B8D1F0A5E42}"
+
+// writeFieldRunXMLAt renders a run that came from an <a:fld> back as a field,
+// not as a literal run. Flattening one — say a slide-number field whose cache
+// says "12" — freezes that 12 into the file: reorder the slides, save again,
+// and every number is stale. The rPr content is byte-for-byte a run's, so the
+// emitter builds it once and hands it to whichever wrapper applies.
+func (w *PPTXWriter) writeFieldRunXMLAt(tr *TextRun, indent string) string {
+	inner := indent + "  "
+	rpr := w.runPropsXMLAt(tr, inner)
+	return fmt.Sprintf(`%s<a:fld id="%s" type="%s">
+%s
+%s<a:t>%s</a:t>
+%s</a:fld>
+`, indent, fldGUID, xmlEscape(tr.fieldType), rpr, inner, xmlEscape(tr.text), indent)
+}
+
+// runPropsXMLAt serialises the <a:rPr> element of a run, which fields and
+// plain runs share.
+func (w *PPTXWriter) runPropsXMLAt(tr *TextRun, inner string) string {
 	font := tr.font
 	attrs := fmt.Sprintf(` lang="en-US" sz="%d" dirty="0"`, font.Size*100)
 
@@ -801,12 +836,8 @@ func (w *PPTXWriter) writeTextRunXMLAt(tr *TextRun, indent string) string {
 		}
 	}
 
-	return fmt.Sprintf(`%s<a:r>
-%s<a:rPr%s>%s%s%s%s%s%s
-%s</a:rPr>
-%s<a:t>%s</a:t>
-%s</a:r>
-`, indent, inner, attrs, solidFill, effect, latin, ea, sym, hlink, inner, inner, xmlEscape(tr.text), indent)
+	return fmt.Sprintf(`%s<a:rPr%s>%s%s%s%s%s%s
+%s</a:rPr>`, inner, attrs, solidFill, effect, latin, ea, sym, hlink, inner)
 }
 
 // --- Geometry ---
@@ -1020,7 +1051,7 @@ func (w *PPTXWriter) writeDrawingShapeXML(s *DrawingShape, shapeID *int, slideNu
         </p:spPr>
       </p:pic>
 `, id, xmlEscape(name), xmlEscape(s.description), hiddenAttr(&s.BaseShape),
-		blipFillChildrenXML(relIdx, s.alpha, s.cropLeft, s.cropTop, s.cropRight, s.cropBottom),
+		blipFillChildrenXML(relIdx, s.alpha, s.cropLeft, s.cropTop, s.cropRight, s.cropBottom, s.lumBright, s.lumContrast),
 		xfrmAttrs(&s.BaseShape),
 		s.offsetX, s.offsetY, s.width, s.height,
 		shadowXML)
@@ -1039,12 +1070,22 @@ func (w *PPTXWriter) writeDrawingShapeXML(s *DrawingShape, shapeID *int, slideNu
 // is equally a no-op, so neither produces an <a:alphaModFix>. The srcRect
 // values are signed percentages in the same 1/1000 unit, and negatives are
 // meaningful (a picture cropped outwards), so they are written as they stand.
-func blipFillChildrenXML(relIdx, alpha, left, top, right, bottom int) string {
-	blip := fmt.Sprintf(`<a:blip r:embed="rId%d"/>`, relIdx)
+//
+// lumBright and lumContrast live on the same blip, in the same unit, and are
+// children of it next to alphaModFix: a picture read from a file keeps its
+// brightness and contrast through a save only if they are written back.
+func blipFillChildrenXML(relIdx, alpha, left, top, right, bottom, lumBright, lumContrast int) string {
+	var kids []string
 	if alpha > 0 && alpha < 100000 {
-		blip = fmt.Sprintf(`<a:blip r:embed="rId%d">
-            <a:alphaModFix amt="%d"/>
-          </a:blip>`, relIdx, alpha)
+		kids = append(kids, fmt.Sprintf(`<a:alphaModFix amt="%d"/>`, alpha))
+	}
+	if lumBright != 0 || lumContrast != 0 {
+		kids = append(kids, fmt.Sprintf(`<a:lum bright="%d" contrast="%d"/>`, lumBright, lumContrast))
+	}
+	blip := fmt.Sprintf(`<a:blip r:embed="rId%d"/>`, relIdx)
+	if len(kids) > 0 {
+		blip = fmt.Sprintf("<a:blip r:embed=\"rId%d\">\n            %s\n          </a:blip>",
+			relIdx, strings.Join(kids, "\n            "))
 	}
 	if left != 0 || top != 0 || right != 0 || bottom != 0 {
 		blip += fmt.Sprintf(`
@@ -1321,8 +1362,29 @@ func tableCellBorderXML(tag string, b *Border) string {
 		tag, width, colorRGB(b.Color), dash, tag)
 }
 
-// tableCellPrXML renders <a:tcPr>. Borders come before the fill, which is the
-// order CT_TableCellProperties defines.
+// tableCellPrAttrs renders the attributes of <a:tcPr>: the cell insets and the
+// vertical anchor. Both are optional in the file, and both are written only
+// when the cell actually carries one, so a cell that declares neither keeps
+// the table default rather than being pinned to it.
+func tableCellPrAttrs(cell *TableCell) string {
+	attrs := ""
+	for _, m := range []struct {
+		name string
+		val  int
+	}{{"marL", cell.marginL}, {"marR", cell.marginR}, {"marT", cell.marginT}, {"marB", cell.marginB}} {
+		if m.val >= 0 {
+			attrs += fmt.Sprintf(` %s="%d"`, m.name, m.val)
+		}
+	}
+	switch cell.anchor {
+	case "t", "ctr", "b":
+		attrs += fmt.Sprintf(` anchor="%s"`, cell.anchor)
+	}
+	return attrs
+}
+
+// tableCellPrXML renders the children of <a:tcPr>. Borders come before the
+// fill, which is the order CT_TableCellProperties defines.
 func tableCellPrXML(cell *TableCell) string {
 	pr := ""
 	if cell.border != nil {
@@ -1336,6 +1398,43 @@ func tableCellPrXML(cell *TableCell) string {
                   <a:solidFill><a:srgbClr val="%s"/></a:solidFill>`, colorRGB(cell.fill.Color))
 	}
 	return pr
+}
+
+// tablePrAttrs renders the flag attributes of <a:tblPr> — which style parts
+// (first row, last row, edge columns, bands) reach which cells. Writing them
+// from the shape rather than pinning firstRow/bandRow on is what keeps a table
+// read from a file the same table after a save; NewTableShape seeds the two
+// common ones so a table built in memory still writes what it always wrote.
+func tablePrAttrs(s *TableShape) string {
+	attrs := ""
+	if s.firstRow {
+		attrs += ` firstRow="1"`
+	}
+	if s.lastRow {
+		attrs += ` lastRow="1"`
+	}
+	if s.firstCol {
+		attrs += ` firstCol="1"`
+	}
+	if s.lastCol {
+		attrs += ` lastCol="1"`
+	}
+	if s.bandRow {
+		attrs += ` bandRow="1"`
+	}
+	if s.bandCol {
+		attrs += ` bandCol="1"`
+	}
+	return attrs
+}
+
+// tableStyleIDXML names the table style the table refers to, when it names one.
+func tableStyleIDXML(s *TableShape) string {
+	if s.styleGUID == "" {
+		return ""
+	}
+	return fmt.Sprintf(`
+              <a:tableStyleId>%s</a:tableStyleId>`, xmlEscape(s.styleGUID))
 }
 
 func (w *PPTXWriter) writeTableShapeXML(s *TableShape, shapeID *int) string {
@@ -1434,10 +1533,10 @@ func (w *PPTXWriter) writeTableShapeXML(s *TableShape, shapeID *int) string {
                   <a:bodyPr/>
                   <a:lstStyle/>
 %s                </a:txBody>
-                <a:tcPr>%s
+                <a:tcPr%s>%s
                 </a:tcPr>
               </a:tc>
-`, spanAttrs, cellText.String(), tableCellPrXML(cell)))
+`, spanAttrs, cellText.String(), tableCellPrAttrs(cell), tableCellPrXML(cell)))
 		}
 		rowsXML.WriteString("            </a:tr>\n")
 	}
@@ -1457,7 +1556,7 @@ func (w *PPTXWriter) writeTableShapeXML(s *TableShape, shapeID *int) string {
         <a:graphic>
           <a:graphicData uri="http://schemas.openxmlformats.org/drawingml/2006/table">
             <a:tbl>
-              <a:tblPr firstRow="1" bandRow="1"/>
+              <a:tblPr%s/>%s
               <a:tblGrid>
 %s              </a:tblGrid>
 %s            </a:tbl>
@@ -1466,6 +1565,7 @@ func (w *PPTXWriter) writeTableShapeXML(s *TableShape, shapeID *int) string {
       </p:graphicFrame>
 `, id, xmlEscape(name), hiddenAttr(&s.BaseShape),
 		s.offsetX, s.offsetY, s.width, s.height,
+		tablePrAttrs(s), tableStyleIDXML(s),
 		gridCols.String(), rowsXML.String())
 }
 

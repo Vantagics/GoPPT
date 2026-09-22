@@ -225,30 +225,42 @@ func attrVal(t xml.StartElement, name string) string {
 }
 
 // applyColorTransforms folds a scheme colour's transforms into an ARGB value.
-// tint and shade move the HLS luminance toward white / black, lumMod and
-// lumOff scale and shift it — the same four the table styles use.
+//
+// The four transforms do not share a colour space. tint and shade mix with
+// white / black in linear light with the value counting the colour that
+// survives (see applyTint), while lumMod and lumOff scale and shift the HLS
+// luminance — the r29 COM probe confirms both halves on the same slide: with
+// accent1 #4F81BD, lumMod 50000 renders #254061 and lumMod 60000 + lumOff
+// 40000 renders #95B3D7, both of which are the HLS answers (a linear reading
+// would say #385D8A and #7BA1CF), whereas the tint values are the linear ones.
+//
+// When a colour carries both kinds the tint is resolved first, so the HLS
+// luminance that lumMod scales is the tinted colour's.
 func applyColorTransforms(c Color, tint, shade, lumMod, lumOff float64) Color {
-	h, l, s := rgbToHLS(float64(c.GetRed())/255, float64(c.GetGreen())/255, float64(c.GetBlue())/255)
 	if tint >= 0 {
-		l = l*(1-tint) + tint
+		applyTint(&c, tint)
 	}
 	if shade >= 0 {
-		l = l * (1 - shade)
+		applyShade(&c, shade)
 	}
-	if lumMod >= 0 {
-		l = l * lumMod
+	if lumMod >= 0 || lumOff >= 0 {
+		h, l, s := rgbToHLS(float64(c.GetRed())/255, float64(c.GetGreen())/255, float64(c.GetBlue())/255)
+		if lumMod >= 0 {
+			l = l * lumMod
+		}
+		if lumOff >= 0 {
+			l = l + lumOff
+		}
+		if l > 1 {
+			l = 1
+		}
+		if l < 0 {
+			l = 0
+		}
+		r, g, b := hlsToRGB(h, l, s)
+		c = Color{ARGB: fmtARGB(uint8(r*255+0.5), uint8(g*255+0.5), uint8(b*255+0.5))}
 	}
-	if lumOff >= 0 {
-		l = l + lumOff
-	}
-	if l > 1 {
-		l = 1
-	}
-	if l < 0 {
-		l = 0
-	}
-	r, g, b := hlsToRGB(h, l, s)
-	return Color{ARGB: fmtARGB(uint8(r*255+0.5), uint8(g*255+0.5), uint8(b*255+0.5))}
+	return c
 }
 
 func fmtARGB(r, g, b uint8) string {
@@ -380,7 +392,16 @@ func applyTableStyleFill(s *TableShape, pres *Presentation) {
 				continue
 			}
 			if !band.hasFill || band.scheme == "" {
-				continue
+				// wholeTbl is the fill *under* the whole table, so a band
+				// that declares no fill of its own shows it rather than
+				// nothing. The r29 deck is the proof: its band2H is empty
+				// and its wholeTbl is accent1 tint 20000, which is exactly
+				// the #E9EDF4 PowerPoint paints on every even row — with
+				// the fallback missing those rows came out plain white.
+				band = st.wholeTbl
+				if !band.hasFill || band.scheme == "" {
+					continue
+				}
 			}
 			argb := resolveStyleColor(pres, band.scheme)
 			if argb == "" {

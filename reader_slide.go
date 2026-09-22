@@ -546,6 +546,7 @@ func (r *PPTXReader) parseSlideXML(decoder *xml.Decoder, slide *Slide, rels []xm
 		inTxBody        bool
 		inParagraph     bool
 		inRun           bool
+		inFld           bool
 		inRunProps      bool
 		inText          bool
 		inTbl           bool
@@ -660,6 +661,9 @@ func (r *PPTXReader) parseSlideXML(decoder *xml.Decoder, slide *Slide, rels []xm
 	// currentHyperlink is the <a:hlinkClick> of the run being read. It belongs
 	// to the run whose <a:rPr> carries it, and is cleared when that run starts.
 	var currentHyperlink *Hyperlink
+	// currentFldType is the type of the <a:fld> being read ("" outside one).
+	// It is stamped onto the TextRun the field's <a:t> produces.
+	var currentFldType string
 	var currentTableRow int
 	var currentTableCol int
 
@@ -728,6 +732,7 @@ func (r *PPTXReader) parseSlideXML(decoder *xml.Decoder, slide *Slide, rels []xm
 	// Deferred blipFill image data (spPr blipFill for shapes)
 	var pendingBlipFillData []byte
 	var pendingBlipFillMime string
+	var pendingBlipFillLumBright, pendingBlipFillLumContrast int
 
 	// Background blipFill image data (bgPr blipFill). The picture becomes a
 	// full-slide DrawingShape prepended to the shape list; its crop and opacity
@@ -738,6 +743,7 @@ func (r *PPTXReader) parseSlideXML(decoder *xml.Decoder, slide *Slide, rels []xm
 	var bgBlipFillMime string
 	var bgCropLeft, bgCropTop, bgCropRight, bgCropBottom int
 	var bgAlpha int
+	var bgLumBright, bgLumContrast int
 
 	// Group shape nesting
 	grpDepth := 0
@@ -1000,6 +1006,36 @@ func (r *PPTXReader) parseSlideXML(decoder *xml.Decoder, slide *Slide, rels []xm
 				if state.inTc && currentTable != nil && currentTableRow >= 0 && currentTableCol >= 0 &&
 					currentTableRow < len(currentTable.rows) && currentTableCol < len(currentTable.rows[currentTableRow]) {
 					state.inTcPr = true
+					// The cell's insets and vertical anchor live on the tag
+					// itself, so they have to be read here and not from a
+					// child: they decide the width a cell's text may wrap
+					// into, and a missing default re-wraps the whole table.
+					cellRef := currentTable.rows[currentTableRow][currentTableCol]
+					for _, attr := range t.Attr {
+						switch attr.Name.Local {
+						case "marL":
+							if v, err := strconv.Atoi(attr.Value); err == nil {
+								cellRef.marginL = v
+							}
+						case "marR":
+							if v, err := strconv.Atoi(attr.Value); err == nil {
+								cellRef.marginR = v
+							}
+						case "marT":
+							if v, err := strconv.Atoi(attr.Value); err == nil {
+								cellRef.marginT = v
+							}
+						case "marB":
+							if v, err := strconv.Atoi(attr.Value); err == nil {
+								cellRef.marginB = v
+							}
+						case "anchor":
+							switch attr.Value {
+							case "t", "ctr", "b":
+								cellRef.anchor = attr.Value
+							}
+						}
+					}
 				}
 			case "lnL":
 				if state.inTcPr {
@@ -1439,11 +1475,27 @@ func (r *PPTXReader) parseSlideXML(decoder *xml.Decoder, slide *Slide, rels []xm
 						}
 					}
 				}
-			case "r":
+			case "r", "fld":
 				// A hyperlink belongs to a single run. Clearing it here keeps the
 				// previous run's link from following this one, and leaves a run
 				// whose <a:rPr> has no hlinkClick linkless rather than inheriting.
 				currentHyperlink = nil
+				if t.Name.Local == "fld" {
+					// <a:fld> wraps pPr/rPr/t exactly like a run (CT_TextField),
+					// so it rides the run machinery; only its type is kept, so
+					// the renderer can re-evaluate the field per slide and the
+					// writer can emit a field instead of a literal run. Without
+					// this branch the slide-number placeholder's <a:t> was never
+					// read — inRun stays false — and every page bottom-right
+					// rendered empty.
+					state.inFld = true
+					currentFldType = ""
+					for _, attr := range t.Attr {
+						if attr.Name.Local == "type" {
+							currentFldType = attr.Value
+						}
+					}
+				}
 				if state.inTcParagraph {
 					state.inTcRun = true
 					currentFont = NewFont()
@@ -2427,6 +2479,36 @@ func (r *PPTXReader) parseSlideXML(decoder *xml.Decoder, slide *Slide, rels []xm
 						bgAlpha = v
 					}
 				}
+			case "lum":
+				// <a:lum bright=".." contrast=".."/> is a child of <a:blip>
+				// and adjusts the picture's own pixels: a deck that darkens a
+				// photo by 20% is unrecognisable without it, since the whole
+				// image then renders a fifth brighter than PowerPoint draws
+				// it. Collected in all three blip contexts, like alphaModFix.
+				br, okBr := intAttrValue(t, "bright")
+				co, okCo := intAttrValue(t, "contrast")
+				if state.inPic && currentDrawing != nil {
+					if okBr {
+						currentDrawing.lumBright = br
+					}
+					if okCo {
+						currentDrawing.lumContrast = co
+					}
+				} else if state.inSpPrBlipFill {
+					if okBr {
+						pendingBlipFillLumBright = br
+					}
+					if okCo {
+						pendingBlipFillLumContrast = co
+					}
+				} else if state.inBgBlipFill {
+					if okBr {
+						bgLumBright = br
+					}
+					if okCo {
+						bgLumContrast = co
+					}
+				}
 			case "clrChange":
 				// <a:clrChange><a:clrFrom>…</a:clrFrom><a:clrTo>…</a:clrTo>
 				// </a:clrChange> is a child of <a:blip> and recolours the
@@ -2824,6 +2906,9 @@ func (r *PPTXReader) parseSlideXML(decoder *xml.Decoder, slide *Slide, rels []xm
 				if currentHyperlink != nil {
 					tr.SetHyperlink(currentHyperlink)
 				}
+				if state.inFld {
+					tr.fieldType = currentFldType
+				}
 			}
 
 		case xml.EndElement:
@@ -3010,8 +3095,11 @@ func (r *PPTXReader) parseSlideXML(decoder *xml.Decoder, slide *Slide, rels []xm
 						ds.rotation = shapeRotation
 						ds.data = pendingBlipFillData
 						ds.mimeType = pendingBlipFillMime
+						ds.lumBright = pendingBlipFillLumBright
+						ds.lumContrast = pendingBlipFillLumContrast
 						pendingBlipFillData = nil
 						pendingBlipFillMime = ""
+						pendingBlipFillLumBright, pendingBlipFillLumContrast = 0, 0
 						if state.inGrpSp && currentGroup != nil {
 							currentGroup.AddShape(ds)
 						} else {
@@ -3375,6 +3463,11 @@ func (r *PPTXReader) parseSlideXML(decoder *xml.Decoder, slide *Slide, rels []xm
 					state.inRun = false
 				}
 				currentFont = nil
+			case "fld":
+				state.inFld = false
+				state.inRun = false
+				currentFldType = ""
+				currentFont = nil
 			case "rPr":
 				state.inRunProps = false
 				state.inSolidFill = false
@@ -3553,6 +3646,8 @@ func (r *PPTXReader) parseSlideXML(decoder *xml.Decoder, slide *Slide, rels []xm
 		ds.cropLeft, ds.cropTop = bgCropLeft, bgCropTop
 		ds.cropRight, ds.cropBottom = bgCropRight, bgCropBottom
 		ds.alpha = bgAlpha
+		ds.lumBright = bgLumBright
+		ds.lumContrast = bgLumContrast
 		slide.shapes = append([]Shape{ds}, slide.shapes...)
 	}
 
@@ -3782,6 +3877,13 @@ type layoutPlaceholder struct {
 	fontSize  int
 	fontBold  bool
 	fontColor Color
+	// Horizontal alignment from the placeholder's own <a:lstStyle> lvl1pPr
+	// algn attribute. The master's slide-number placeholder is where
+	// algn="r" lives in a deck PowerPoint wrote — its page number is
+	// right-aligned inside the placeholder box — and no <p:txStyles> table
+	// carries it.
+	alignH   string
+	alignSet bool
 	// Text insets from bodyPr
 	insetLeft   int64
 	insetRight  int64
@@ -3902,6 +4004,14 @@ func (r *PPTXReader) applyLayoutInheritance(zr *zip.Reader, slide *Slide, rels [
 		applyPlaceholderInsets(ph, match)
 		applyPlaceholderInsets(ph, masterMatch)
 
+		// Horizontal alignment, layout preferred, then master — applied before
+		// the master's txStyles so the placeholder's own lstStyle wins the
+		// ladder, the way PowerPoint resolves it. The master's sldNum
+		// placeholder is the case that needs this: its algn="r" is the only
+		// right-aligned paragraph in the deck.
+		applyPlaceholderAlign(ph, masterMatch)
+		applyPlaceholderAlign(ph, match)
+
 		// Vertical anchoring, same ladder and same reasoning as the insets:
 		// the slide's own anchor wins, then the layout's, then the master's.
 		applyPlaceholderAnchor(ph, match)
@@ -3975,9 +4085,26 @@ func applyPlaceholderInsets(ph *PlaceholderShape, def *layoutPlaceholder) {
 	ph.insetsSet = true
 }
 
+// applyPlaceholderAlign copies a definition's lstStyle alignment onto the
+// placeholder's paragraphs that declared none of their own. Runs before
+// applyMasterTextStyles so the placeholder's own lstStyle outranks the
+// txStyles tables in the ladder.
+func applyPlaceholderAlign(ph *PlaceholderShape, def *layoutPlaceholder) {
+	if ph == nil || def == nil || !def.alignSet || def.alignH == "" {
+		return
+	}
+	for _, para := range ph.paragraphs {
+		if para.alignment == nil || para.alignment.Horizontal == "" {
+			if para.alignment == nil {
+				para.alignment = NewAlignment()
+			}
+			para.alignment.Horizontal = HorizontalAlignment(def.alignH)
+		}
+	}
+}
+
 // applyPlaceholderAnchor copies a definition's vertical anchor onto the
-// placeholder if neither the slide nor a nearer rung of the ladder gave it one.
-//
+// placeholder if neither the slide nor a nearer rung of the ladder gave it one.//
 // TextAnchorNone ("") is what the reader stores for "no anchor attribute", so
 // it doubles as the unset marker; an explicit anchor="t" reads back as "t" and
 // is therefore never overwritten — which matters, because an explicit top is
@@ -4083,6 +4210,16 @@ type masterTextStyles struct {
 // "other" list, both of which PowerPoint does too.
 func (m *masterTextStyles) styleFor(phType string, level int) *masterLevelStyle {
 	if m == nil {
+		return nil
+	}
+	// The chrome placeholders are not outline placeholders: PowerPoint styles
+	// them only from their own placeholder <a:lstStyle> (the master's sldNum
+	// placeholder says algn="r" sz="1200" there and nowhere else) and never
+	// from <p:txStyles>. Falling through to body/other styled the page number
+	// with otherStyle's 24pt bullet list — a bullet glyph and a left-aligned,
+	// oversized number exactly where PowerPoint draws none of that.
+	switch phType {
+	case "sldNum", "dt", "ftr":
 		return nil
 	}
 	table := m.body
@@ -4483,6 +4620,8 @@ func (r *PPTXReader) parsePlaceholderDefs(data []byte, pres *Presentation) []lay
 	var insetsSet bool
 	var phAnchor TextAnchorType
 	var phAnchorSet bool
+	var phAlign string
+	var phAlignSet bool
 
 	for {
 		token, err := decoder.Token()
@@ -4510,6 +4649,8 @@ func (r *PPTXReader) parsePlaceholderDefs(data []byte, pres *Presentation) []lay
 				insetsSet = false
 				phAnchor = TextAnchorNone
 				phAnchorSet = false
+				phAlign = ""
+				phAlignSet = false
 			case "nvSpPr":
 				if inSp {
 					inNvSpPr = true
@@ -4613,6 +4754,19 @@ func (r *PPTXReader) parsePlaceholderDefs(data []byte, pres *Presentation) []lay
 				if inTxBody {
 					inLstStyle = true
 				}
+			case "lvl1pPr":
+				// The placeholder's own level-1 paragraph properties. The
+				// alignment here is the one a slide's placeholder inherits —
+				// the master's sldNum placeholder carries algn="r" exactly
+				// here — and none of the <p:txStyles> tables say it.
+				if inLstStyle {
+					for _, attr := range t.Attr {
+						if attr.Name.Local == "algn" {
+							phAlign = attr.Value
+							phAlignSet = true
+						}
+					}
+				}
 			case "defRPr":
 				if inLstStyle {
 					inDefRPr = true
@@ -4662,6 +4816,26 @@ func (r *PPTXReader) parsePlaceholderDefs(data []byte, pres *Presentation) []lay
 						}
 					}
 				}
+			case "tint", "shade":
+				// A transform nested in the defRPr's scheme colour — the
+				// master's sldNum placeholder shades tx1 this way
+				// (<a:tint val="75000"/>) and the page number inherits the
+				// grey that results. Mixing in linear light, per the COM
+				// variants that fixed applyTint.
+				if inDefSolidFill && fontColor.ARGB != "" {
+					for _, attr := range t.Attr {
+						if attr.Name.Local == "val" {
+							if v, err := strconv.Atoi(attr.Value); err == nil && v > 0 {
+								amount := float64(v) / 100000
+								if t.Name.Local == "tint" {
+									applyTint(&fontColor, amount)
+								} else {
+									applyShade(&fontColor, amount)
+								}
+							}
+						}
+					}
+				}
 			case "latin":
 				// The layout's placeholder font is the one place that used to
 				// store "+mj-lt" verbatim, so a layout inherited a font name
@@ -4703,6 +4877,8 @@ func (r *PPTXReader) parsePlaceholderDefs(data []byte, pres *Presentation) []lay
 						insetsSet:   insetsSet,
 						anchorSet:   phAnchorSet,
 						anchor:      phAnchor,
+						alignH:      phAlign,
+						alignSet:    phAlignSet,
 					})
 				}
 				inSp = false
@@ -4860,6 +5036,8 @@ func (r *PPTXReader) parseLayoutImages(data []byte, rels []xmlRelForRead, zr *zi
 	inDefSolidFill := false
 	inParagraph := false
 	inRun := false
+	inFld := false
+	fldType := ""
 	inRunProps := false
 	inRunSolidFill := false
 	inText := false
@@ -4875,6 +5053,7 @@ func (r *PPTXReader) parseLayoutImages(data []byte, rels []xmlRelForRead, zr *zi
 	var flipH, flipV bool
 	var picAlpha int                   // alphaModFix amount for pic blip
 	var cropL, cropT, cropR, cropB int // srcRect crop percentages
+	var picLumBright, picLumContrast int
 
 	// For cxnSp (line connector) shapes
 	var currentLine *LineShape
@@ -4910,6 +5089,7 @@ func (r *PPTXReader) parseLayoutImages(data []byte, rels []xmlRelForRead, zr *zi
 				offX, offY, extCX, extCY = 0, 0, 0, 0
 				embedID = ""
 				picAlpha = 0
+				picLumBright, picLumContrast = 0, 0
 				cropL, cropT, cropR, cropB = 0, 0, 0, 0
 				shapeHidden = false
 			case "sp":
@@ -5006,6 +5186,25 @@ func (r *PPTXReader) parseLayoutImages(data []byte, rels []xmlRelForRead, zr *zi
 						if attr.Name.Local == "amt" {
 							if v, err := strconv.Atoi(attr.Value); err == nil {
 								picAlpha = v
+							}
+						}
+					}
+				}
+			case "lum":
+				// <a:lum bright contrast> under a picture's blip — the same
+				// adjustment parseSlideXML collects, read here so a picture
+				// that lives on a slide layout is not the one place in the
+				// deck that ignores it.
+				if inPic {
+					for _, attr := range t.Attr {
+						switch attr.Name.Local {
+						case "bright":
+							if v, err := strconv.Atoi(attr.Value); err == nil {
+								picLumBright = v
+							}
+						case "contrast":
+							if v, err := strconv.Atoi(attr.Value); err == nil {
+								picLumContrast = v
 							}
 						}
 					}
@@ -5413,7 +5612,19 @@ func (r *PPTXReader) parseLayoutImages(data []byte, rels []xmlRelForRead, zr *zi
 						}
 					}
 				}
-			case "r":
+			case "r", "fld":
+				if t.Name.Local == "fld" {
+					// Same field handling as the slide scanner: an <a:fld> in a
+					// layout text body wraps run content, so ride the run
+					// machinery and keep the type for the renderer.
+					inFld = true
+					fldType = ""
+					for _, attr := range t.Attr {
+						if attr.Name.Local == "type" {
+							fldType = attr.Value
+						}
+					}
+				}
 				if inParagraph {
 					inRun = true
 					currentFont = NewFont()
@@ -5510,6 +5721,9 @@ func (r *PPTXReader) parseLayoutImages(data []byte, rels []xmlRelForRead, zr *zi
 			if inText && currentParagraph != nil && currentFont != nil {
 				text := string(t)
 				tr := currentParagraph.CreateTextRun(text)
+				if inFld {
+					tr.fieldType = fldType
+				}
 				tr.font = currentFont
 			}
 
@@ -5534,6 +5748,8 @@ func (r *PPTXReader) parseLayoutImages(data []byte, rels []xmlRelForRead, zr *zi
 								ds.data = imgData
 								ds.mimeType = guessMimeType(imgPath)
 								ds.alpha = picAlpha
+								ds.lumBright = picLumBright
+								ds.lumContrast = picLumContrast
 								ds.cropLeft = cropL
 								ds.cropTop = cropT
 								ds.cropRight = cropR
@@ -5648,6 +5864,11 @@ func (r *PPTXReader) parseLayoutImages(data []byte, rels []xmlRelForRead, zr *zi
 				inPPrDefSolidFill = false
 			case "r":
 				inRun = false
+				currentFont = nil
+			case "fld":
+				inFld = false
+				inRun = false
+				fldType = ""
 				currentFont = nil
 			case "rPr":
 				inRunProps = false
