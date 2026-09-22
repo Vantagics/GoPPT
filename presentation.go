@@ -51,6 +51,12 @@ type Presentation struct {
 	// painting theme-gradient text boxes flat black.
 	themeFillStyles []themeFillStyle
 	themeLnStyles   []themeLnStyle
+	// themeEffectStyles is the theme's <a:effectStyleLst>: the outer shadow
+	// (if any) an <a:effectRef idx="N"> resolves to. Only the shadow is
+	// modelled — the third Office style's camera and bevel have no renderer
+	// counterpart, and a reference without a modelled effect falls back to
+	// no shadow, which is what shapes without effectRef draw anyway.
+	themeEffectStyles []themeEffectStyle
 	// masterRead records that the master was looked for, so a master without
 	// placeholders is not re-read for every slide.
 	masterRead bool

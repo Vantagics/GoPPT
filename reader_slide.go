@@ -646,6 +646,7 @@ func (r *PPTXReader) parseSlideXML(decoder *xml.Decoder, slide *Slide, rels []xm
 		styleLnScheme   string
 		styleFillIdx    int             // the fillRef's idx (0 = no theme fill)
 		styleLnIdx      int             // the lnRef's idx (picks the line weight)
+		styleEffectIdx  int             // the effectRef's idx (0 = no theme effect)
 		styleFillOps    []themeColorOp  // transforms on the fillRef's schemeClr
 		styleLnOps      []themeColorOp  // transforms on the lnRef's schemeClr
 		styleOpsTarget  *[]themeColorOp // which of the two the current colour feeds
@@ -2936,6 +2937,7 @@ func (r *PPTXReader) parseSlideXML(decoder *xml.Decoder, slide *Slide, rels []xm
 					state.inLnRef = false
 					state.styleFillScheme = ""
 					state.styleLnScheme = ""
+					state.styleEffectIdx = 0
 				}
 			case "fillRef":
 				// <a:fillRef idx="N"><a:schemeClr val="accent1"/></a:fillRef>
@@ -2973,6 +2975,15 @@ func (r *PPTXReader) parseSlideXML(decoder *xml.Decoder, slide *Slide, rels []xm
 				// <a:fontRef> inside <p:style> — provides default text color
 				if state.inStyle {
 					state.inFontRef = true
+				}
+			case "effectRef":
+				// <a:effectRef idx="N"><a:schemeClr …/></a:effectRef> — the
+				// theme effect style the shape inherits. Only the index is
+				// kept: the shadow it names is resolved when <p:style>
+				// closes, and only where the shape's own <p:spPr> declared
+				// no <a:effectLst>.
+				if state.inStyle {
+					state.styleEffectIdx = fillRefIdx(t)
 				}
 			}
 
@@ -3671,6 +3682,18 @@ func (r *PPTXReader) parseSlideXML(decoder *xml.Decoder, slide *Slide, rels []xm
 				state.inFillRef = false
 				state.inLnRef = false
 				state.inStyleScheme = false
+				// The effect reference is the same kind of fallback: where
+				// the shape's own <p:spPr> carried no <a:effectLst>, the
+				// theme's effect style supplies the outer shadow. A copy, not
+				// the theme's own pointer — the pending value is handed to
+				// exactly one shape.
+				if state.inSp && pres != nil && pendingShadow == nil && state.styleEffectIdx >= 1 && state.styleEffectIdx <= len(pres.themeEffectStyles) {
+					if ts := pres.themeEffectStyles[state.styleEffectIdx-1].shadow; ts != nil {
+						sh := *ts
+						pendingShadow = &sh
+					}
+				}
+				state.styleEffectIdx = 0
 				// The style reference is a fallback: only where the shape's
 				// own <p:spPr> declared nothing does the theme colour become
 				// the fill. Applied to the pending values so the shape that

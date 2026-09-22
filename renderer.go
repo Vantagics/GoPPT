@@ -3148,42 +3148,63 @@ func (r *renderer) renderShadow(shadow *Shadow, rect image.Rectangle) {
 	rad := float64(shadow.Direction) * math.Pi / 180.0
 	// Distance is in points and scaleX is pixels per EMU: the offset used to
 	// be dist*scaleX, which at 1600 px wide rounds to zero for any realistic
-	// distance — shape shadows were parsed but never visibly displaced.
+	// distance - shape shadows were parsed but never visibly displaced.
 	dist := float64(shadow.Distance) * 12700 * r.scaleX
 	dx := int(dist * math.Cos(rad))
 	dy := int(dist * math.Sin(rad))
 	shadowColor := argbToRGBA(shadow.Color)
 	shadowColor.A = uint8(float64(shadow.Alpha) * 255 / 100)
-	shadowRect := rect.Add(image.Pt(dx, dy))
 
-	blur := shadow.BlurRadius
-	if blur <= 0 {
-		r.fillRectBlend(shadowRect, shadowColor)
+	blurPx := int(float64(shadow.BlurRadius)*12700*r.scaleX + 0.5)
+	if blurPx <= 0 {
+		r.fillRectBlend(rect.Add(image.Pt(dx, dy)), shadowColor)
 		return
 	}
 
-	// Box-blur approximation: render shadow at full alpha, then apply a simple
-	// multi-pass box expansion with decreasing alpha from outside in.
-	// We draw from outermost ring inward so inner pixels get the strongest alpha.
-	steps := minInt(blur, 10)
-	for i := steps; i >= 0; i-- {
-		t := float64(i) / float64(steps)
-		alpha := uint8(float64(shadowColor.A) * (1 - t*t)) // quadratic falloff
-		c := color.RGBA{R: shadowColor.R, G: shadowColor.G, B: shadowColor.B, A: alpha}
-		expanded := shadowRect.Inset(-i)
-		// Only draw the ring (not the interior) for outer layers
-		if i > 0 {
-			inner := shadowRect.Inset(-(i - 1))
-			// Top strip
-			r.fillRectBlend(image.Rect(expanded.Min.X, expanded.Min.Y, expanded.Max.X, inner.Min.Y), c)
-			// Bottom strip
-			r.fillRectBlend(image.Rect(expanded.Min.X, inner.Max.Y, expanded.Max.X, expanded.Max.Y), c)
-			// Left strip
-			r.fillRectBlend(image.Rect(expanded.Min.X, inner.Min.Y, inner.Min.X, inner.Max.Y), c)
-			// Right strip
-			r.fillRectBlend(image.Rect(inner.Max.X, inner.Min.Y, expanded.Max.X, inner.Max.Y), c)
-		} else {
-			r.fillRectBlend(expanded, c)
+	// Rasterise the shape's silhouette as an offscreen alpha mask, box-blur
+	// it and composite it offset - the same machinery the text shadow uses.
+	// PowerPoint's blurRad names a Gaussian whose sigma is about half the
+	// radius in pixels; a box blur of radius blurPx/2 lands on that sigma,
+	// which is the fade length the COM export shows under a themed shape.
+	radius := maxInt(1, blurPx/2)
+	pad := radius*3 + 2
+	bw := rect.Dx() + 2*pad
+	bh := rect.Dy() + 2*pad
+	if bw <= 0 || bh <= 0 || rect.Dx() <= 0 || rect.Dy() <= 0 {
+		return
+	}
+	mask := image.NewAlpha(image.Rect(0, 0, bw, bh))
+	for y := pad; y < pad+rect.Dy(); y++ {
+		row := mask.Pix[y*mask.Stride:]
+		for x := pad; x < pad+rect.Dx(); x++ {
+			row[x] = 255
+		}
+	}
+	boxBlurAlpha(mask, radius, 3)
+
+	bounds := r.img.Bounds()
+	baseA := float64(shadowColor.A) / 255
+	ox := rect.Min.X - pad + dx
+	oy := rect.Min.Y - pad + dy
+	for py := 0; py < bh; py++ {
+		imgY := oy + py
+		if imgY < bounds.Min.Y || imgY >= bounds.Max.Y {
+			continue
+		}
+		for px := 0; px < bw; px++ {
+			a := mask.AlphaAt(px, py).A
+			if a == 0 {
+				continue
+			}
+			imgX := ox + px
+			if imgX < bounds.Min.X || imgX >= bounds.Max.X {
+				continue
+			}
+			c := shadowColor
+			c.A = uint8(float64(a)*baseA + 0.5)
+			if c.A > 0 {
+				r.blendPixel(imgX, imgY, c)
+			}
 		}
 	}
 }
@@ -6926,8 +6947,19 @@ func (r *renderer) wrapRunLine(runs []textRun, maxWidth int) []textLine {
 				currentRuns = nil
 				currentWidth = 0
 				partial.Reset()
-				partial.WriteString(seg)
-			} else {
+				// The break consumes the whitespace it happened at: PowerPoint
+				// never renders, at the start of a continuation line, the
+				// space the previous line broke on — and real decks carry
+				// double spaces ("Project  declared") that made the wrapped
+				// line start visibly indented.
+				if strings.TrimSpace(seg) != "" {
+					partial.WriteString(seg)
+				}
+			} else if partial.Len() > 0 || len(currentRuns) > 0 || strings.TrimSpace(seg) != "" {
+				// A fresh line never opens with whitespace: the line break
+				// consumes what it broke on, and the second of the deck's
+				// double spaces would otherwise surface as an indented
+				// continuation line.
 				partial.WriteString(seg)
 			}
 		}
@@ -7069,8 +7101,16 @@ func (r *renderer) wrapRunLineWithIndent(runs []textRun, firstLineWidth, contLin
 				currentWidth = 0
 				lineIdx++
 				partial.Reset()
-				partial.WriteString(seg)
-			} else {
+				// A break consumes the whitespace it happened at — see
+				// wrapRunLine.
+				if strings.TrimSpace(seg) != "" {
+					partial.WriteString(seg)
+				}
+			} else if partial.Len() > 0 || len(currentRuns) > 0 || strings.TrimSpace(seg) != "" {
+				// A fresh line never opens with whitespace: the line break
+				// consumes what it broke on, and the second of the deck's
+				// double spaces would otherwise surface as an indented
+				// continuation line.
 				partial.WriteString(seg)
 			}
 		}

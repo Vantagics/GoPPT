@@ -374,6 +374,15 @@ type themeLnStyle struct {
 	ops      []themeColorOp
 }
 
+// themeEffectStyle is one entry of <a:effectStyleLst>: the outer shadow an
+// <a:effectRef idx="N"> resolves to. The Office themes' first two styles carry
+// exactly one outerShdw each (the third adds scene3d/sp3d, which no renderer
+// branch walks); where a style carries no shadow the entry stays nil and the
+// reference resolves to none.
+type themeEffectStyle struct {
+	shadow *Shadow
+}
+
 // parseThemeFormatScheme reads <a:fmtScheme>'s fill and line style lists.
 // parseThemeColors stops at </a:clrScheme> — deliberately, because everything
 // after it is per-index style bodies, which only a style reference consumes.
@@ -387,6 +396,11 @@ func (r *PPTXReader) parseThemeFormatScheme(data []byte, pres *Presentation) {
 		curStop                    *themeGradStop
 		inSchemeClr                bool
 		schemeOps                  []themeColorOp
+
+		inEffLst, inEffShadow bool
+		curEff                *themeEffectStyle
+		effShadowColor        string
+		effShadowAlpha        int
 	)
 	attachOps := func() {
 		switch {
@@ -455,10 +469,68 @@ func (r *PPTXReader) parseThemeFormatScheme(data []byte, pres *Presentation) {
 						}
 					}
 				}
+			case "effectStyleLst":
+				inEffLst = true
+			case "effectStyle":
+				if inEffLst {
+					curEff = &themeEffectStyle{}
+				}
+			case "outerShdw":
+				// The one effect the model can carry. The Office themes give
+				// each style a single outerShdw (black, alpha'd, downward);
+				// scene3d/sp3d that follow in style 3 have no counterpart and
+				// are skipped by never being read.
+				if curEff != nil && curEff.shadow == nil {
+					inEffShadow = true
+					effShadowColor = "000000"
+					effShadowAlpha = 100
+					sh := NewShadow()
+					sh.Visible = true
+					for _, attr := range t.Attr {
+						switch attr.Name.Local {
+						case "blurRad":
+							if v, err := strconv.Atoi(attr.Value); err == nil {
+								sh.BlurRadius = v / 12700
+							}
+						case "dist":
+							if v, err := strconv.Atoi(attr.Value); err == nil {
+								sh.Distance = v / 12700
+							}
+						case "dir":
+							if v, err := strconv.Atoi(attr.Value); err == nil {
+								sh.Direction = v / 60000
+							}
+						}
+					}
+					curEff.shadow = sh
+				}
+			case "alpha":
+				if inEffShadow {
+					for _, attr := range t.Attr {
+						if attr.Name.Local == "val" {
+							if v, err := strconv.Atoi(attr.Value); err == nil {
+								effShadowAlpha = v / 1000
+							}
+						}
+					}
+				}
 			case "schemeClr", "srgbClr":
 				if (inGrad && curStop != nil) || (inLnLst && curLn != nil) {
 					inSchemeClr = true
 					schemeOps = nil
+				} else if inEffShadow {
+					// The shadow's colour: usually a literal srgbClr, but a
+					// schemeClr resolves through the theme the same way the
+					// slide scanner resolves one.
+					for _, attr := range t.Attr {
+						if attr.Name.Local == "val" {
+							if argb, ok := pres.themeColors[attr.Value]; ok && argb != "" {
+								effShadowColor = argb
+							} else if len(attr.Value) == 6 {
+								effShadowColor = attr.Value
+							}
+						}
+					}
 				}
 			case "tint", "shade", "lumMod", "lumOff", "satMod":
 				if inSchemeClr {
@@ -498,6 +570,19 @@ func (r *PPTXReader) parseThemeFormatScheme(data []byte, pres *Presentation) {
 				if inSchemeClr {
 					attachOps()
 				}
+			case "outerShdw":
+				if inEffShadow && curEff != nil && curEff.shadow != nil {
+					curEff.shadow.Color = NewColor(effShadowColor)
+					curEff.shadow.Alpha = effShadowAlpha
+					inEffShadow = false
+				}
+			case "effectStyle":
+				if curEff != nil {
+					pres.themeEffectStyles = append(pres.themeEffectStyles, *curEff)
+					curEff = nil
+				}
+			case "effectStyleLst":
+				inEffLst = false
 			case "fillStyleLst":
 				inFillLst = false
 			case "lnStyleLst":
