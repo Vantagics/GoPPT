@@ -2085,39 +2085,56 @@ func (r *renderer) renderLineRotated(s *LineShape) {
 		oy := r.emuToPixelY(s.offsetY)
 		w := r.emuToPixelX(s.width)
 		h := r.emuToPixelY(s.height)
-		pts := r.customPathToPixelPoints(s.customPath, ox, oy, w, h)
-		if len(pts) >= 2 {
+		subs := r.customPathToPixelSubpaths(s.customPath, ox, oy, w, h)
+		if len(subs) > 0 {
 			// Rotate around bounding box center
 			cxPx := float64(ox) + float64(w)/2.0
 			cyPx := float64(oy) + float64(h)/2.0
 			rad := float64(rotation) * math.Pi / 180.0
 			cosA := math.Cos(rad)
 			sinA := math.Sin(rad)
-			for i := range pts {
-				dx := pts[i].x - cxPx
-				dy := pts[i].y - cyPx
-				pts[i].x = dx*cosA - dy*sinA + cxPx
-				pts[i].y = dx*sinA + dy*cosA + cyPx
+			rotate := func(pts []fpoint) {
+				for i := range pts {
+					dx := pts[i].x - cxPx
+					dy := pts[i].y - cyPx
+					pts[i].x = dx*cosA - dy*sinA + cxPx
+					pts[i].y = dx*sinA + dy*cosA + cyPx
+				}
 			}
 
+			// Rotate every subpath once around the box center, then stroke.
+			for _, sub := range subs {
+				rotate(sub)
+			}
 			pw := maxInt(int(float64(s.GetLineWidthEMU())*r.scaleX), 1)
 			c := argbToRGBA(s.lineColor)
 			ls := s.lineStyle
-			if ls == BorderDash || ls == BorderDot {
-				r.drawDashedPolylineAA(pts, c, pw, ls)
-			} else {
-				for i := 1; i < len(pts); i++ {
-					r.drawLineAA(int(pts[i-1].x), int(pts[i-1].y), int(pts[i].x), int(pts[i].y), c, pw)
+			for _, sub := range subs {
+				if len(sub) < 2 {
+					continue
+				}
+				if ls == BorderDash || ls == BorderDot {
+					r.drawDashedPolylineAA(sub, c, pw, ls)
+				} else {
+					for i := 1; i < len(sub); i++ {
+						r.drawLineAA(int(sub[i-1].x), int(sub[i-1].y), int(sub[i].x), int(sub[i].y), c, pw)
+					}
 				}
 			}
-			intPts := make([][2]int, len(pts))
-			for i, p := range pts {
-				intPts[i] = [2]int{int(p.x), int(p.y)}
-			}
 			if s.headEnd != nil && s.headEnd.Type != ArrowNone && s.headEnd.Type != "" {
+				head := subs[0]
+				intPts := make([][2]int, len(head))
+				for i, p := range head {
+					intPts[i] = [2]int{int(p.x), int(p.y)}
+				}
 				r.drawArrowOnPath(intPts[0][0], intPts[0][1], intPts, c, pw, s.headEnd)
 			}
 			if s.tailEnd != nil && s.tailEnd.Type != ArrowNone && s.tailEnd.Type != "" {
+				tail := subs[len(subs)-1]
+				intPts := make([][2]int, len(tail))
+				for i, p := range tail {
+					intPts[i] = [2]int{int(p.x), int(p.y)}
+				}
 				last := intPts[len(intPts)-1]
 				r.drawArrowOnPath(last[0], last[1], intPts, c, pw, s.tailEnd)
 			}
@@ -2296,25 +2313,36 @@ func (r *renderer) renderLineAt(s *LineShape, ox, oy int) {
 	c := argbToRGBA(s.lineColor)
 	ls := s.lineStyle
 
-	// Custom geometry path (freeform curved arrows, etc.)
+	// Custom geometry path (freeform curved arrows, ink annotations, etc.)
 	if s.customPath != nil && len(s.customPath.Commands) > 0 {
-		pts := r.customPathToPixelPoints(s.customPath, ox, oy, w, h)
-		if len(pts) >= 2 {
-			if ls == BorderDash || ls == BorderDot {
-				r.drawDashedPolylineAA(pts, c, pw, ls)
-			} else {
-				for i := 1; i < len(pts); i++ {
-					r.drawLineAA(int(pts[i-1].x), int(pts[i-1].y), int(pts[i].x), int(pts[i].y), c, pw)
+		subs := r.customPathToPixelSubpaths(s.customPath, ox, oy, w, h)
+		if len(subs) > 0 {
+			for _, sub := range subs {
+				if len(sub) < 2 {
+					continue
+				}
+				if ls == BorderDash || ls == BorderDot {
+					r.drawDashedPolylineAA(sub, c, pw, ls)
+				} else {
+					for i := 1; i < len(sub); i++ {
+						r.drawLineAA(int(sub[i-1].x), int(sub[i-1].y), int(sub[i].x), int(sub[i].y), c, pw)
+					}
 				}
 			}
-			intPts := make([][2]int, len(pts))
-			for i, p := range pts {
-				intPts[i] = [2]int{int(p.x), int(p.y)}
-			}
 			if s.headEnd != nil && s.headEnd.Type != ArrowNone && s.headEnd.Type != "" {
+				head := subs[0]
+				intPts := make([][2]int, len(head))
+				for i, p := range head {
+					intPts[i] = [2]int{int(p.x), int(p.y)}
+				}
 				r.drawArrowOnPath(intPts[0][0], intPts[0][1], intPts, c, pw, s.headEnd)
 			}
 			if s.tailEnd != nil && s.tailEnd.Type != ArrowNone && s.tailEnd.Type != "" {
+				tail := subs[len(subs)-1]
+				intPts := make([][2]int, len(tail))
+				for i, p := range tail {
+					intPts[i] = [2]int{int(p.x), int(p.y)}
+				}
 				last := intPts[len(intPts)-1]
 				r.drawArrowOnPath(last[0], last[1], intPts, c, pw, s.tailEnd)
 			}
@@ -2905,7 +2933,20 @@ func (r *renderer) renderCustomPathFill(cp *CustomGeomPath, fill *Fill, ox, oy, 
 
 // customPathToPixelPoints converts a custom geometry path to pixel-space fpoints.
 func (r *renderer) customPathToPixelPoints(cp *CustomGeomPath, ox, oy, w, h int) []fpoint {
-	if cp.Width <= 0 || cp.Height <= 0 {
+	var pts []fpoint
+	for _, sub := range r.customPathToPixelSubpaths(cp, ox, oy, w, h) {
+		pts = append(pts, sub...)
+	}
+	return pts
+}
+
+// customPathToPixelSubpaths converts a custom geometry path to pixel-space
+// subpaths, splitting at every moveTo. Filling ignores the split (a moveTo
+// mid-path was always a fill hole, not a seam), but stroking must respect it:
+// VML ink annotations carry several strokes per shape and a bridging segment
+// between them draws a line PowerPoint never does.
+func (r *renderer) customPathToPixelSubpaths(cp *CustomGeomPath, ox, oy, w, h int) [][]fpoint {
+	if cp == nil || cp.Width <= 0 || cp.Height <= 0 {
 		return nil
 	}
 	scX := float64(w) / float64(cp.Width)
@@ -2915,14 +2956,33 @@ func (r *renderer) customPathToPixelPoints(cp *CustomGeomPath, ox, oy, w, h int)
 		return fpoint{float64(ox) + float64(p.X)*scX, float64(oy) + float64(p.Y)*scY}
 	}
 
-	var pts []fpoint
+	var subs [][]fpoint
+	var cur []fpoint
 	var lastPt fpoint
+	endSub := func() {
+		if len(cur) > 0 {
+			subs = append(subs, cur)
+			cur = nil
+		}
+	}
+
 	for _, cmd := range cp.Commands {
 		switch cmd.Type {
-		case "moveTo", "lnTo":
+		case "moveTo":
+			if len(cmd.Pts) > 0 {
+				endSub()
+				p := toPixel(cmd.Pts[0])
+				cur = []fpoint{p}
+				lastPt = p
+			}
+		case "lnTo":
 			if len(cmd.Pts) > 0 {
 				p := toPixel(cmd.Pts[0])
-				pts = append(pts, p)
+				if cur == nil {
+					cur = []fpoint{p}
+				} else {
+					cur = append(cur, p)
+				}
 				lastPt = p
 			}
 		case "cubicBezTo":
@@ -2932,8 +2992,8 @@ func (r *renderer) customPathToPixelPoints(cp *CustomGeomPath, ox, oy, w, h int)
 				cp2 := toPixel(cmd.Pts[1])
 				ep := toPixel(cmd.Pts[2])
 				bezPts := r.flattenCubicBezier(lastPt.x, lastPt.y, cp1.x, cp1.y, cp2.x, cp2.y, ep.x, ep.y, 0)
-				pts = append(pts, bezPts...)
-				pts = append(pts, ep)
+				cur = append(cur, bezPts...)
+				cur = append(cur, ep)
 				lastPt = ep
 			}
 		case "quadBezTo":
@@ -2947,8 +3007,8 @@ func (r *renderer) customPathToPixelPoints(cp *CustomGeomPath, ox, oy, w, h int)
 				c2x := ep.x + 2.0/3.0*(cp1.x-ep.x)
 				c2y := ep.y + 2.0/3.0*(cp1.y-ep.y)
 				bezPts := r.flattenCubicBezier(lastPt.x, lastPt.y, c1x, c1y, c2x, c2y, ep.x, ep.y, 0)
-				pts = append(pts, bezPts...)
-				pts = append(pts, ep)
+				cur = append(cur, bezPts...)
+				cur = append(cur, ep)
 				lastPt = ep
 			}
 		case "close":
@@ -2980,12 +3040,13 @@ func (r *renderer) customPathToPixelPoints(cp *CustomGeomPath, ox, oy, w, h int)
 			for i := 1; i <= steps; i++ {
 				a := stRad + angleStep*float64(i)
 				p := fpoint{cx + wR*math.Cos(a), cy + hR*math.Sin(a)}
-				pts = append(pts, p)
+				cur = append(cur, p)
 				lastPt = p
 			}
 		}
 	}
-	return pts
+	endSub()
+	return subs
 }
 
 // scaleAlpha applies the overlayOpacityScale to semi-transparent colors.

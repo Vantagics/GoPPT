@@ -36,6 +36,9 @@ func (r *PPTXReader) readSlide(zr *zip.Reader, path string, pres *Presentation, 
 	// Read notes if relationship exists
 	r.readSlideNotes(zr, slide, slideRels, path)
 
+	// Read ink annotations last so they render on top, as PowerPoint draws them.
+	r.readSlideInk(zr, slide, slideRels, path)
+
 	return slide, nil
 }
 
