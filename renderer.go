@@ -1817,14 +1817,13 @@ func (r *renderer) renderAutoShapeFill(s *AutoShape, x, y, w, h int) {
 		r.fillFlowChartPreparation(x, y, w, h, fc)
 	case AutoShapePentagon:
 		r.fillPentagon(x, y, w, h, fc)
-	case AutoShapeArrowRight:
-		r.fillArrowRight(x, y, w, h, fc)
-	case AutoShapeArrowLeft:
-		r.fillArrowLeft(x, y, w, h, fc)
-	case AutoShapeArrowUp:
-		r.fillArrowUp(x, y, w, h, fc)
-	case AutoShapeArrowDown:
-		r.fillArrowDown(x, y, w, h, fc)
+	case AutoShapeArrowRight, AutoShapeArrowLeft, AutoShapeArrowUp, AutoShapeArrowDown:
+		pts := arrowPresetPoints(s.shapeType, x, y, w, h, s.adjustValues)
+		if s.fill.Type == FillSolid {
+			r.fillPolygonAA(pts, fc)
+		} else {
+			r.fillPolygonGradient(pts, rect, s.fill)
+		}
 	case AutoShapeStar5:
 		r.fillStar(x, y, w, h, 5, fc)
 	case AutoShapeStar4:
@@ -2012,6 +2011,11 @@ func (r *renderer) renderAutoShapeBorder(s *AutoShape, x, y, w, h int) {
 		r.drawWedgeRoundRectCalloutBorder(x, y, w, h, bc, pw, s.adjustValues)
 	case AutoShapeArc:
 		r.renderArcBorder(s, x, y, w, h, bc, pw)
+	case AutoShapeArrowRight, AutoShapeArrowLeft, AutoShapeArrowUp, AutoShapeArrowDown:
+		// The stroke follows the arrow outline; the default below drew a
+		// rectangle around the bounding box, boxing the arrow in white.
+		pts := arrowPresetPoints(s.shapeType, x, y, w, h, s.adjustValues)
+		r.drawPolygon(pts, bc, pw)
 	case AutoShapeRightBrace, AutoShapeLeftBrace:
 		r.drawBrace(s.shapeType, x, y, w, h, bc, pw, s.adjustValues)
 	default:
@@ -4701,56 +4705,135 @@ func (r *renderer) fillStar(x, y, w, h, points int, c color.RGBA) {
 	r.fillPolygon(pts, c)
 }
 
-func (r *renderer) fillArrowRight(x, y, w, h int, c color.RGBA) {
-	shaftH := float64(h) * 0.4
-	headW := float64(w) * 0.35
-	shaftW := float64(w) - headW
-	top := float64(y) + (float64(h)-shaftH)/2
-	bot := top + shaftH
-	r.fillPolygon([]fpoint{
-		{float64(x), top}, {float64(x) + shaftW, top}, {float64(x) + shaftW, float64(y)},
-		{float64(x + w), float64(y) + float64(h)/2},
-		{float64(x) + shaftW, float64(y + h)}, {float64(x) + shaftW, bot}, {float64(x), bot},
-	}, c)
+// arrowPresetPoints builds the OOXML preset polygon for the four straight
+// block arrows. adj1 (shaft thickness) is a fraction of the cross axis and
+// adj2 (head length) a fraction of ss = min(w,h) — the law the preset
+// geometry declares: halfShaft = cross*adj1/200000, head = ss*adj2/100000,
+// both pinned. The old hard-coded shaft 0.4 / head 0.35*w ignored adj and
+// mismatched PowerPoint on every themed arrow (deck 00022823 slide20).
+func arrowPresetPoints(t AutoShapeType, x, y, w, h int, adj map[string]int) []fpoint {
+	a1, a2 := 50000, 50000
+	if adj != nil {
+		if v, ok := adj["adj1"]; ok {
+			a1 = v
+		}
+		if v, ok := adj["adj2"]; ok {
+			a2 = v
+		}
+	}
+	if a1 < 0 {
+		a1 = 0
+	}
+	if a1 > 100000 {
+		a1 = 100000
+	}
+	if a2 < 0 {
+		a2 = 0
+	}
+	fx, fy := float64(x), float64(y)
+	fw, fh := float64(w), float64(h)
+	ss := math.Min(fw, fh)
+	if ss <= 0 {
+		return nil
+	}
+	if t == AutoShapeArrowRight || t == AutoShapeArrowLeft {
+		if a2 > int(100000*fw/ss) {
+			a2 = int(100000 * fw / ss)
+		}
+		halfSh := fh * float64(a1) / 200000
+		head := ss * float64(a2) / 100000
+		y1 := fy + fh/2 - halfSh
+		y2 := fy + fh/2 + halfSh
+		if t == AutoShapeArrowRight {
+			x2 := fx + fw - head
+			return []fpoint{
+				{fx, y1}, {x2, y1}, {x2, fy}, {fx + fw, fy + fh/2},
+				{x2, fy + fh}, {x2, y2}, {fx, y2},
+			}
+		}
+		x2 := fx + head
+		return []fpoint{
+			{fx + fw, y1}, {x2, y1}, {x2, fy}, {fx, fy + fh/2},
+			{x2, fy + fh}, {x2, y2}, {fx + fw, y2},
+		}
+	}
+	if a2 > int(100000*fh/ss) {
+		a2 = int(100000 * fh / ss)
+	}
+	halfSh := fw * float64(a1) / 200000
+	head := ss * float64(a2) / 100000
+	x1 := fx + fw/2 - halfSh
+	x2 := fx + fw/2 + halfSh
+	if t == AutoShapeArrowDown {
+		y2 := fy + fh - head
+		return []fpoint{
+			{x1, fy}, {x2, fy}, {x2, y2}, {fx + fw, y2},
+			{fx + fw/2, fy + fh}, {fx, y2}, {x1, y2},
+		}
+	}
+	y2 := fy + head
+	return []fpoint{
+		{fx + fw/2, fy}, {fx + fw, y2}, {x2, y2}, {x2, fy + fh},
+		{x1, fy + fh}, {x1, y2}, {fx, y2},
+	}
 }
 
-func (r *renderer) fillArrowLeft(x, y, w, h int, c color.RGBA) {
-	shaftH := float64(h) * 0.4
-	headW := float64(w) * 0.35
-	top := float64(y) + (float64(h)-shaftH)/2
-	bot := top + shaftH
-	r.fillPolygon([]fpoint{
-		{float64(x + w), top}, {float64(x) + headW, top}, {float64(x) + headW, float64(y)},
-		{float64(x), float64(y) + float64(h)/2},
-		{float64(x) + headW, float64(y + h)}, {float64(x) + headW, bot}, {float64(x + w), bot},
-	}, c)
-}
-
-func (r *renderer) fillArrowUp(x, y, w, h int, c color.RGBA) {
-	shaftW := float64(w) * 0.4
-	headH := float64(h) * 0.35
-	left := float64(x) + (float64(w)-shaftW)/2
-	right := left + shaftW
-	r.fillPolygon([]fpoint{
-		{float64(x) + float64(w)/2, float64(y)},
-		{float64(x + w), float64(y) + headH}, {right, float64(y) + headH},
-		{right, float64(y + h)}, {left, float64(y + h)},
-		{left, float64(y) + headH}, {float64(x), float64(y) + headH},
-	}, c)
-}
-
-func (r *renderer) fillArrowDown(x, y, w, h int, c color.RGBA) {
-	shaftW := float64(w) * 0.4
-	headH := float64(h) * 0.35
-	shaftTop := float64(h) - headH
-	left := float64(x) + (float64(w)-shaftW)/2
-	right := left + shaftW
-	r.fillPolygon([]fpoint{
-		{left, float64(y)}, {right, float64(y)},
-		{right, float64(y) + shaftTop}, {float64(x + w), float64(y) + shaftTop},
-		{float64(x) + float64(w)/2, float64(y + h)},
-		{float64(x), float64(y) + shaftTop}, {left, float64(y) + shaftTop},
-	}, c)
+// fillPolygonAA fills a polygon with 4x4 supersampled edge coverage — the
+// scanline fillPolygon leaves stair steps on diagonal edges that show badly
+// on small arrow heads.
+func (r *renderer) fillPolygonAA(pts []fpoint, c color.RGBA) {
+	if len(pts) < 3 {
+		return
+	}
+	const S = 4
+	minX, minY, maxX, maxY := pts[0].x, pts[0].y, pts[0].x, pts[0].y
+	for _, p := range pts[1:] {
+		if p.x < minX {
+			minX = p.x
+		}
+		if p.x > maxX {
+			maxX = p.x
+		}
+		if p.y < minY {
+			minY = p.y
+		}
+		if p.y > maxY {
+			maxY = p.y
+		}
+	}
+	inside := func(fx, fy float64) bool {
+		in := false
+		j := len(pts) - 1
+		for i := 0; i < len(pts); i++ {
+			pi, pj := pts[i], pts[j]
+			if (pi.y > fy) != (pj.y > fy) &&
+				fx < (pj.x-pi.x)*(fy-pi.y)/(pj.y-pi.y)+pi.x {
+				in = !in
+			}
+			j = i
+		}
+		return in
+	}
+	for py := int(minY); py <= int(maxY); py++ {
+		for px := int(minX); px <= int(maxX); px++ {
+			n := 0
+			for sy := 0; sy < S; sy++ {
+				fyy := float64(py) + (float64(sy)+0.5)/S
+				for sx := 0; sx < S; sx++ {
+					fxx := float64(px) + (float64(sx)+0.5)/S
+					if inside(fxx, fyy) {
+						n++
+					}
+				}
+			}
+			if n == 0 {
+				continue
+			}
+			cc := c
+			cc.A = uint8(int(c.A) * n / (S * S))
+			r.blendPixel(px, py, cc)
+		}
+	}
 }
 
 func (r *renderer) fillHeart(x, y, w, h int, c color.RGBA) {
