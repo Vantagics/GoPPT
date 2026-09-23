@@ -1797,6 +1797,12 @@ func (w *PPTXWriter) writePlaceholderShapeXML(s *PlaceholderShape, shapeID *int)
 		paragraphsXML.WriteString(w.writeParagraphXML(para))
 	}
 
+	// A placeholder can own an explicit fill and border (e.g. one read back
+	// from a themed <p:style>). Dropping them here stripped every styled
+	// placeholder bare on save.
+	fillXML := w.writeFillXML(s.GetFill())
+	borderXML := w.writeBorderXML(s.GetBorder())
+
 	return fmt.Sprintf(`      <p:sp>
         <p:nvSpPr>
           <p:cNvPr id="%d" name="%s"%s/>
@@ -1812,7 +1818,7 @@ func (w *PPTXWriter) writePlaceholderShapeXML(s *PlaceholderShape, shapeID *int)
             <a:off x="%d" y="%d"/>
             <a:ext cx="%d" cy="%d"/>
           </a:xfrm>
-        </p:spPr>
+%s%s%s        </p:spPr>
         <p:txBody>
           %s
           <a:lstStyle/>
@@ -1822,6 +1828,8 @@ func (w *PPTXWriter) writePlaceholderShapeXML(s *PlaceholderShape, shapeID *int)
 		placeholderAttrsXML(s.phType, s.phIdx),
 		xfrmAttrs(&s.BaseShape),
 		s.offsetX, s.offsetY, s.width, s.height,
+		shapeGeomXML("rect", nil, nil, "          "),
+		fillXML, borderXML,
 		bodyPrXML(bodyPrAttrs{
 			wrap:           boolToWrap(s.wordWrap),
 			columns:        s.columns,

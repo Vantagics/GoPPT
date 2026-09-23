@@ -3086,6 +3086,26 @@ func (r *PPTXReader) parseSlideXML(decoder *xml.Decoder, slide *Slide, rels []xm
 						currentPlaceholder.flipHorizontal = flipH
 						currentPlaceholder.flipVertical = flipV
 						currentPlaceholder.rotation = shapeRotation
+						// A placeholder carries the same <p:style> fallback a
+						// regular shape does: slide18's accent6 banner names no
+						// fill in its <p:spPr> and lives entirely off its
+						// fillRef/lnRef/effectRef. The non-placeholder commits
+						// below hand the pending values to their shape; this
+						// branch dropped them, so a themed placeholder rendered
+						// with no fill and no border at all (its fontRef-white
+						// text invisible on the white background).
+						if pendingShapeFill != nil {
+							currentPlaceholder.fill = pendingShapeFill
+							pendingShapeFill = nil
+						}
+						if pendingBorder != nil {
+							currentPlaceholder.border = pendingBorder
+							pendingBorder = nil
+						}
+						if pendingShadow != nil {
+							currentPlaceholder.shadow = pendingShadow
+							pendingShadow = nil
+						}
 						if state.inGrpSp && currentGroup != nil {
 							currentGroup.AddShape(currentPlaceholder)
 						} else {
