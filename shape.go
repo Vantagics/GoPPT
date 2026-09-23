@@ -909,6 +909,7 @@ type LineShape struct {
 	connectorType string          // prstGeom value: "line", "straightConnector1", "bentConnector3", etc.
 	adjustValues  map[string]int  // adjustment values for connector geometry
 	customPath    *CustomGeomPath // non-nil for custGeom connectors (freeform curved arrows)
+	bevelTop      string          // <a:sp3d><a:bevelT prst> value, "" = no 3D bevel (e.g. "coolSlant")
 }
 
 func (l *LineShape) GetType() ShapeType { return ShapeTypeLine }
@@ -1004,6 +1005,13 @@ func (l *LineShape) SetAdjustValue(name string, value int) *LineShape {
 // GetCustomPath returns the custom geometry path, or nil for a connector that
 // uses preset geometry.
 func (l *LineShape) GetCustomPath() *CustomGeomPath { return l.customPath }
+
+// GetBevelTop returns the <a:bevelT prst> preset of the shape's 3D frame,
+// or "" when the line carries no scene3d/sp3d effect.
+func (l *LineShape) GetBevelTop() string { return l.bevelTop }
+
+// SetBevelTop sets the top-bevel preset name (e.g. "coolSlant").
+func (l *LineShape) SetBevelTop(prst string) *LineShape { l.bevelTop = prst; return l }
 
 // SetCustomPath sets a custom geometry path, which replaces the connector's
 // preset geometry when the shape is written.

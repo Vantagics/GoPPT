@@ -2328,10 +2328,13 @@ func (r *renderer) renderLineRotated(s *LineShape) {
 	pw := maxInt(int(float64(s.GetLineWidthEMU())*r.scaleX), 1)
 	c := argbToRGBA(s.lineColor)
 	ls := s.lineStyle
+	bevel := s.bevelTop == "coolSlant"
 
 	drawSeg := func(ax, ay, bx, by int) {
 		if ls == BorderDash || ls == BorderDot {
 			r.drawDashedLineAA(ax, ay, bx, by, c, pw, ls)
+		} else if bevel {
+			r.drawBevelLineAA(ax, ay, bx, by, c, pw)
 		} else {
 			r.drawLineAA(ax, ay, bx, by, c, pw)
 		}
@@ -2415,9 +2418,12 @@ func (r *renderer) renderLineAt(s *LineShape, ox, oy int) {
 	}
 
 	// drawSeg draws a line segment respecting the connector's dash style.
+	bevel := s.bevelTop == "coolSlant"
 	drawSeg := func(ax, ay, bx, by int) {
 		if ls == BorderDash || ls == BorderDot {
 			r.drawDashedLineAA(ax, ay, bx, by, c, pw, ls)
+		} else if bevel {
+			r.drawBevelLineAA(ax, ay, bx, by, c, pw)
 		} else {
 			r.drawLineAA(ax, ay, bx, by, c, pw)
 		}
@@ -2683,34 +2689,33 @@ func (r *renderer) drawArrowOnPath(vx, vy int, pathPts [][2]int, c color.RGBA, l
 // If atStart is true, the arrow is drawn at (x1,y1) pointing away from (x2,y2).
 // If atStart is false, the arrow is drawn at (x2,y2) pointing away from (x1,y1).
 func (r *renderer) drawArrowHead(x1, y1, x2, y2 int, c color.RGBA, lineWidth int, le *LineEnd, atStart bool) {
-	// Compute arrow size based on line width and arrow size attributes.
-	// PowerPoint arrow sizing: the OOXML spec defines arrow length/width in
-	// terms of line width multiples. For "med" size on a 2pt line at 96 DPI:
-	//   length ≈ 9px, width ≈ 7px
-	// We use a formula that matches PowerPoint's rendering closely.
+	// Arrow sizing pinned against PowerPoint COM exports of variant decks
+	// (out_deck/u46variants, {triangle,stealth} x {sm,med,lg} length x width
+	// at 6pt plus a 1-10pt width sweep): length and width are independent
+	// attributes mapping to the same multiples of the line width in pixels -
+	// sm 1.875, med 2.9, lg 4.8 - floored at 6pt (a head never renders
+	// smaller than that even on a hairline; measured 13px at 1-2pt).
+	// A stealth head is the same isoceles triangle as a triangle head with
+	// a notch cut 0.2x its length into the base (wing tips at +-width/2,
+	// notch vertex on the centerline).
+	sizeMult := func(s ArrowSize) float64 {
+		switch s {
+		case ArrowSizeSm:
+			return 1.875
+		case ArrowSizeLg:
+			return 4.8
+		default:
+			return 2.9
+		}
+	}
 	lw := float64(lineWidth)
-	baseLen := lw*3.0 + 4.0
-	baseWidth := lw*2.5 + 3.0
-
-	switch le.Length {
-	case ArrowSizeSm:
-		baseLen *= 0.6
-	case ArrowSizeLg:
-		baseLen *= 1.6
+	baseLen := lw * sizeMult(le.Length)
+	baseWidth := lw * sizeMult(le.Width)
+	if baseLen < 13.3 {
+		baseLen = 13.3
 	}
-	switch le.Width {
-	case ArrowSizeSm:
-		baseWidth *= 0.6
-	case ArrowSizeLg:
-		baseWidth *= 1.6
-	}
-
-	// Minimum arrow size for visibility
-	if baseLen < 7 {
-		baseLen = 7
-	}
-	if baseWidth < 5 {
-		baseWidth = 5
+	if baseWidth < 13.3 {
+		baseWidth = 13.3
 	}
 
 	// Direction vector
@@ -2761,11 +2766,13 @@ func (r *renderer) drawArrowHead(x1, y1, x2, y2 int, c color.RGBA, lineWidth int
 		pts := []fpoint{p1, p2, p3}
 		r.fillPolygon(pts, c)
 	case ArrowStealth:
-		// Stealth has a notch at the base
+		// Stealth has a notch at the base: the wing tips sit at the base
+		// corners and the notch vertex is on the centerline 0.2x the head
+		// length toward the tip (measured on the 6pt COM variant).
 		p1 := fpoint{tipX, tipY}
 		p2 := fpoint{baseX + perpX*halfW, baseY + perpY*halfW}
 		p3 := fpoint{baseX - perpX*halfW, baseY - perpY*halfW}
-		notchDepth := baseLen * 0.3
+		notchDepth := baseLen * 0.2
 		notchX := baseX + dx*notchDepth
 		notchY := baseY + dy*notchDepth
 		pts := []fpoint{p1, p2, {notchX, notchY}, p3}
@@ -3769,6 +3776,68 @@ func (r *renderer) drawLine(x1, y1, x2, y2 int, c color.RGBA) {
 			y1 += sy
 		}
 	}
+}
+
+// scaleColor multiplies a colour's RGB channels by k (A untouched) — the
+// shading factor model for bevel bands, where the shaded colour stays on the
+// same hue line through black.
+func scaleColor(c color.RGBA, k float64) color.RGBA {
+	return color.RGBA{
+		R: uint8(math.Min(float64(c.R)*k, 255)),
+		G: uint8(math.Min(float64(c.G)*k, 255)),
+		B: uint8(math.Min(float64(c.B)*k, 255)),
+		A: c.A,
+	}
+}
+
+// drawBevelLineAA strokes a line carrying a <a:sp3d> coolSlant top bevel.
+// PowerPoint splits the stroke across its normal: the upper side catches the
+// top light (~1.15x the line colour), the lower side falls into shade
+// (~0.56x), the bottom edge lifts slightly and a 1px highlight runs just
+// past the lower edge. Measured on slide23's 6pt connectors (horizontal and
+// diagonal profiles agree); the bands are fractions of the line width, so
+// the same law serves any thickness.
+func (r *renderer) drawBevelLineAA(x1, y1, x2, y2 int, c color.RGBA, width int) {
+	if width < 5 {
+		r.drawLineAA(x1, y1, x2, y2, c, width)
+		return
+	}
+	dx := float64(x2 - x1)
+	dy := float64(y2 - y1)
+	length := math.Sqrt(dx*dx + dy*dy)
+	if length < 0.5 {
+		return
+	}
+	// Normal pointing to the lower side in screen space (light comes from
+	// the top, so shade is below): n = (-dy, dx)/L has ny > 0 for dx > 0,
+	// and connectors always run left-to-right (xfrm offsets are the box's
+	// top-left corner).
+	nx := -dy / length
+	ny := dx / length
+	hw := float64(width) / 2.0
+
+	light := scaleColor(c, 1.15)
+	dark := scaleColor(c, 0.56)
+	edge := scaleColor(c, 0.72)
+	hilite := lerpColor(c, color.RGBA{R: 255, G: 255, B: 255, A: 255}, 0.85)
+
+	band := func(s0, s1 float64, bc color.RGBA) {
+		quad := []fpoint{
+			{float64(x1) + nx*s0, float64(y1) + ny*s0},
+			{float64(x2) + nx*s0, float64(y2) + ny*s0},
+			{float64(x2) + nx*s1, float64(y2) + ny*s1},
+			{float64(x1) + nx*s1, float64(y1) + ny*s1},
+		}
+		r.fillPolygon(quad, bc)
+	}
+	band(-hw, -hw*0.08, light)
+	band(-hw*0.08, hw*0.08, c)
+	band(hw*0.08, hw*0.75, dark)
+	band(hw*0.75, hw, edge)
+	// Highlight just past the lower edge, where the bevel's bottom face
+	// catches light (measured 1px band at ~235 luminance on a 6pt line).
+	r.drawLineWu(float64(x1)+nx*(hw+0.5), float64(y1)+ny*(hw+0.5),
+		float64(x2)+nx*(hw+0.5), float64(y2)+ny*(hw+0.5), hilite)
 }
 
 func (r *renderer) drawLineAA(x1, y1, x2, y2 int, c color.RGBA, width int) {

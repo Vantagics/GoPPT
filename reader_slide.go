@@ -655,6 +655,10 @@ func (r *PPTXReader) parseSlideXML(decoder *xml.Decoder, slide *Slide, rels []xm
 		inEffectLst bool
 		inOuterShdw bool
 
+		// <a:sp3d> inside a connector's spPr: the 3D frame that gives the
+		// line its bevel highlight (coolSlant on the flow diagrams).
+		inSp3d bool
+
 		// <a:clrChange> inside a picture's <a:blip>: a per-pixel colour
 		// replacement the composited photo depends on.
 		inClrChange bool
@@ -2835,6 +2839,18 @@ func (r *PPTXReader) parseSlideXML(decoder *xml.Decoder, slide *Slide, rels []xm
 						}
 					}
 				}
+			case "sp3d":
+				if state.inSpPr {
+					state.inSp3d = true
+				}
+			case "bevelT":
+				if state.inSp3d && state.inCxnSp && currentLine != nil {
+					for _, attr := range t.Attr {
+						if attr.Name.Local == "prst" && attr.Value != "" {
+							currentLine.SetBevelTop(attr.Value)
+						}
+					}
+				}
 			case "headEnd":
 				if state.inLn && state.inCxnSp && currentLine != nil {
 					le := &LineEnd{Type: ArrowNone, Width: ArrowSizeMed, Length: ArrowSizeMed}
@@ -3900,6 +3916,8 @@ func (r *PPTXReader) parseSlideXML(decoder *xml.Decoder, slide *Slide, rels []xm
 				}
 			case "ln":
 				state.inLn = false
+			case "sp3d":
+				state.inSp3d = false
 			case "extLst":
 				state.inExtLst = false
 			case "avLst":

@@ -1230,6 +1230,21 @@ func (w *PPTXWriter) writeLineShapeXML(s *LineShape, shapeID *int) string {
 		dashXML = "\n            <a:prstDash val=\"dot\"/>"
 	}
 
+	// 3D frame: a connector that carries <a:sp3d><a:bevelT prst> renders its
+	// line with a bevel highlight in PowerPoint. scene3d (front camera, top
+	// light) precedes sp3d in the CT_ShapeProperties sequence.
+	var scene3dXML string
+	if s.bevelTop != "" {
+		scene3dXML = `
+          <a:scene3d>
+            <a:camera prst="orthographicFront"/>
+            <a:lightRig rig="threePt" dir="t"/>
+          </a:scene3d>
+          <a:sp3d>
+            <a:bevelT w="165100" prst="` + s.bevelTop + `"/>
+          </a:sp3d>`
+	}
+
 	return fmt.Sprintf(`      <p:cxnSp>
         <p:nvCxnSpPr>
           <p:cNvPr id="%d" name="%s"%s/>
@@ -1246,7 +1261,7 @@ func (w *PPTXWriter) writeLineShapeXML(s *LineShape, shapeID *int) string {
             <a:solidFill>
               <a:srgbClr val="%s"/>
             </a:solidFill>%s%s
-          </a:ln>
+          </a:ln>%s
         </p:spPr>
       </p:cxnSp>
 `, id, xmlEscape(name), hiddenAttr(&s.BaseShape),
@@ -1255,7 +1270,7 @@ func (w *PPTXWriter) writeLineShapeXML(s *LineShape, shapeID *int) string {
 		shapeGeomXML(prstGeom, s.adjustValues, s.customPath, "          "),
 		int64(s.GetLineWidthEMU()),
 		colorRGB(s.lineColor),
-		dashXML, endsXML)
+		dashXML, endsXML, scene3dXML)
 }
 
 // lineEndXML serialises the arrow ends of an <a:ln>. Both arrow ends are drawn
