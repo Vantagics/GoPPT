@@ -332,6 +332,11 @@ func parseChartXML(data []byte, themeColors map[string]string) *ChartShape {
 
 	newAxis := func(isValue bool) {
 		curAxis = NewChartAxis()
+		// PowerPoint's default tick-mark style for chart axes is "out":
+		// deck 00022823 chart1/chart2 omit <c:majorTickMark> and the COM
+		// export shows ticks, while chart3/4/5 declare val="none" and show
+		// none. An explicit element below still overwrites this.
+		curAxis.MajorTickMark = TickMarkOutside
 		axisIsValue = isValue
 		axisTitle.Reset()
 		inAxis = true

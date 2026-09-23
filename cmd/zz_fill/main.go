@@ -24,7 +24,9 @@ func main() {
 	}
 	sl := slides[slideIdx-1]
 	for i, sh := range sl.GetShapes() {
-		rt, ok := sh.(interface{ GetParagraphs() []*gopresentation.Paragraph })
+		rt, ok := sh.(interface {
+			GetParagraphs() []*gopresentation.Paragraph
+		})
 		if !ok {
 			continue
 		}

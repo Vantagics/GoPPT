@@ -630,7 +630,9 @@ func (r *renderer) chartPlotAreaFor(s *ChartShape, px, py, pw, ph int, sc chartS
 					lw = tw
 				}
 			}
-			left = lw + 5
+			// Reserve the widest label plus the value-label gap (one line
+			// height + 4px, see chartValueLabelGap).
+			left = lw + r.chartValueLabelGap(valueFace)
 		}
 	}
 	if axX == nil || axX.Visible {
@@ -642,8 +644,9 @@ func (r *renderer) chartPlotAreaFor(s *ChartShape, px, py, pw, ph int, sc chartS
 			// top/left/right insets are PowerPoint's measured auto layout
 			// for this chart family (COM slide05: plot top 58, left 287,
 			// right 1537 on a frame at 27,27,1533x1093); the value-label
-			// width itself is already reserved above.
-			left += r.chartLineHeight(catFace) - 4
+			// width and its line-height clearance are already reserved
+			// above, so this term is what lands the axis at x=287.
+			left += r.chartLineHeight(catFace) - 16
 			top += r.chartLineHeight(valueFace) - 9
 			right += 20
 			maxLen := 0
@@ -656,7 +659,7 @@ func (r *renderer) chartPlotAreaFor(s *ChartShape, px, py, pw, ph int, sc chartS
 					maxLen = l
 				}
 			}
-			bottom += maxLen + 6 + r.chartLineHeight(catFace)
+			bottom += maxLen + 2 + r.chartLineHeight(catFace)
 		} else {
 			bottom += r.chartLineHeight(catFace) + 2
 		}
@@ -712,13 +715,21 @@ func (r *renderer) drawChartAxes(s *ChartShape, p chartPlotArea) {
 	// of deck 00022823 carry no <c:majorGridlines> and the COM exports show
 	// none, while every chart that does declare them keeps its grid — unless
 	// the stroke is <a:noFill/> (chart5's Y axis), which stays invisible.
+	//
+	// PowerPoint's default gridline stroke (no <a:ln> spPr) measures
+	// 134,134,134 at ~2px/160dpi ≈ 9525 EMU (0.75pt) on both test decks —
+	// the light 1px #D9D9D9 this used to draw appears in neither.
 	if axV != nil && axV.MajorGridlines != nil && !axV.MajorGridlines.NoFill {
-		gridColor := color.RGBA{R: 217, G: 217, B: 217, A: 255}
-		gridW := 1
+		gridColor := color.RGBA{R: 134, G: 134, B: 134, A: 255}
+		// drawLineAA's Wu sub-lines land ~1px narrower than the requested
+		// width, so +1 reproduces PowerPoint's crisp 2px stroke.
+		gridW := maxInt(int(9525.0*r.scaleX+0.5)+1, 2)
 		if axV.MajorGridlines.ColorSet {
 			gridColor = argbToRGBA(axV.MajorGridlines.Color)
 		}
-		gridW = maxInt(axV.MajorGridlines.Width, 1)
+		if axV.MajorGridlines.Width > 0 {
+			gridW = axV.MajorGridlines.Width
+		}
 		for _, t := range p.scale.ticks() {
 			if p.categoriesOnY {
 				gx := p.valueX(t)
@@ -730,16 +741,53 @@ func (r *renderer) drawChartAxes(s *ChartShape, p chartPlotArea) {
 		}
 	}
 
-	// Category axis line.
-	axisLine := color.RGBA{R: 191, G: 191, B: 191, A: 255}
+	// Axis lines. PowerPoint's default axis stroke matches the gridlines:
+	// 134,134,134 at 0.75pt (measured on deck 00022823 slide05's value axis
+	// and slide22/23's category axes).
+	axisLine := color.RGBA{R: 134, G: 134, B: 134, A: 255}
+	axisW := maxInt(int(9525.0*r.scaleX+0.5)+1, 2)
+	// Major tick marks: "out" is PowerPoint's default for chart axes — deck
+	// 00022823 chart1/chart2 omit <c:majorTickMark> and the COM export shows
+	// 11px ticks, while chart3/4/5 declare val="none" and show none. Length
+	// measures ~5pt on the COM golds.
+	tickLen := maxInt(int(63500.0*r.scaleX+0.5), 2)
 	if p.categoriesOnY {
-		r.drawLineAA(p.x, p.y, p.x, p.y+p.h, axisLine, 1)
+		r.drawLineAA(p.x, p.y, p.x, p.y+p.h, axisLine, axisW)
 	} else {
-		r.drawLineAA(p.x, p.y+p.h, p.x+p.w, p.y+p.h, axisLine, 1)
+		r.drawLineAA(p.x, p.y+p.h, p.x+p.w, p.y+p.h, axisLine, axisW)
 		// A numeric X axis (scatter, or a date category axis) gets a
 		// vertical value-axis line too — the COM exports show it.
 		if p.scaleX != nil {
-			r.drawLineAA(p.x, p.y, p.x, p.y+p.h, axisLine, 1)
+			r.drawLineAA(p.x, p.y, p.x, p.y+p.h, axisLine, axisW)
+		}
+	}
+
+	// Major tick marks. Value-axis ticks poke outward (left for a vertical
+	// axis); the tick at the scale maximum is not drawn (COM slide05: the
+	// 1e8 gridline at y=58 carries no tick while the decades below do).
+	if axV != nil && axV.MajorTickMark != "" && axV.MajorTickMark != TickMarkNone && axV.Visible {
+		tickColor := axisLine
+		for _, t := range p.scale.ticks() {
+			if !p.categoriesOnY {
+				if maxV := p.scale.max; maxV > p.scale.min && t >= maxV {
+					continue
+				}
+			}
+			if p.categoriesOnY {
+				gx := p.valueX(t)
+				r.drawLineAA(gx, p.y+p.h, gx, p.y+p.h+tickLen, tickColor, axisW)
+			} else {
+				gy := p.valueY(t)
+				r.drawLineAA(p.x-tickLen, gy, p.x, gy, tickColor, axisW)
+			}
+		}
+	}
+	// Category-axis ticks along the bottom (numeric/date scales tick at
+	// scale positions): short vertical strokes below the axis line.
+	if !p.categoriesOnY && p.scaleX != nil && axX != nil && axX.MajorTickMark != "" && axX.MajorTickMark != TickMarkNone && axX.Visible {
+		for _, t := range p.scaleX.ticks() {
+			tx := p.x + int(p.scaleX.ratioClamped(t)*float64(p.w))
+			r.drawLineAA(tx, p.y+p.h, tx, p.y+p.h+tickLen, axisLine, axisW)
 		}
 	}
 
@@ -757,7 +805,7 @@ func (r *renderer) drawChartAxes(s *ChartShape, p chartPlotArea) {
 			} else {
 				tw := chartTextWidth(face, label)
 				gy := p.valueY(t)
-				r.drawChartText(label, face, fc, p.x-5-tw, gy+(ascent+descent)/2-descent)
+				r.drawChartText(label, face, fc, p.x-r.chartValueLabelGap(face)-tw, gy+(ascent+descent)/2-descent)
 			}
 		}
 	}
@@ -782,6 +830,7 @@ func (r *renderer) drawChartAxes(s *ChartShape, p chartPlotArea) {
 				if dateFmt {
 					// PowerPoint rotates date labels that would collide
 					// horizontally; they read bottom-to-top under the axis.
+					tx += r.rotatedTickLabelOffset()
 					r.drawChartRotatedLabel(label, face, fc, tx, p.y+p.h+3)
 				} else {
 					tw := chartTextWidth(face, label)
@@ -1102,7 +1151,16 @@ func (r *renderer) chartSeriesLineWidth(ser *ChartSeries, fallback int) int {
 	if ser != nil && ser.Outline != nil && ser.Outline.Width > 0 {
 		return maxInt(int(float64(ser.Outline.Width)*12700.0*r.scaleX), 1)
 	}
-	return fallback
+	if fallback <= 0 {
+		return fallback
+	}
+	// A chart series without an explicit stroke width renders at PowerPoint's
+	// default 28575 EMU (2.25pt) — COM exports of deck 00022823 slide05 show
+	// the unstyled "Cost per Genome" line ~5px wide at 160dpi, not the 1-2px
+	// hairline this used to draw. The fallback parameter only signals whether
+	// the caller wants a default at all.
+	w := int(28575.0*r.scaleX + 0.5)
+	return maxInt(w, 1)
 }
 
 func (r *renderer) renderLineChart(c *LineChart, s *ChartShape, px, py, pw, ph int) {
@@ -1240,7 +1298,12 @@ func (r *renderer) drawChartMarker(ser *ChartSeries, x, y int, c color.RGBA) {
 			size = ser.Marker.Size
 		}
 	}
-	rad := maxInt(int(float64(size)*r.scaleX/2), 2)
+	// Marker size is in points (<c:size val="8"/> = 8pt diameter): scale it
+	// through 12700 EMU/pt like every other point-denominated length. The
+	// old expression fed the raw point count to scaleX (px per EMU), which
+	// collapsed 8pt to a 2px dot — deck 00022823 slide05's diamond markers
+	// vanished entirely at 160dpi.
+	rad := maxInt(int(float64(size)*12700.0*r.scaleX/2), 2)
 	switch symbol {
 	case MarkerNone:
 		return
@@ -1271,6 +1334,22 @@ func (r *renderer) drawChartMarker(ser *ChartSeries, x, y int, c color.RGBA) {
 	default: // circle / dot / dash / star / anything else
 		r.fillEllipseAA(x-rad, y-rad, rad*2+1, rad*2+1, c)
 	}
+}
+
+// rotatedTickLabelOffset shifts a rotated date label's ink column right of
+// its tick: on the COM golds (deck 00022823 slide05/06) the label centers
+// ~5px (2.25pt at 160dpi) right of the tick — the ascent side of the glyph
+// box eats into the left of the column.
+func (r *renderer) rotatedTickLabelOffset() int {
+	return int(28575.0*r.scaleX + 0.5)
+}
+
+// chartValueLabelGap is the clearance between the value-axis labels' right
+// edge and the axis line: one label line height plus 4px (COM slide05:
+// "$10,000,000" ink ends 42px left of the axis at 16pt). Both the plot-area
+// reservation and the label draw use it, or the labels detach from the axis.
+func (r *renderer) chartValueLabelGap(face font.Face) int {
+	return r.chartLineHeight(face) + 4
 }
 
 // --- pie / doughnut ---
@@ -1533,7 +1612,18 @@ func (r *renderer) renderScatterChart(c *ScatterChart, s *ChartShape, px, py, pw
 
 	for si, ser := range c.Series {
 		sc2 := getSeriesColor(ser, si, palette)
-		lw := r.chartSeriesLineWidth(ser, 1)
+		// Scatter charts keep the legacy hairline default: the old deck's
+		// scatter series render thin in the COM golds too, and 2.25pt has
+		// only been verified for the line-chart family (deck 00022823
+		// slide05). Revisit with a COM variant experiment before changing.
+		lw := r.chartSeriesLineWidth(ser, 0)
+		if lw <= 0 {
+			if ser != nil && ser.Outline != nil && ser.Outline.Width > 0 {
+				lw = maxInt(int(float64(ser.Outline.Width)*12700.0*r.scaleX), 1)
+			} else {
+				lw = 1
+			}
+		}
 		n := len(ser.Categories)
 		var runXs, runYs []int
 		flush := func() {

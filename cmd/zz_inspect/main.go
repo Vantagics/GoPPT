@@ -29,7 +29,9 @@ func main() {
 		for i, sh := range slide.GetShapes() {
 			ox, oy, w, h := sh.GetOffsetX(), sh.GetOffsetY(), sh.GetWidth(), sh.GetHeight()
 			fmt.Printf(" [%d] %T name=%q off=(%d,%d) ext=(%d,%d)\n", i, sh, sh.GetName(), ox, oy, w, h)
-			if rt, ok := sh.(interface{ GetParagraphs() []*gopresentation.Paragraph }); ok {
+			if rt, ok := sh.(interface {
+				GetParagraphs() []*gopresentation.Paragraph
+			}); ok {
 				for pi, p := range rt.GetParagraphs() {
 					var parts []string
 					for _, el := range p.GetElements() {
