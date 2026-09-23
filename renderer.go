@@ -1213,10 +1213,27 @@ func (r *renderer) renderDrawing(s *DrawingShape) {
 	flipH := s.GetFlipHorizontal()
 	flipV := s.GetFlipVertical()
 
+	// The frame outline the picture is clipped to: nil for the plain
+	// rectangle (including "" — most pictures carry no prstGeom at all).
+	framePts := r.picFramePoints(s.presetGeom, x, y, w, h)
+
 	drawImg := func(tr *renderer) {
 		ox, oy := x, y
 		if tr != r {
 			ox, oy = 0, 0
+		}
+		pts := framePts
+		if tr != r && pts != nil {
+			// The rotated renderer works in unrotated space from the origin.
+			pts = r.picFramePoints(s.presetGeom, 0, 0, w, h)
+		}
+		// Shadow first — PowerPoint composites it behind the picture.
+		if s.shadow != nil && s.shadow.Visible {
+			if pts != nil {
+				tr.renderShadowPolygon(s.shadow, pts)
+			} else {
+				tr.renderShadow(s.shadow, image.Rect(ox, oy, ox+w, oy+h))
+			}
 		}
 		scaledImg := tr.scaleForRender(srcImg, w, h, cropF)
 		// <a:lum bright contrast> adjusts the picture's own pixels. It is
@@ -1242,7 +1259,31 @@ func (r *renderer) renderDrawing(s *DrawingShape) {
 				}
 			}
 		}
-		draw.Draw(tr.img, image.Rect(ox, oy, ox+w, oy+h), scaledImg, image.Point{}, draw.Over)
+		// <a:duotone> repaints every pixel on the line between its two
+		// colours at the pixel's luma — the recolour that turns a plain
+		// screenshot into a framed, toned exhibit.
+		if s.hasDuotone {
+			applyDuotone(scaledImg, s.duotoneA, s.duotoneB)
+		}
+		if pts != nil {
+			// pts are in the same space as the destination rect: absolute for
+			// the unrotated renderer, origin-based for a rotated one (where
+			// ox,oy are 0). Either way the mask is local, so shift by -ox,-oy.
+			local := polygonAlphaMask(shiftPts(pts, -float64(ox), -float64(oy)), w, h)
+			draw.DrawMask(tr.img, image.Rect(ox, oy, ox+w, oy+h), scaledImg, image.Point{}, local, image.Point{}, draw.Over)
+		} else {
+			draw.Draw(tr.img, image.Rect(ox, oy, ox+w, oy+h), scaledImg, image.Point{}, draw.Over)
+		}
+		// Frame line — drawn on the outline, like a shape's border.
+		if s.border != nil && s.border.Style != BorderNone {
+			bc := argbToRGBA(s.border.Color)
+			pw := maxInt(int(float64(maxInt(s.border.Width, 1))*12700.0*tr.scaleX), 1)
+			if pts != nil {
+				tr.drawPolygon(pts, bc, pw)
+			} else {
+				tr.drawRectBorder(image.Rect(ox, oy, ox+w, oy+h), bc, pw, BorderSolid)
+			}
+		}
 	}
 
 	if rotation != 0 || flipH || flipV {
@@ -3389,11 +3430,61 @@ func (r *renderer) renderShadow(shadow *Shadow, rect image.Rectangle) {
 		}
 	}
 	boxBlurAlpha(mask, radius, 3)
+	r.compositeShadowMask(shadowColor, mask, rect.Min.X-pad+dx, rect.Min.Y-pad+dy)
+}
 
+// renderShadowPolygon is the frame-outline variant of renderShadow: the
+// silhouette rasterised into the blur mask is the given polygon rather than
+// the bounding rectangle, so a snipped-corner picture frame does not spray
+// shadow through its cut corners.
+func (r *renderer) renderShadowPolygon(shadow *Shadow, pts []fpoint) {
+	if r.draft || shadow == nil || !shadow.Visible || len(pts) < 3 {
+		return
+	}
+	rad := float64(shadow.Direction) * math.Pi / 180.0
+	dist := float64(shadow.Distance) * 12700 * r.scaleX
+	dx := int(dist * math.Cos(rad))
+	dy := int(dist * math.Sin(rad))
+	shadowColor := argbToRGBA(shadow.Color)
+	shadowColor.A = uint8(float64(shadow.Alpha) * 255 / 100)
+
+	blurPx := int(float64(shadow.BlurRadius)*12700*r.scaleX + 0.5)
+	if blurPx <= 0 {
+		r.fillPolygon(pts, shadowColor)
+		return
+	}
+	radius := maxInt(1, blurPx/2)
+	pad := radius*3 + 2
+
+	// Normalise the polygon into the padded mask's coordinate space.
+	minX, minY := pts[0].x, pts[0].y
+	maxX, maxY := minX, minY
+	for _, p := range pts[1:] {
+		minX = math.Min(minX, p.x)
+		minY = math.Min(minY, p.y)
+		maxX = math.Max(maxX, p.x)
+		maxY = math.Max(maxY, p.y)
+	}
+	bw := int(maxX-minX) + 2*pad + 2
+	bh := int(maxY-minY) + 2*pad + 2
+	if bw <= 0 || bh <= 0 {
+		return
+	}
+	shifted := make([]fpoint, len(pts))
+	for i, p := range pts {
+		shifted[i] = fpoint{p.x - minX + float64(pad), p.y - minY + float64(pad)}
+	}
+	mask := polygonAlphaMask(shifted, bw, bh)
+	boxBlurAlpha(mask, radius, 3)
+	r.compositeShadowMask(shadowColor, mask, int(minX)-pad+dx, int(minY)-pad+dy)
+}
+
+// compositeShadowMask blends a blurred shadow silhouette at the given offset.
+func (r *renderer) compositeShadowMask(shadowColor color.RGBA, mask *image.Alpha, ox, oy int) {
 	bounds := r.img.Bounds()
 	baseA := float64(shadowColor.A) / 255
-	ox := rect.Min.X - pad + dx
-	oy := rect.Min.Y - pad + dy
+	bw := mask.Bounds().Dx()
+	bh := mask.Bounds().Dy()
 	for py := 0; py < bh; py++ {
 		imgY := oy + py
 		if imgY < bounds.Min.Y || imgY >= bounds.Max.Y {
@@ -3415,6 +3506,48 @@ func (r *renderer) renderShadow(shadow *Shadow, rect image.Rectangle) {
 			}
 		}
 	}
+}
+
+// polygonAlphaMask rasterises a polygon (even-odd scanline, the same rule
+// fillPolygon uses) into an alpha mask of the given size. Coordinates are in
+// mask space.
+func polygonAlphaMask(pts []fpoint, w, h int) *image.Alpha {
+	mask := image.NewAlpha(image.Rect(0, 0, w, h))
+	if len(pts) < 3 {
+		return mask
+	}
+	n := len(pts)
+	intersections := make([]float64, 0, n)
+	for y := 0; y < h; y++ {
+		fy := float64(y) + 0.5
+		intersections = intersections[:0]
+		for i := 0; i < n; i++ {
+			j := (i + 1) % n
+			py1, py2 := pts[i].y, pts[j].y
+			if py1 > py2 {
+				py1, py2 = py2, py1
+			}
+			if fy < py1 || fy >= py2 {
+				continue
+			}
+			dy := pts[j].y - pts[i].y
+			if dy == 0 {
+				continue
+			}
+			t := (fy - pts[i].y) / dy
+			intersections = append(intersections, pts[i].x+t*(pts[j].x-pts[i].x))
+		}
+		sort.Float64s(intersections)
+		row := mask.Pix[y*mask.Stride:]
+		for i := 0; i+1 < len(intersections); i += 2 {
+			x1 := int(math.Ceil(intersections[i]))
+			x2 := int(math.Floor(intersections[i+1]))
+			for x := maxInt(x1, 0); x <= minInt(x2, w-1); x++ {
+				row[x] = 255
+			}
+		}
+	}
+	return mask
 }
 
 func (r *renderer) renderShadowRounded(shadow *Shadow, rect image.Rectangle, radius int) {
@@ -3492,6 +3625,64 @@ func (r *renderer) drawRect(rect image.Rectangle, c color.RGBA, width int) {
 		for y := rect.Min.Y; y < rect.Max.Y; y++ {
 			r.blendPixel(rect.Min.X+i, y, c)
 			r.blendPixel(rect.Max.X-1-i, y, c)
+		}
+	}
+}
+
+// picFramePoints returns the picture frame's preset outline in absolute
+// coordinates, or nil when the frame is a plain rectangle. Only presets with
+// a polygon point function are clipped; the rest draw unclipped, which is
+// what every deck measured so far uses (snip2DiagRect on framed screenshots).
+func (r *renderer) picFramePoints(prst string, x, y, w, h int) []fpoint {
+	switch AutoShapeType(prst) {
+	case AutoShapeSnip2DiagRect:
+		return r.snip2DiagRectPoints(x, y, w, h, nil)
+	}
+	return nil
+}
+
+// shiftPts translates a polygon by (dx, dy).
+func shiftPts(pts []fpoint, dx, dy float64) []fpoint {
+	out := make([]fpoint, len(pts))
+	for i, p := range pts {
+		out[i] = fpoint{p.x + dx, p.y + dy}
+	}
+	return out
+}
+
+// applyDuotone repaints every pixel on the straight line between the two
+// duotone colours at the pixel's Rec.709 luma.
+//
+// COM calibration (grayscale ramp + saturated patches, exported through
+// PowerPoint): out = A + (B-A)*t with t = (0.2126R + 0.7152G + 0.0722B)/255,
+// computed and interpolated in sRGB gamma space — the sixteen ramp bands land
+// on round(A+(B-A)*v/255) band-exact, and the pure primaries map to
+// 54/182/18 = the three weights times 255. Alpha passes through untouched.
+func applyDuotone(img *image.RGBA, a, b Color) {
+	ar, ag, ab := float64(a.GetRed()), float64(a.GetGreen()), float64(a.GetBlue())
+	br, bg, bb := float64(b.GetRed()), float64(b.GetGreen()), float64(b.GetBlue())
+	bounds := img.Bounds()
+	for py := bounds.Min.Y; py < bounds.Max.Y; py++ {
+		for px := bounds.Min.X; px < bounds.Max.X; px++ {
+			i := img.PixOffset(px, py)
+			a8 := img.Pix[i+3]
+			if a8 == 0 {
+				continue
+			}
+			// Un-premultiply for the luma, re-premultiply on the way back.
+			inv := 255.0 / float64(a8)
+			r := float64(img.Pix[i]) * inv
+			g := float64(img.Pix[i+1]) * inv
+			bl := float64(img.Pix[i+2]) * inv
+			t := (0.2126*r + 0.7152*g + 0.0722*bl) / 255.0
+			if t > 1 {
+				t = 1
+			} else if t < 0 {
+				t = 0
+			}
+			img.Pix[i] = uint8((ar+(br-ar)*t)*float64(a8)/255.0 + 0.5)
+			img.Pix[i+1] = uint8((ag+(bg-ag)*t)*float64(a8)/255.0 + 0.5)
+			img.Pix[i+2] = uint8((ab+(bb-ab)*t)*float64(a8)/255.0 + 0.5)
 		}
 	}
 }

@@ -586,6 +586,7 @@ func (r *PPTXReader) parseSlideXML(decoder *xml.Decoder, slide *Slide, rels []xm
 		inSolidFill     bool
 		inSpPr          bool
 		inLn            bool
+		inDuotone       bool // inside <a:duotone> under a pic's <a:blip>
 		inPPr           bool
 		inBg            bool
 		inBgPr          bool
@@ -763,6 +764,11 @@ func (r *PPTXReader) parseSlideXML(decoder *xml.Decoder, slide *Slide, rels []xm
 	// Deferred shadow (spPr effectLst outerShdw)
 	var pendingShadow *Shadow
 
+	// duotoneIdx is the slot (0 or 1) the next <a:duotone> colour lands in.
+	// The element is a bare sequence of colour choices; the parser only knows
+	// which one it is reading by counting.
+	var duotoneIdx int
+
 	// Deferred blipFill image data (spPr blipFill for shapes)
 	var pendingBlipFillData []byte
 	var pendingBlipFillMime string
@@ -904,6 +910,19 @@ func (r *PPTXReader) parseSlideXML(decoder *xml.Decoder, slide *Slide, rels []xm
 					shapeDescr = ""
 					prstGeom = ""
 					shapeRotation = 0
+					state.inDuotone = false
+					duotoneIdx = 0
+					pendingBorder = nil
+					pendingShadow = nil
+				}
+			case "duotone":
+				// <a:duotone> maps every pixel onto the line between two
+				// colours at its luma. Only the picture context is kept: a
+				// duotone on a shape's blipFill or a background is rarer and
+				// has no model to land in yet.
+				if state.inPic && currentDrawing != nil {
+					state.inDuotone = true
+					duotoneIdx = 0
 				}
 			case "cxnSp":
 				if state.inSpTree || state.inGrpSp {
@@ -1895,6 +1914,23 @@ func (r *PPTXReader) parseSlideXML(decoder *xml.Decoder, slide *Slide, rels []xm
 							lastColor = &gradStopColors[len(gradStopColors)-1]
 						}
 					}
+				} else if state.inDuotone && currentDrawing != nil {
+					// Duotone endpoint. lastColor points at the slot so the
+					// transform cases (tint/satMod/...) fold into it the same
+					// way they do for gradient stops.
+					for _, attr := range t.Attr {
+						if attr.Name.Local == "val" {
+							if duotoneIdx == 0 {
+								currentDrawing.duotoneA = NewColor("FF" + attr.Value)
+								currentDrawing.hasDuotone = true
+								lastColor = &currentDrawing.duotoneA
+							} else {
+								currentDrawing.duotoneB = NewColor("FF" + attr.Value)
+								lastColor = &currentDrawing.duotoneB
+							}
+							duotoneIdx++
+						}
+					}
 				} else if state.inOuterShdw && pendingShadow != nil {
 					// Shadow color
 					for _, attr := range t.Attr {
@@ -1968,7 +2004,7 @@ func (r *PPTXReader) parseSlideXML(decoder *xml.Decoder, slide *Slide, rels []xm
 								currentLine.lineColor = c
 								lineColorExplicit = true
 								lastColor = &currentLine.lineColor
-							} else if state.inSp {
+							} else if state.inSp || state.inPic {
 								if pendingBorder == nil {
 									pendingBorder = &Border{Style: BorderSolid}
 								}
@@ -2047,7 +2083,17 @@ func (r *PPTXReader) parseSlideXML(decoder *xml.Decoder, slide *Slide, rels []xm
 					}
 				}
 				c := presetColorToColor(prstName)
-				if state.inGs {
+				if state.inDuotone && currentDrawing != nil {
+					if duotoneIdx == 0 {
+						currentDrawing.duotoneA = c
+						currentDrawing.hasDuotone = true
+						lastColor = &currentDrawing.duotoneA
+					} else {
+						currentDrawing.duotoneB = c
+						lastColor = &currentDrawing.duotoneB
+					}
+					duotoneIdx++
+				} else if state.inGs {
 					gradStopColors = append(gradStopColors, c)
 					gradStopPositions = append(gradStopPositions, state.gradFillPos)
 					lastColor = &gradStopColors[len(gradStopColors)-1]
@@ -2744,7 +2790,7 @@ func (r *PPTXReader) parseSlideXML(decoder *xml.Decoder, slide *Slide, rels []xm
 							}
 						}
 					}
-				} else if state.inSp && state.inSpPr {
+				} else if (state.inSp || state.inPic) && state.inSpPr {
 					for _, attr := range t.Attr {
 						if attr.Name.Local == "w" {
 							if v, err := strconv.Atoi(attr.Value); err == nil {
@@ -3507,6 +3553,18 @@ func (r *PPTXReader) parseSlideXML(decoder *xml.Decoder, slide *Slide, rels []xm
 						currentDrawing.flipHorizontal = flipH
 						currentDrawing.flipVertical = flipV
 						currentDrawing.rotation = shapeRotation
+						// The frame geometry, line and shadow ride in the
+						// pic's spPr and were collected by the same pending*
+						// variables a shape uses.
+						currentDrawing.presetGeom = prstGeom
+						if pendingBorder != nil {
+							currentDrawing.border = pendingBorder
+							pendingBorder = nil
+						}
+						if pendingShadow != nil {
+							currentDrawing.shadow = pendingShadow
+							pendingShadow = nil
+						}
 						if state.inGrpSp && currentGroup != nil {
 							currentGroup.AddShape(currentDrawing)
 						} else {
@@ -3515,6 +3573,8 @@ func (r *PPTXReader) parseSlideXML(decoder *xml.Decoder, slide *Slide, rels []xm
 					}
 					currentDrawing = nil
 				}
+			case "duotone":
+				state.inDuotone = false
 			case "cxnSp":
 				if state.inCxnSp {
 					state.inCxnSp = false

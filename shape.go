@@ -545,6 +545,20 @@ type DrawingShape struct {
 	// in document order. Stacked photos knock their background colour out
 	// with one and depend on the transparency surviving the composite.
 	recolors []colorReplace
+	// duotone recolour: the two <a:duotone> colours, transforms already
+	// folded in at parse time. Every pixel is repainted on the straight line
+	// between them at its Rec.709 luma (hasDuotone gates the effect).
+	hasDuotone bool
+	duotoneA   Color
+	duotoneB   Color
+	// presetGeom is the picture frame's preset outline (snip2DiagRect on
+	// framed screenshots). "" or "rect" draws the plain rectangle; anything
+	// else clips the image and the border to that outline.
+	presetGeom string
+	// The frame's own line and shadow — <a:ln> and <a:effectLst> live in the
+	// pic's spPr exactly as they do in a shape's.
+	border *Border
+	shadow *Shadow
 }
 
 // colorReplace is one <a:clrChange> rule: source pixels whose RGB equals From

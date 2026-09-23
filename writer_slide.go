@@ -1026,6 +1026,19 @@ func (w *PPTXWriter) writeDrawingShapeXML(s *DrawingShape, shapeID *int, slideNu
 			s.shadow.Alpha*1000)
 	}
 
+	// The frame's own line. Pictures read from real decks can carry one (a
+	// 7pt white mat around a framed screenshot); the writer used to drop it.
+	lnXML := ""
+	if s.border != nil && s.border.Style != BorderNone {
+		lnXML = fmt.Sprintf(`<a:ln w="%d" cap="sq"><a:solidFill><a:srgbClr val="%s"/></a:solidFill></a:ln>`,
+			maxInt(s.border.Width, 1)*12700, colorRGB(s.border.Color))
+	}
+
+	prst := s.presetGeom
+	if prst == "" {
+		prst = "rect"
+	}
+
 	return fmt.Sprintf(`      <p:pic>
         <p:nvPicPr>
           <p:cNvPr id="%d" name="%s" descr="%s"%s/>
@@ -1045,16 +1058,16 @@ func (w *PPTXWriter) writeDrawingShapeXML(s *DrawingShape, shapeID *int, slideNu
             <a:off x="%d" y="%d"/>
             <a:ext cx="%d" cy="%d"/>
           </a:xfrm>
-          <a:prstGeom prst="rect">
+          <a:prstGeom prst="%s">
             <a:avLst/>
-          </a:prstGeom>%s
+          </a:prstGeom>%s%s
         </p:spPr>
       </p:pic>
 `, id, xmlEscape(name), xmlEscape(s.description), hiddenAttr(&s.BaseShape),
-		blipFillChildrenXML(relIdx, s.alpha, s.cropLeft, s.cropTop, s.cropRight, s.cropBottom, s.lumBright, s.lumContrast),
+		blipFillChildrenXML(relIdx, s.alpha, s.cropLeft, s.cropTop, s.cropRight, s.cropBottom, s.lumBright, s.lumContrast, s.hasDuotone, s.duotoneA, s.duotoneB),
 		xfrmAttrs(&s.BaseShape),
 		s.offsetX, s.offsetY, s.width, s.height,
-		shadowXML)
+		prst, lnXML, shadowXML)
 }
 
 // blipFillChildrenXML serialises the children of <p:blipFill> that describe the
@@ -1074,13 +1087,17 @@ func (w *PPTXWriter) writeDrawingShapeXML(s *DrawingShape, shapeID *int, slideNu
 // lumBright and lumContrast live on the same blip, in the same unit, and are
 // children of it next to alphaModFix: a picture read from a file keeps its
 // brightness and contrast through a save only if they are written back.
-func blipFillChildrenXML(relIdx, alpha, left, top, right, bottom, lumBright, lumContrast int) string {
+func blipFillChildrenXML(relIdx, alpha, left, top, right, bottom, lumBright, lumContrast int, hasDuotone bool, duoA, duoB Color) string {
 	var kids []string
 	if alpha > 0 && alpha < 100000 {
 		kids = append(kids, fmt.Sprintf(`<a:alphaModFix amt="%d"/>`, alpha))
 	}
 	if lumBright != 0 || lumContrast != 0 {
 		kids = append(kids, fmt.Sprintf(`<a:lum bright="%d" contrast="%d"/>`, lumBright, lumContrast))
+	}
+	if hasDuotone {
+		kids = append(kids, fmt.Sprintf(`<a:duotone><a:srgbClr val="%s"/><a:srgbClr val="%s"/></a:duotone>`,
+			colorRGB(duoA), colorRGB(duoB)))
 	}
 	blip := fmt.Sprintf(`<a:blip r:embed="rId%d"/>`, relIdx)
 	if len(kids) > 0 {
