@@ -4387,13 +4387,29 @@ func runSizeIsDefault(size int) bool { return size == 18 || size <= 10 }
 
 // matchPlaceholderDef finds the definition a slide placeholder inherits from.
 //
-// The match is by type and index, then by type alone — where "by type" walks
-// the placeholder's alias list: PowerPoint treats ctrTitle as the title's
-// centred variant and subTitle as the body's, and the master only ever defines
-// title/body. Without the aliases a ctrTitle placeholder matched nothing on
-// the master rung and lost the master's anchor="ctr" (slide1's title sat 32px
-// too low because it rendered top-anchored).
+// A slide placeholder that declares an index matches by index first: OOXML
+// inheritance keys on <p:ph idx>, and PowerPoint-written slides routinely drop
+// the type attribute on content placeholders (<p:ph idx="1"/> with no type),
+// which must still find the master's type="body" idx="1" definition. Requiring
+// type AND idx to both equal left those slides matching nothing, so the body
+// fell back to a default-size box and re-wrapped every paragraph (deck
+// 00022693 slide17: the full-width body rendered as a one-word-per-line
+// column). The type walk — including the alias list — only runs for
+// index-less placeholders or when no definition carries the index.
+//
+// PowerPoint treats ctrTitle as the title's centred variant and subTitle as
+// the body's, and the master only ever defines title/body. Without the
+// aliases a ctrTitle placeholder matched nothing on the master rung and lost
+// the master's anchor="ctr" (slide1's title sat 32px too low because it
+// rendered top-anchored).
 func matchPlaceholderDef(defs []layoutPlaceholder, ph *PlaceholderShape) *layoutPlaceholder {
+	if ph.phIdx > 0 {
+		for i := range defs {
+			if defs[i].phIdx == ph.phIdx {
+				return &defs[i]
+			}
+		}
+	}
 	for i := range defs {
 		d := &defs[i]
 		if d.phType == string(ph.phType) && d.phIdx == ph.phIdx {

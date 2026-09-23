@@ -1612,18 +1612,11 @@ func (r *renderer) renderScatterChart(c *ScatterChart, s *ChartShape, px, py, pw
 
 	for si, ser := range c.Series {
 		sc2 := getSeriesColor(ser, si, palette)
-		// Scatter charts keep the legacy hairline default: the old deck's
-		// scatter series render thin in the COM golds too, and 2.25pt has
-		// only been verified for the line-chart family (deck 00022823
-		// slide05). Revisit with a COM variant experiment before changing.
-		lw := r.chartSeriesLineWidth(ser, 0)
-		if lw <= 0 {
-			if ser != nil && ser.Outline != nil && ser.Outline.Width > 0 {
-				lw = maxInt(int(float64(ser.Outline.Width)*12700.0*r.scaleX), 1)
-			} else {
-				lw = 1
-			}
-		}
+		// Scatter series share the line chart's default stroke: the old
+		// deck's slide17 scatter carries no <a:ln w> yet the COM gold shows
+		// the same ~5px (2.25pt) lines as deck 00022823's line chart, so the
+		// hairline default this used to keep was wrong for scatter too.
+		lw := r.chartSeriesLineWidth(ser, 2)
 		n := len(ser.Categories)
 		var runXs, runYs []int
 		flush := func() {
