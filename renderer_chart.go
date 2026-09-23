@@ -1,11 +1,13 @@
 package gopresentation
 
 import (
+	"fmt"
 	"image"
 	"image/color"
 	"math"
 	"strconv"
 	"strings"
+	"time"
 
 	"golang.org/x/image/font"
 	"golang.org/x/image/math/fixed"
@@ -26,6 +28,13 @@ type chartScale struct {
 	min  float64
 	max  float64
 	step float64
+	// logBase > 1 turns every mapping into logarithmic space
+	// (<c:logBase>: tick marks sit at whole powers of the base).
+	logBase float64
+	// stepMonths > 0 marks a date-axis scale ticking every N calendar
+	// months from the axis minimum (COM slide05: 3318-day span ticks every
+	// 5 months — Sep 2001, Feb 2002, Jul 2002, ... — 22 labels).
+	stepMonths int
 }
 
 func (cs chartScale) span() float64 {
@@ -36,7 +45,12 @@ func (cs chartScale) span() float64 {
 }
 
 // ratio maps a data value to a 0..1 position along the value axis.
-func (cs chartScale) ratio(v float64) float64 { return (v - cs.min) / cs.span() }
+func (cs chartScale) ratio(v float64) float64 {
+	if cs.logBase > 1 && v > 0 && cs.min > 0 && cs.max > cs.min {
+		return math.Log(v/cs.min) / math.Log(cs.max/cs.min)
+	}
+	return (v - cs.min) / cs.span()
+}
 
 // ratioClamped is ratio() clamped to the 0..1 range.
 func (cs chartScale) ratioClamped(v float64) float64 {
@@ -52,6 +66,53 @@ func (cs chartScale) ratioClamped(v float64) float64 {
 
 // ticks returns the major tick values between min and max.
 func (cs chartScale) ticks() []float64 {
+	if cs.stepMonths > 0 {
+		start := chartSerialToTime(cs.min)
+		var out []float64
+		for k := 0; ; k++ {
+			t := start.AddDate(0, k*cs.stepMonths, 0)
+			// Go normalises day overflow into the next month (Sep 30 +
+			// 5 months → Mar 2); PowerPoint clamps to the month's end
+			// (Feb 28), which is what the COM tick positions show.
+			if t.Day() < start.Day() {
+				t = t.AddDate(0, 0, -t.Day())
+			}
+			s := chartTimeToSerial(t)
+			if s > cs.max+0.5 {
+				break
+			}
+			out = append(out, s)
+			if len(out) > 64 {
+				break
+			}
+		}
+		if len(out) == 0 {
+			out = append(out, cs.min)
+		}
+		return out
+	}
+	if cs.logBase > 1 && cs.min > 0 {
+		// Logarithmic axes tick at whole powers of the base, starting at
+		// the first power at or above the axis minimum (COM slide29: base
+		// 2 with min 128 labels 128, 256, ..., 8192).
+		var out []float64
+		exp := math.Ceil(math.Log(cs.min) / math.Log(cs.logBase))
+		for {
+			v := math.Pow(cs.logBase, exp)
+			if v > cs.max*1.0001 || v < cs.min*0.9999 {
+				break
+			}
+			out = append(out, v)
+			exp++
+			if len(out) > 64 {
+				break
+			}
+		}
+		if len(out) == 0 {
+			out = append(out, cs.min)
+		}
+		return out
+	}
 	if cs.step <= 0 {
 		return []float64{cs.min, cs.max}
 	}
@@ -84,6 +145,9 @@ type chartPlotArea struct {
 	// the plot: the legacy 5px inset, or one label line height when a
 	// manualLayout pins the plot (measured 50-54px on 24pt labels).
 	catLabelGap int
+	// scaleX, when set, is the numeric scale for a scatter chart's X axis;
+	// without it scatter points space themselves on the category index.
+	scaleX *chartScale
 }
 
 func (p chartPlotArea) valueY(v float64) int {
@@ -103,6 +167,9 @@ func chartSeriesRange(series []*ChartSeries) (float64, float64) {
 	for _, s := range series {
 		for _, cat := range s.Categories {
 			v := s.Values[cat]
+			if math.IsNaN(v) {
+				continue
+			}
 			if !found {
 				minV, maxV, found = v, v, true
 				continue
@@ -173,6 +240,22 @@ func chartComputeScale(minV, maxV float64, ax *ChartAxis, startAtZero bool) char
 	if ax != nil && ax.MaxBounds != nil {
 		maxV = *ax.MaxBounds
 	}
+	if ax != nil && ax.LogBase > 1 && minV > 0 {
+		// Logarithmic scale: the bounds snap outward to whole powers of
+		// the base and ticks land on each power (majorUnit is ignored,
+		// as in PowerPoint).
+		lb := ax.LogBase
+		if ax == nil || ax.MinBounds == nil {
+			minV = math.Pow(lb, math.Floor(math.Log(minV)/math.Log(lb)+1e-9))
+		}
+		if ax == nil || ax.MaxBounds == nil {
+			maxV = math.Pow(lb, math.Ceil(math.Log(maxV)/math.Log(lb)-1e-9))
+		}
+		if maxV <= minV {
+			maxV = minV * lb
+		}
+		return chartScale{min: minV, max: maxV, logBase: lb}
+	}
 	// Column/line/area/scatter charts start at zero unless overridden.
 	if startAtZero && (ax == nil || ax.MinBounds == nil) && minV > 0 {
 		minV = 0
@@ -213,8 +296,9 @@ func chartFormatNumber(v float64) string {
 
 // chartFormatNumberWith renders a value with an Excel-style format code.
 // Only the codes PowerPoint actually puts on value axes are honoured —
-// "#,##0" (thousands groups + optional decimals) and trailing "%" — anything
-// else (dates, fractions, accounting) falls back to the plain rendering
+// "#,##0" (thousands groups + optional decimals), trailing "%" and a quoted
+// literal "$" prefix (the accounting code on deck 00022823 chart1's value
+// axis renders "$10,000") — anything else falls back to the plain rendering
 // rather than guessing wrong.
 func chartFormatNumberWith(v float64, format string) string {
 	format = strings.TrimSpace(format)
@@ -223,6 +307,7 @@ func chartFormatNumberWith(v float64, format string) string {
 	}
 	pct := strings.Contains(format, "%")
 	grouped := strings.Contains(format, "#,##0")
+	dollar := strings.Contains(format, `"$"`)
 	if !grouped && !pct {
 		return chartFormatNumber(v)
 	}
@@ -258,6 +343,9 @@ func chartFormatNumberWith(v float64, format string) string {
 	}
 	if pct {
 		s += "%"
+	}
+	if dollar {
+		s = "$" + s
 	}
 	if v < 0 || (v == 0 && math.Signbit(v)) {
 		s = "-" + s
@@ -548,6 +636,27 @@ func (r *renderer) chartPlotAreaFor(s *ChartShape, px, py, pw, ph int, sc chartS
 	if axX == nil || axX.Visible {
 		if categoriesOnY {
 			left += chartMaxLabelWidth(catFace, cats, pw/2) + 5
+		} else if axX != nil && chartIsDateFormat(axisNumFormat(axX)) {
+			// Rotated date labels need a column as tall as the longest
+			// formatted label, plus the label line height. The extra
+			// top/left/right insets are PowerPoint's measured auto layout
+			// for this chart family (COM slide05: plot top 58, left 287,
+			// right 1537 on a frame at 27,27,1533x1093); the value-label
+			// width itself is already reserved above.
+			left += r.chartLineHeight(catFace) - 4
+			top += r.chartLineHeight(valueFace) - 9
+			right += 20
+			maxLen := 0
+			for _, cat := range cats {
+				label := cat
+				if v, err := strconv.ParseFloat(strings.TrimSpace(cat), 64); err == nil {
+					label = chartFormatDate(v, axisNumFormat(axX))
+				}
+				if l := chartTextWidth(catFace, label); l > maxLen {
+					maxLen = l
+				}
+			}
+			bottom += maxLen + 6 + r.chartLineHeight(catFace)
 		} else {
 			bottom += r.chartLineHeight(catFace) + 2
 		}
@@ -601,11 +710,14 @@ func (r *renderer) drawChartAxes(s *ChartShape, p chartPlotArea) {
 
 	// Major gridlines. Drawn only when the chart declares them: charts 3/4
 	// of deck 00022823 carry no <c:majorGridlines> and the COM exports show
-	// none, while every chart that does declare them keeps its grid.
-	if axV != nil && axV.MajorGridlines != nil {
+	// none, while every chart that does declare them keeps its grid — unless
+	// the stroke is <a:noFill/> (chart5's Y axis), which stays invisible.
+	if axV != nil && axV.MajorGridlines != nil && !axV.MajorGridlines.NoFill {
 		gridColor := color.RGBA{R: 217, G: 217, B: 217, A: 255}
 		gridW := 1
-		gridColor = argbToRGBA(axV.MajorGridlines.Color)
+		if axV.MajorGridlines.ColorSet {
+			gridColor = argbToRGBA(axV.MajorGridlines.Color)
+		}
 		gridW = maxInt(axV.MajorGridlines.Width, 1)
 		for _, t := range p.scale.ticks() {
 			if p.categoriesOnY {
@@ -624,6 +736,11 @@ func (r *renderer) drawChartAxes(s *ChartShape, p chartPlotArea) {
 		r.drawLineAA(p.x, p.y, p.x, p.y+p.h, axisLine, 1)
 	} else {
 		r.drawLineAA(p.x, p.y+p.h, p.x+p.w, p.y+p.h, axisLine, 1)
+		// A numeric X axis (scatter, or a date category axis) gets a
+		// vertical value-axis line too — the COM exports show it.
+		if p.scaleX != nil {
+			r.drawLineAA(p.x, p.y, p.x, p.y+p.h, axisLine, 1)
+		}
 	}
 
 	// Value labels.
@@ -645,8 +762,34 @@ func (r *renderer) drawChartAxes(s *ChartShape, p chartPlotArea) {
 		}
 	}
 
-	// Category labels.
-	if (axX == nil || axX.Visible) && len(p.cats) > 0 {
+	// X-axis labels: numeric scales (scatter / date axes) tick at scale
+	// positions; everything else labels the categories evenly.
+	if p.scaleX != nil {
+		if axX == nil || axX.Visible {
+			face := r.chartFace(axisFont(axX), "")
+			fc := chartFontColor(axisFont(axX))
+			m := face.Metrics()
+			ascent := m.Ascent.Ceil()
+			dateFmt := chartIsDateFormat(axisNumFormat(axX))
+			for _, t := range p.scaleX.ticks() {
+				var label string
+				if dateFmt {
+					label = chartFormatDate(t, axisNumFormat(axX))
+				} else {
+					label = chartFormatNumberWith(t, axisNumFormat(axX))
+				}
+				tx := p.x + int(p.scaleX.ratioClamped(t)*float64(p.w))
+				if dateFmt {
+					// PowerPoint rotates date labels that would collide
+					// horizontally; they read bottom-to-top under the axis.
+					r.drawChartRotatedLabel(label, face, fc, tx, p.y+p.h+3)
+				} else {
+					tw := chartTextWidth(face, label)
+					r.drawChartText(label, face, fc, tx-tw/2, p.y+p.h+2+ascent)
+				}
+			}
+		}
+	} else if (axX == nil || axX.Visible) && len(p.cats) > 0 {
 		face := r.chartFaceForCats(axisFont(axX), p.cats)
 		fc := chartFontColor(axisFont(axX))
 		ascent := face.Metrics().Ascent.Ceil()
@@ -686,9 +829,17 @@ func (r *renderer) drawChartAxes(s *ChartShape, p chartPlotArea) {
 
 // drawChartAxisTitles renders the value- and category-axis titles. The title of
 // the axis that runs vertically is rotated 270°, matching PowerPoint.
+//
+// With a pinned manualLayout the plot rect no longer touches the frame, so
+// both title strips are measured from the frame edge: the value title spans
+// frame-left..plot-left, the category title sits centred in the strip
+// between the tick labels and the frame bottom (COM slide29: title centre
+// 1074 in the 1025..1133 strip).
 func (r *renderer) drawChartAxisTitles(s *ChartShape, p chartPlotArea) {
 	axV := s.plotArea.GetAxisY()
 	axX := s.plotArea.GetAxisX()
+	frameL := r.emuToPixelX(s.offsetX)
+	frameB := r.emuToPixelY(s.offsetY) + r.emuToPixelY(s.height)
 
 	if axV != nil && axV.Visible && strings.TrimSpace(axV.Title) != "" {
 		face := r.chartFace(axV.Font, axV.Title)
@@ -701,22 +852,30 @@ func (r *renderer) drawChartAxisTitles(s *ChartShape, p chartPlotArea) {
 				y = p.y + p.h
 			}
 			r.drawChartTextCentered(axV.Title, face, fc, p.x, y, p.w, h)
-		} else if w := p.x - p.ox; w > 0 {
-			r.drawChartVerticalCentered(axV.Title, face, fc, p.ox, p.y, w, p.h)
+		} else if w := p.x - frameL; w > 0 {
+			r.drawChartVerticalCentered(axV.Title, face, fc, frameL, p.y, w, p.h)
 		}
 	}
 	if axX != nil && axX.Visible && strings.TrimSpace(axX.Title) != "" {
 		face := r.chartFace(axX.Font, axX.Title)
 		fc := chartFontColor(axX.Font)
 		if p.categoriesOnY {
-			if w := p.x - p.ox; w > 0 {
-				r.drawChartVerticalCentered(axX.Title, face, fc, p.ox, p.y, w, p.h)
+			if w := p.x - frameL; w > 0 {
+				r.drawChartVerticalCentered(axX.Title, face, fc, frameL, p.y, w, p.h)
 			}
 		} else {
 			h := r.chartLineHeight(face)
 			y := p.oy + p.oh - h
 			if y < p.y+p.h {
 				y = p.y + p.h
+			}
+			if frameB > p.y+p.h {
+				// Centre the title in the strip between the tick labels
+				// and the frame bottom.
+				stripTop := y + h + 4
+				if cy := stripTop + (frameB-stripTop-h)/2; cy > y {
+					y = cy
+				}
 			}
 			r.drawChartTextCentered(axX.Title, face, fc, p.x, y, p.w, h)
 		}
@@ -959,30 +1118,69 @@ func (r *renderer) renderLineChart(c *LineChart, s *ChartShape, px, py, pw, ph i
 	minV, maxV := chartSeriesRange(c.Series)
 	sc := chartComputeScale(minV, maxV, s.plotArea.GetAxisY(), true)
 	plot := r.chartPlotAreaFor(s, px, py, pw, ph, sc, cats, false)
+	// A date category axis maps categories at their serial positions on a
+	// time scale, not at even category spacing (deck 00022823 chart1: the
+	// gaps between points vary between ~5 and ~7 months).
+	if axX := s.plotArea.GetAxisX(); axX != nil && chartIsDateFormat(axisNumFormat(axX)) {
+		if min0, err0 := strconv.ParseFloat(strings.TrimSpace(cats[0]), 64); err0 == nil {
+			if max0, err1 := strconv.ParseFloat(strings.TrimSpace(cats[len(cats)-1]), 64); err1 == nil && max0 > min0 {
+				// COM slide05: a 3318-day (109-month) span over a ~1250px
+				// plot ticks every 5 calendar months — roughly plot
+				// width / 57 per tick, rounded to whole months.
+				spanMonths := (max0 - min0) / 30.4375
+				months := int(math.Round(spanMonths / float64(maxInt(2, plot.w/57))))
+				if months < 1 {
+					months = 1
+				}
+				scX := chartScale{min: min0, max: max0, stepMonths: months}
+				plot.scaleX = &scX
+			}
+		}
+	}
 	r.drawChartAxes(s, plot)
 
 	nPts := len(cats)
 	for si, ser := range c.Series {
 		sc2 := getSeriesColor(ser, si, palette)
 		lw := r.chartSeriesLineWidth(ser, 2)
-		xs := make([]int, nPts)
-		ys := make([]int, nPts)
-		for i, cat := range cats {
-			xs[i] = chartPointX(plot, i, nPts)
-			ys[i] = plot.valueY(ser.Values[cat])
-		}
-		if c.IsSmooth && nPts >= 3 {
-			r.drawSmoothCurve(xs, ys, sc2, lw)
-		} else {
-			for i := 1; i < nPts; i++ {
-				r.drawLineAA(xs[i-1], ys[i-1], xs[i], ys[i], sc2, lw)
+		// Blank points (NaN) break the line — PowerPoint's dispBlanksAs
+		// "gap" treatment.
+		var runXs, runYs []int
+		flush := func() {
+			if len(runXs) > 1 {
+				if c.IsSmooth && len(runXs) >= 3 {
+					r.drawSmoothCurve(runXs, runYs, sc2, lw)
+				} else {
+					r.drawChartLineDashed(runXs, runYs, sc2, lw, ser.LineDash)
+				}
 			}
+			for i := range runXs {
+				r.drawChartMarker(ser, runXs[i], runYs[i], sc2)
+			}
+			runXs, runYs = runXs[:0], runYs[:0]
 		}
-		// Markers
-		for i := range xs {
-			r.drawChartMarker(ser, xs[i], ys[i], sc2)
+		for i, cat := range cats {
+			v := ser.Values[cat]
+			if math.IsNaN(v) {
+				flush()
+				continue
+			}
+			runXs = append(runXs, chartCatX(plot, i, nPts, cat))
+			runYs = append(runYs, plot.valueY(v))
+		}
+		flush()
+	}
+}
+
+// chartCatX returns the pixel X for a category: numeric date scales map the
+// serial, everything else spaces categories evenly.
+func chartCatX(p chartPlotArea, i, n int, cat string) int {
+	if p.scaleX != nil {
+		if v, err := strconv.ParseFloat(strings.TrimSpace(cat), 64); err == nil {
+			return p.x + int(p.scaleX.ratioClamped(v)*float64(p.w))
 		}
 	}
+	return chartPointX(p, i, n)
 }
 
 // chartPointX returns the pixel X for the i-th of n category points.
@@ -1311,34 +1509,65 @@ func (r *renderer) renderScatterChart(c *ScatterChart, s *ChartShape, px, py, pw
 	minV, maxV := chartSeriesRange(c.Series)
 	sc := chartComputeScale(minV, maxV, s.plotArea.GetAxisY(), false)
 	plot := r.chartPlotAreaFor(s, px, py, pw, ph, sc, c.Series[0].Categories, false)
+	// The X axis is numeric for scatter charts. Only pin a real scale when
+	// the author constrained it (log base / explicit bounds); otherwise the
+	// legacy even-spacing mapping keeps earlier renders stable.
+	if axX := s.plotArea.GetAxisX(); axX != nil && (axX.LogBase > 1 || axX.MinBounds != nil || axX.MaxBounds != nil) {
+		minX, maxX := math.MaxFloat64, -math.MaxFloat64
+		for _, cat := range c.Series[0].Categories {
+			if f, err := strconv.ParseFloat(cat, 64); err == nil {
+				if f < minX {
+					minX = f
+				}
+				if f > maxX {
+					maxX = f
+				}
+			}
+		}
+		if minX <= maxX {
+			scX := chartComputeScale(minX, maxX, axX, false)
+			plot.scaleX = &scX
+		}
+	}
 	r.drawChartAxes(s, plot)
 
 	for si, ser := range c.Series {
 		sc2 := getSeriesColor(ser, si, palette)
 		lw := r.chartSeriesLineWidth(ser, 1)
 		n := len(ser.Categories)
-		xs := make([]int, n)
-		ys := make([]int, n)
-		for i, cat := range ser.Categories {
-			xs[i] = r.scatterX(plot, i, n, cat)
-			ys[i] = plot.valueY(ser.Values[cat])
-		}
-		if c.IsSmooth && n >= 3 {
-			r.drawSmoothCurve(xs, ys, sc2, lw)
-		} else if n > 1 {
-			for i := 1; i < n; i++ {
-				r.drawLineAA(xs[i-1], ys[i-1], xs[i], ys[i], sc2, lw)
+		var runXs, runYs []int
+		flush := func() {
+			if len(runXs) > 1 {
+				r.drawChartLineDashed(runXs, runYs, sc2, lw, ser.LineDash)
 			}
+			for i := range runXs {
+				r.drawChartMarker(ser, runXs[i], runYs[i], sc2)
+			}
+			runXs, runYs = runXs[:0], runYs[:0]
 		}
-		for i := range xs {
-			r.drawChartMarker(ser, xs[i], ys[i], sc2)
+		for i := 0; i < n; i++ {
+			cat := ser.Categories[i]
+			v := ser.Values[cat]
+			if math.IsNaN(v) {
+				flush()
+				continue
+			}
+			runXs = append(runXs, r.scatterX(plot, i, n, cat))
+			runYs = append(runYs, plot.valueY(v))
 		}
+		flush()
 	}
 }
 
-// scatterX maps a scatter point to a pixel X. Numeric category values are
-// plotted on a linear axis; anything else falls back to even spacing.
+// scatterX maps a scatter point to a pixel X. When the axis carries a real
+// scale (log base or explicit bounds) it wins; otherwise numeric categories
+// plot on a linear axis and anything else falls back to even spacing.
 func (r *renderer) scatterX(plot chartPlotArea, i, n int, cat string) int {
+	if plot.scaleX != nil {
+		if v, err := strconv.ParseFloat(cat, 64); err == nil {
+			return plot.x + int(plot.scaleX.ratioClamped(v)*float64(plot.w))
+		}
+	}
 	if v, err := strconv.ParseFloat(cat, 64); err == nil {
 		minX, maxX := math.MaxFloat64, -math.MaxFloat64
 		for _, name := range plot.cats {
@@ -1643,4 +1872,165 @@ func (r *renderer) renderChartLegend(s *ChartShape, x, y, w, h, titleH int, pos 
 			}
 		}
 	}
+}
+
+// --- date axis & dash helpers ---
+
+// chartIsDateFormat reports whether a number format code renders dates
+// (month and/or year tokens like "mmm yyyy"); such axes plot date serials.
+func chartIsDateFormat(format string) bool {
+	f := strings.ToLower(format)
+	return strings.Contains(f, "mmm") || strings.Contains(f, "yy")
+}
+
+// chartFormatDate renders an Excel date serial with a mmm/mmmm/yy/yyyy
+// format code. Serials in chart caches are 1900-epoch even when the part
+// declares <c:date1904/> — deck 00022823 chart1 carries the flag yet its
+// serial 37164 renders as "Sep 2001" in COM, which is the 1900 system.
+func chartFormatDate(serial float64, format string) string {
+	day := time.Date(1899, 12, 30, 0, 0, 0, 0, time.UTC)
+	t := day.AddDate(0, 0, int(math.Round(serial)))
+	f := strings.ReplaceAll(format, "\\", "")
+	var b strings.Builder
+	runes := []rune(f)
+	for i := 0; i < len(runes); i++ {
+		switch c := runes[i]; c {
+		case 'm', 'M':
+			n := 1
+			for i+n < len(runes) && (runes[i+n] == 'm' || runes[i+n] == 'M') {
+				n++
+			}
+			i += n - 1
+			switch n {
+			case 4:
+				b.WriteString(t.Format("January"))
+			case 3:
+				b.WriteString(t.Format("Jan"))
+			case 2:
+				b.WriteString(fmt.Sprintf("%02d", int(t.Month())))
+			default:
+				b.WriteString(strconv.Itoa(int(t.Month())))
+			}
+		case 'y', 'Y':
+			n := 1
+			for i+n < len(runes) && (runes[i+n] == 'y' || runes[i+n] == 'Y') {
+				n++
+			}
+			i += n - 1
+			y := t.Year()
+			if n >= 3 {
+				b.WriteString(strconv.Itoa(y))
+			} else {
+				b.WriteString(fmt.Sprintf("%02d", y%100))
+			}
+		default:
+			b.WriteRune(c)
+		}
+	}
+	return b.String()
+}
+
+// chartSerialToTime / chartTimeToSerial convert between Excel date serials
+// and time.Time over the 1899-12-30 workbook epoch (see chartFormatDate).
+func chartSerialToTime(s float64) time.Time {
+	return time.Date(1899, 12, 30, 0, 0, 0, 0, time.UTC).AddDate(0, 0, int(math.Round(s)))
+}
+
+func chartTimeToSerial(t time.Time) float64 {
+	return t.Sub(time.Date(1899, 12, 30, 0, 0, 0, 0, time.UTC)).Hours() / 24
+}
+
+// chartDashPattern maps an <a:prstDash> preset to on/off run lengths in
+// multiples of the stroke width. nil means solid.
+func chartDashPattern(name string) []float64 {
+	switch name {
+	case "dash":
+		return []float64{4, 3}
+	case "sysDash":
+		return []float64{4, 1}
+	case "dot":
+		return []float64{1, 2}
+	case "sysDot":
+		return []float64{1, 1}
+	case "lgDash":
+		return []float64{8, 4}
+	case "lgDashDot":
+		return []float64{8, 2, 1, 2}
+	case "lgDashDotDot":
+		return []float64{8, 2, 1, 2, 1, 2}
+	case "dashDot":
+		return []float64{6, 2, 1, 2}
+	}
+	return nil
+}
+
+// drawChartLineDashed strokes a polyline, breaking the stroke into the
+// preset's on/off runs (scaled by the line width) along its length.
+func (r *renderer) drawChartLineDashed(xs, ys []int, c color.RGBA, width int, dash string) {
+	pat := chartDashPattern(dash)
+	if pat == nil {
+		for i := 1; i < len(xs); i++ {
+			r.drawLineAA(xs[i-1], ys[i-1], xs[i], ys[i], c, width)
+		}
+		return
+	}
+	w := float64(maxInt(width, 1))
+	runs := make([]float64, len(pat))
+	for i, p := range pat {
+		runs[i] = math.Max(p*w, 1.5)
+	}
+	// Walk the polyline, consuming pattern runs across segment boundaries.
+	on := true
+	consumed := runs[0] // remaining length of the current run
+	rx0, ry0 := float64(xs[0]), float64(ys[0])
+	segStartX, segStartY := rx0, ry0
+	pi := 0
+	for i := 1; i < len(xs); i++ {
+		sx, sy := float64(xs[i]), float64(ys[i])
+		segLen := math.Hypot(sx-rx0, sy-ry0)
+		if segLen <= 0 {
+			continue
+		}
+		pos := 0.0
+		for pos < segLen {
+			run := consumed
+			if pos+run > segLen {
+				run = segLen - pos
+			}
+			ex := rx0 + (sx-rx0)*(pos+run)/segLen
+			ey := ry0 + (sy-ry0)*(pos+run)/segLen
+			if on {
+				r.drawLineAA(int(segStartX), int(segStartY), int(ex), int(ey), c, width)
+			}
+			segStartX, segStartY = ex, ey
+			pos += run
+			consumed -= run
+			if consumed <= 1e-9 {
+				pi = (pi + 1) % len(runs)
+				consumed = runs[pi]
+				on = pi%2 == 0
+			}
+		}
+		rx0, ry0 = sx, sy
+	}
+}
+
+// drawChartRotatedLabel draws text rotated 270 degrees (reading
+// bottom-to-top) with the column centred on cx below the axis - how
+// PowerPoint fits long date labels along a category axis.
+func (r *renderer) drawChartRotatedLabel(text string, face font.Face, c color.RGBA, cx, top int) {
+	if text == "" || face == nil {
+		return
+	}
+	tw := chartTextWidth(face, text)
+	m := face.Metrics()
+	lineH := (m.Ascent + m.Descent).Ceil()
+	h := tw + lineH
+	// The buffer is the destination region transposed: text is drawn
+	// horizontally across its full length, then rotated into the narrow
+	// column.
+	tmp := image.NewRGBA(image.Rect(0, 0, h, lineH))
+	tr := r.subRenderer(tmp)
+	tr.drawChartTextCentered(text, face, c, 0, 0, h, lineH)
+	rotateAndComposite(r.img, tmp, cx-lineH/2, top, lineH, h, 270)
 }

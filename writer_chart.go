@@ -273,7 +273,11 @@ func (w *PPTXWriter) writeAxesXML(chart *ChartShape) string {
 	// drifted in the first place.
 	catAxisXML := fmt.Sprintf(`      <c:catAx>
         <c:axId val="1"/>
-        <c:scaling><c:orientation val="%s"/></c:scaling>
+        <c:scaling>`)
+	if axX.LogBase > 1 {
+		catAxisXML += fmt.Sprintf(`<c:logBase val="%g"/>`, axX.LogBase)
+	}
+	catAxisXML += fmt.Sprintf(`<c:orientation val="%s"/></c:scaling>
         <c:delete val="%s"/>
         <c:axPos val="b"/>
 `, w.axisOrientation(axX), boolToXML(!axX.Visible))
@@ -302,6 +306,13 @@ func (w *PPTXWriter) writeAxesXML(chart *ChartShape) string {
         <c:axId val="2"/>
         <c:scaling>
           <c:orientation val="%s"/>`, w.axisOrientation(axY))
+	if axY.LogBase > 1 {
+		valAxisXML = fmt.Sprintf(`      <c:valAx>
+        <c:axId val="2"/>
+        <c:scaling>
+          <c:logBase val="%g"/>
+          <c:orientation val="%s"/>`, axY.LogBase, w.axisOrientation(axY))
+	}
 
 	// CT_Scaling puts max before min.
 	if axY.MaxBounds != nil {
@@ -392,14 +403,14 @@ func (w *PPTXWriter) writeSeriesSpPrXML(s *ChartSeries, lineSeries bool) string 
 	var b strings.Builder
 	if lineSeries {
 		if lineColor.ARGB != "" {
-			b.WriteString(lineElementXML(lineColor, outlineWidthPt(s)))
+			b.WriteString(lineElementXML(lineColor, outlineWidthPt(s), s.LineDash))
 		}
 	} else {
 		if s.FillColor.ARGB != "" {
 			b.WriteString(fmt.Sprintf(`<a:solidFill><a:srgbClr val="%s"/></a:solidFill>`, colorRGB(s.FillColor)))
 		}
 		if s.Outline != nil && lineColor.ARGB != "" {
-			b.WriteString(lineElementXML(lineColor, outlineWidthPt(s)))
+			b.WriteString(lineElementXML(lineColor, outlineWidthPt(s), s.LineDash))
 		}
 	}
 	if b.Len() == 0 {
@@ -422,13 +433,17 @@ func outlineWidthPt(s *ChartSeries) int {
 // widthPt is in points, matching Border.Width and the reader's v/12700
 // conversion, so it becomes EMU with the same 12700 factor. An unstated width
 // omits the attribute entirely rather than inventing one, leaving PowerPoint to
-// apply its own default.
-func lineElementXML(c Color, widthPt int) string {
+// apply its own default. dash is an <a:prstDash> preset name; empty = solid.
+func lineElementXML(c Color, widthPt int, dash string) string {
 	wAttr := ""
 	if widthPt > 0 {
 		wAttr = fmt.Sprintf(` w="%d"`, widthPt*12700)
 	}
-	return fmt.Sprintf(`<a:ln%s><a:solidFill><a:srgbClr val="%s"/></a:solidFill></a:ln>`, wAttr, colorRGB(c))
+	dashXML := ""
+	if dash != "" && dash != "solid" {
+		dashXML = fmt.Sprintf(`<a:prstDash val="%s"/>`, dash)
+	}
+	return fmt.Sprintf(`<a:ln%s><a:solidFill><a:srgbClr val="%s"/></a:solidFill>%s</a:ln>`, wAttr, colorRGB(c), dashXML)
 }
 
 // writeSeriesXML renders the <c:ser> elements shared by every chart type.

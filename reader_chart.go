@@ -4,6 +4,7 @@ import (
 	"archive/zip"
 	"bytes"
 	"encoding/xml"
+	"math"
 	"strconv"
 	"strings"
 )
@@ -162,6 +163,7 @@ func parseChartXML(data []byte, themeColors map[string]string) *ChartShape {
 		serFill   *Color
 		serLine   *Color
 		serLw     int
+		serDash   string
 		serMark   *SeriesMarker
 		serSmooth bool
 		serDlbls  *chartSeriesLabels
@@ -173,6 +175,7 @@ func parseChartXML(data []byte, themeColors map[string]string) *ChartShape {
 		curGridlines *Gridlines
 		gridColor    *Color
 		gridWidth    int
+		gridNoFill   bool
 
 		chartFillColor *Color
 		chartLineColor *Color
@@ -189,6 +192,9 @@ func parseChartXML(data []byte, themeColors map[string]string) *ChartShape {
 
 		pendColor  *Color
 		pendTarget string
+
+		// Colour-transform accumulation for the colour currently being read.
+		ctTint, ctShade, ctLumMod, ctLumOff float64
 	)
 
 	var (
@@ -229,6 +235,7 @@ func parseChartXML(data []byte, themeColors map[string]string) *ChartShape {
 		serFill = nil
 		serLine = nil
 		serLw = 0
+		serDash = ""
 		serMark = nil
 		serSmooth = false
 		serDlbls = nil
@@ -266,6 +273,11 @@ func parseChartXML(data []byte, themeColors map[string]string) *ChartShape {
 
 		floats := make([]float64, len(catList))
 		for i := range catList {
+			// Blank/missing points stay NaN so the renderer breaks the line
+			// there instead of plotting a fake zero (chart1's "Cost per
+			// Genome" stops at idx 20; COM shows the line ending, not
+			// hugging the axis floor).
+			floats[i] = math.NaN()
 			if i < len(valList) {
 				if f, err := strconv.ParseFloat(strings.TrimSpace(valList[i]), 64); err == nil {
 					floats[i] = f
@@ -295,6 +307,9 @@ func parseChartXML(data []byte, themeColors map[string]string) *ChartShape {
 				outline.Color = *serLine
 			}
 			s.Outline = outline
+		}
+		if serDash != "" {
+			s.LineDash = serDash
 		}
 		if serMark != nil {
 			s.Marker = serMark
@@ -476,8 +491,11 @@ func parseChartXML(data []byte, themeColors map[string]string) *ChartShape {
 					}
 				}
 			case "noFill":
-				if inChartSpPr && !inChartLn {
+				switch {
+				case inChartSpPr && !inChartLn:
 					chartNoFill = true
+				case inGridlines:
+					gridNoFill = true
 				}
 
 			case "srgbClr", "schemeClr", "sysClr", "prstClr":
@@ -486,7 +504,9 @@ func parseChartXML(data []byte, themeColors map[string]string) *ChartShape {
 				}
 				if c, ok := chartColorFromElement(t, themeColors); ok {
 					inColor = true
-					pendColor = &c
+					cc := c
+					pendColor = &cc
+					ctTint, ctShade, ctLumMod, ctLumOff = -1, -1, -1, -1
 					switch {
 					case inDPt && inSeriesSpPr && !inSeriesLn:
 						pendTarget = "dPtFill"
@@ -509,6 +529,25 @@ func parseChartXML(data []byte, themeColors map[string]string) *ChartShape {
 				if inColor && pendColor != nil {
 					if pct, err := strconv.Atoi(val); err == nil {
 						pendColor.ARGB = applyAlphaPercent(pendColor.ARGB, pct)
+					}
+				}
+
+			case "tint", "shade", "lumMod", "lumOff":
+				// Colour transforms inside a chart colour reference —
+				// chart1's "Moore's Law" stroke is bg1 with lumMod 50%,
+				// i.e. mid grey, not the plain white the raw lookup gives.
+				if inColor && pendColor != nil {
+					if f, err := strconv.ParseFloat(val, 64); err == nil {
+						switch name {
+						case "tint":
+							ctTint = f / 100000.0
+						case "shade":
+							ctShade = f / 100000.0
+						case "lumMod":
+							ctLumMod = f / 100000.0
+						case "lumOff":
+							ctLumOff = f / 100000.0
+						}
 					}
 				}
 
@@ -621,11 +660,34 @@ func parseChartXML(data []byte, themeColors map[string]string) *ChartShape {
 					}
 				}
 
-			case "catAx":
+			case "catAx", "dateAx":
+				// A date axis is a category axis whose labels are date
+				// serial numbers; the model treats them the same way.
 				newAxis(false)
 			case "valAx":
 				newAxis(true)
-			case "axId", "axPos":
+			case "axPos":
+				// The axis position decides where the axis is parked: a
+				// value axis along the bottom/top of a scatter chart is
+				// still the X axis.
+				if inAxis && curAxis != nil {
+					curAxis.Position = val
+				}
+			case "logBase":
+				if inAxis && curAxis != nil {
+					if f, err := strconv.ParseFloat(val, 64); err == nil && f > 1 {
+						curAxis.LogBase = f
+					}
+				}
+			case "date1904":
+				chart.date1904 = isXMLTrue(val)
+			case "prstDash":
+				// The dash preset of the series stroke; gridlines and axes
+				// carry their own, which we don't model.
+				if inSeries && inSeriesSpPr && inSeriesLn {
+					serDash = val
+				}
+			case "axId":
 				// Only needed for layout, which is recomputed from the frame.
 			case "orientation":
 				if inAxis && curAxis != nil {
@@ -644,8 +706,10 @@ func parseChartXML(data []byte, themeColors map[string]string) *ChartShape {
 			case "manualLayout":
 				// <c:plotArea><c:layout><c:manualLayout> pins the inner plot
 				// rect as fractions of the chart frame. Legend layouts are
-				// not modelled, so only read it inside the plot area.
-				if inPlotArea && !inLegend {
+				// not modelled, and an axis title's own manualLayout (chart5
+				// pins "Seconds" at x=0.0077) must not overwrite the plot's,
+				// so only read it directly inside the plot area.
+				if inPlotArea && !inLegend && !inAxis && titleTarget == "" {
 					inManualLayout = true
 					if chart.plotArea.layout == nil {
 						chart.plotArea.layout = &chartManualLayout{}
@@ -702,6 +766,7 @@ func parseChartXML(data []byte, themeColors map[string]string) *ChartShape {
 					curGridlines = NewGridlines()
 					gridColor = nil
 					gridWidth = 0
+					gridNoFill = false
 				}
 			case "minorGridlines":
 				if inAxis {
@@ -709,6 +774,7 @@ func parseChartXML(data []byte, themeColors map[string]string) *ChartShape {
 					curGridlines = NewGridlines()
 					gridColor = nil
 					gridWidth = 0
+					gridNoFill = false
 				}
 
 			case "title":
@@ -878,6 +944,7 @@ func parseChartXML(data []byte, themeColors map[string]string) *ChartShape {
 
 			case "srgbClr", "schemeClr", "sysClr", "prstClr":
 				if inColor && pendColor != nil {
+					*pendColor = applyColorTransforms(*pendColor, ctTint, ctShade, ctLumMod, ctLumOff)
 					commitColor(*pendColor)
 				}
 				inColor = false
@@ -926,7 +993,9 @@ func parseChartXML(data []byte, themeColors map[string]string) *ChartShape {
 				if inAxis && curAxis != nil && curGridlines != nil {
 					if gridColor != nil {
 						curGridlines.Color = *gridColor
+						curGridlines.ColorSet = true
 					}
+					curGridlines.NoFill = gridNoFill
 					if gridWidth > 0 {
 						curGridlines.Width = gridWidth
 					}
@@ -934,6 +1003,7 @@ func parseChartXML(data []byte, themeColors map[string]string) *ChartShape {
 				}
 				inGridlines = false
 				curGridlines = nil
+				gridNoFill = false
 
 			case "minorGridlines":
 				if inAxis && curAxis != nil && curGridlines != nil {
@@ -948,15 +1018,24 @@ func parseChartXML(data []byte, themeColors map[string]string) *ChartShape {
 				inGridlines = false
 				curGridlines = nil
 
-			case "catAx", "valAx":
+			case "catAx", "valAx", "dateAx":
 				if curAxis != nil {
 					if title := strings.TrimSpace(axisTitle.String()); title != "" {
 						curAxis.Title = title
 					}
-					if axisIsValue {
-						chart.plotArea.axisY = curAxis
-					} else {
+					switch {
+					case !axisIsValue:
 						chart.plotArea.axisX = curAxis
+					case plotType == "scatter" &&
+						(curAxis.Position == "b" || curAxis.Position == "t"):
+						// Two value axes meet only in scatter/bubble
+						// charts; there the one along the horizontal edge
+						// is the X axis. A horizontal bar chart's value
+						// axis also sits at "b" but must stay axisY — the
+						// renderer flips the bar geometry itself.
+						chart.plotArea.axisX = curAxis
+					default:
+						chart.plotArea.axisY = curAxis
 					}
 				}
 				curAxis = nil

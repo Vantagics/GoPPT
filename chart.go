@@ -10,6 +10,10 @@ type ChartShape struct {
 	legend         *ChartLegend
 	view3D         *View3D
 	displayBlankAs string
+	// date1904 records <c:date1904 val="1"/>: the workbook this chart was
+	// authored in stores date serial numbers against the 1904 epoch instead
+	// of the 1900 one, which shifts every serial-formatted category label.
+	date1904 bool
 }
 
 // Chart display blank constants.
@@ -133,6 +137,12 @@ type ChartAxis struct {
 	TickLabelPos   string
 	OutlineWidth   int
 	OutlineColor   Color
+	// LogBase is the logarithm base of the axis scale (<c:logBase>, e.g. 2
+	// or 10). Zero means a linear axis.
+	LogBase float64
+	// Position is the axis position from <c:axPos>: "b", "l", "r" or "t".
+	// A value axis on the bottom/top of a scatter chart is the X axis.
+	Position string
 	// NumberFormat is the axis tick label format code (<c:numFmt
 	// formatCode>), e.g. "#,##0". Empty or "General" renders plain numbers.
 	NumberFormat string
@@ -272,6 +282,12 @@ func (a *ChartAxis) SetTickLabelPosition(v string) *ChartAxis {
 type Gridlines struct {
 	Width int
 	Color Color
+	// NoFill records <a:noFill/> on the gridline stroke: declared but
+	// intentionally invisible.
+	NoFill bool
+	// ColorSet reports whether the document declared a stroke colour at
+	// all; unset gridlines render in PowerPoint's default light grey.
+	ColorSet bool
 }
 
 // NewGridlines creates new gridlines.
@@ -359,7 +375,10 @@ type ChartSeries struct {
 	LabelPosition    string
 	Font             *Font
 	Outline          *SeriesOutline
-	Marker           *SeriesMarker
+	// LineDash is the stroke dash preset from <a:prstDash> on the series
+	// line: "dash", "sysDash", "dot", ... Empty means a solid stroke.
+	LineDash string
+	Marker   *SeriesMarker
 }
 
 // Series label position constants.
