@@ -974,6 +974,17 @@ func (r *PPTXReader) parseSlideXML(decoder *xml.Decoder, slide *Slide, rels []xm
 				if state.inGraphicFrame {
 					state.inTbl = true
 					currentTable = NewTableShape(0, 0)
+					// NewTableShape defaults firstRow/bandRow on for
+					// API-created tables; a file that omits a flag means
+					// false (xsd:boolean has no default). slide21's six
+					// bandRow-only tables must not pick up the first-row
+					// dark header.
+					currentTable.firstRow = false
+					currentTable.lastRow = false
+					currentTable.firstCol = false
+					currentTable.lastCol = false
+					currentTable.bandRow = false
+					currentTable.bandCol = false
 					currentTable.rows = nil
 					currentTableRow = -1
 				}
@@ -1748,6 +1759,13 @@ func (r *PPTXReader) parseSlideXML(decoder *xml.Decoder, slide *Slide, rels []xm
 						cell.fill = NewFill()
 						cell.fill.Type = FillNone
 					}
+				}
+				// <a:noFill/> inside <a:ln> turns the outline off outright —
+				// record a BorderNone pending border so the <p:style> lnRef
+				// fallback at sp-end stays out of the way (a themed band with
+				// ln noFill must not grow the lnRef's 2pt accent line).
+				if state.inLn && !state.inTcPr {
+					pendingBorder = &Border{Style: BorderNone}
 				}
 				// <a:noFill/> inside lnL/lnR/lnT/lnB means no border on that side
 				if state.inTcPr && state.inTcPrLn {
