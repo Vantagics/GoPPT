@@ -3786,6 +3786,25 @@ func (r *renderer) drawLineAA(x1, y1, x2, y2 int, c color.RGBA, width int) {
 	nx := -dy / length
 	ny := dx / length
 	hw := float64(width) / 2.0
+	if width >= 6 {
+		// Wide strokes fill as a solid quad with anti-aliased long edges.
+		// The parallel-Wu passes below composite per-pass, and on diagonals
+		// the passes leave gaps that read as hatching — slide23's 6pt
+		// connector arrows rendered as stripes where PowerPoint drew solid
+		// blue. (Below ~5px the pass overlap hides it; ink strokes at
+		// 2.25pt stay on the legacy path.)
+		hwf := hw
+		quad := []fpoint{
+			{float64(x1) + nx*hwf, float64(y1) + ny*hwf},
+			{float64(x2) + nx*hwf, float64(y2) + ny*hwf},
+			{float64(x2) - nx*hwf, float64(y2) - ny*hwf},
+			{float64(x1) - nx*hwf, float64(y1) - ny*hwf},
+		}
+		r.fillPolygon(quad, c)
+		r.drawLineWu(float64(x1)+nx*hwf, float64(y1)+ny*hwf, float64(x2)+nx*hwf, float64(y2)+ny*hwf, c)
+		r.drawLineWu(float64(x1)-nx*hwf, float64(y1)-ny*hwf, float64(x2)-nx*hwf, float64(y2)-ny*hwf, c)
+		return
+	}
 	for i := 0; i < width; i++ {
 		offset := -hw + float64(i) + 0.5
 		ox := offset * nx
@@ -5823,7 +5842,13 @@ func (r *renderer) buildParaTextRuns(elements []ParagraphElement) []textRun {
 				runs = append(runs, tr)
 			}
 		case *BreakElement:
-			runs = append(runs, textRun{text: "\n"})
+			tr := textRun{text: "\n"}
+			if e.rprSize > 0 {
+				f := NewFont()
+				f.Size = e.rprSize / 100
+				tr.font = f
+			}
+			runs = append(runs, tr)
 		}
 	}
 	return runs
@@ -7410,6 +7435,30 @@ func measureStringWithKern(face font.Face, s string) fixed.Int26_6 {
 }
 
 // wrapRunLine wraps text runs into multiple lines that fit within maxWidth.
+// blankBreakLineHeight returns the advance PowerPoint gives a blank line —
+// one formed by an <a:br> with no runs before it. The break's own <a:rPr>
+// sz drives it at the usual 1.2 × size (COM slide19 variants: sz=6000 on
+// the br grew the blank by exactly the 1.2 × 60pt line, and deleting the br
+// removed it; the empty run before it was irrelevant). When the break
+// declares no size the next run in the paragraph speaks for it — an unsized
+// br inherits the paragraph default, which is the size its runs resolve to.
+func (r *renderer) blankBreakLineHeight(brRun textRun, rest []textRun) int {
+	f := brRun.font
+	if f == nil || f.Size <= 0 {
+		for _, nxt := range rest {
+			if nxt.text == "\n" || nxt.font == nil || nxt.font.Size <= 0 {
+				continue
+			}
+			f = nxt.font
+			break
+		}
+	}
+	if f == nil || f.Size <= 0 {
+		return 0
+	}
+	return int(1.2*r.fontSizePixels(f) + 0.5)
+}
+
 func (r *renderer) wrapRunLine(runs []textRun, maxWidth int) []textLine {
 	if len(runs) == 0 {
 		return nil
@@ -7431,9 +7480,19 @@ func (r *renderer) wrapRunLine(runs []textRun, maxWidth int) []textLine {
 	var currentRuns []textRun
 	var currentWidth fixed.Int26_6 // fixed-point accumulation avoids Ceil rounding buildup
 
-	for _, run := range runs {
+	for i, run := range runs {
 		if run.text == "\n" {
-			lines = append(lines, r.buildTextLine(currentRuns))
+			bl := r.buildTextLine(currentRuns)
+			if len(currentRuns) == 0 {
+				// A break with nothing before it is a blank line: it takes
+				// the break font's 1.2 × size, not the 14px floor
+				// buildTextLine gave it (slide19's leading <a:br/> holds the
+				// paragraph one full 32pt line down).
+				if h := r.blankBreakLineHeight(run, runs[i+1:]); h > 0 {
+					bl.lineHeight = h
+				}
+			}
+			lines = append(lines, bl)
 			currentRuns = nil
 			currentWidth = 0
 			continue
@@ -7590,9 +7649,15 @@ func (r *renderer) wrapRunLineWithIndent(runs []textRun, firstLineWidth, contLin
 	var currentRuns []textRun
 	var currentWidth fixed.Int26_6
 
-	for _, run := range runs {
+	for i, run := range runs {
 		if run.text == "\n" {
-			lines = append(lines, r.buildTextLine(currentRuns))
+			bl := r.buildTextLine(currentRuns)
+			if len(currentRuns) == 0 {
+				if h := r.blankBreakLineHeight(run, runs[i+1:]); h > 0 {
+					bl.lineHeight = h
+				}
+			}
+			lines = append(lines, bl)
 			currentRuns = nil
 			currentWidth = 0
 			lineIdx++

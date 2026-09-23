@@ -568,6 +568,9 @@ func (r *PPTXReader) parseSlideXML(decoder *xml.Decoder, slide *Slide, rels []xm
 		inTxBody        bool
 		inParagraph     bool
 		inRun           bool
+		inBr            bool          // inside <a:br> — its rPr sizes the blank line
+		brSize          int           // the <a:br>'s own rPr sz, hundredths of a point
+		curBreak        *BreakElement // the break currently open
 		inFld           bool
 		inRunProps      bool
 		inText          bool
@@ -1653,7 +1656,17 @@ func (r *PPTXReader) parseSlideXML(decoder *xml.Decoder, slide *Slide, rels []xm
 					}
 				}
 			case "rPr":
-				if state.inRun || state.inTcRun {
+				if state.inBr {
+					// The <a:rPr> inside a <a:br> sizes the blank line the
+					// break produces — it is not a text run's font.
+					for _, attr := range t.Attr {
+						if attr.Name.Local == "sz" {
+							if v, err := strconv.Atoi(attr.Value); err == nil {
+								state.brSize = v
+							}
+						}
+					}
+				} else if state.inRun || state.inTcRun {
 					state.inRunProps = true
 					for _, attr := range t.Attr {
 						switch attr.Name.Local {
@@ -2602,7 +2615,9 @@ func (r *PPTXReader) parseSlideXML(decoder *xml.Decoder, slide *Slide, rels []xm
 				// never read at all: the cell branch sets inTcParagraph, and
 				// inParagraph is only set for a shape's own text body.
 				if (state.inParagraph || state.inTcParagraph) && currentParagraph != nil {
-					currentParagraph.CreateBreak()
+					state.curBreak = currentParagraph.CreateBreak()
+					state.inBr = true
+					state.brSize = 0
 				}
 			case "xfrm":
 				flipH = false
@@ -3773,6 +3788,13 @@ func (r *PPTXReader) parseSlideXML(decoder *xml.Decoder, slide *Slide, rels []xm
 					state.inRun = false
 				}
 				currentFont = nil
+			case "br":
+				if state.curBreak != nil {
+					state.curBreak.rprSize = state.brSize
+				}
+				state.inBr = false
+				state.curBreak = nil
+				state.brSize = 0
 			case "fld":
 				state.inFld = false
 				state.inRun = false

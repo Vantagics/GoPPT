@@ -519,7 +519,20 @@ func (tr *TextRun) GetHyperlink() *Hyperlink { return tr.hyperlink }
 func (tr *TextRun) SetHyperlink(h *Hyperlink) { tr.hyperlink = h }
 
 // BreakElement represents a line break.
-type BreakElement struct{}
+type BreakElement struct {
+	// rprSize is the <a:rPr sz> declared on the <a:br> itself, in hundredths
+	// of a point (0 = not declared). A break with no runs before it forms a
+	// blank line whose advance PowerPoint sizes from this font — the same
+	// 1.2 × size rule an empty paragraph follows (COM slide19 variants: a
+	// br at sz=6000 grew the blank by exactly the 1.2 × 60pt line).
+	rprSize int
+}
+
+// GetRPrSize returns the sz the break's own <a:rPr> declared (0 = inherit).
+func (br *BreakElement) GetRPrSize() int { return br.rprSize }
+
+// SetRPrSize records the break's own font size in hundredths of a point.
+func (br *BreakElement) SetRPrSize(sz int) { br.rprSize = sz }
 
 func (br *BreakElement) GetElementType() string { return "break" }
 
