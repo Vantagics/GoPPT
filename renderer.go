@@ -7249,6 +7249,15 @@ func getSeriesColor(s *ChartSeries, idx int, palette []color.RGBA) color.RGBA {
 	return palette[idx%len(palette)]
 }
 
+// seriesPointColor resolves a bar's colour: a <c:dPt> override for that
+// category index wins, then the series fill, then the palette.
+func seriesPointColor(ser *ChartSeries, si, ci int, palette []color.RGBA) color.RGBA {
+	if c, ok := ser.PointColors[ci]; ok && c.ARGB != "" && c.ARGB != "00000000" {
+		return argbToRGBA(c)
+	}
+	return getSeriesColor(ser, si, palette)
+}
+
 // --- Image scaling ---
 
 // applyLumAdjust applies a picture's <a:lum bright contrast> to already-scaled

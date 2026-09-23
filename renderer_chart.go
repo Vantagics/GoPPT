@@ -76,6 +76,14 @@ type chartPlotArea struct {
 	scale          chartScale
 	cats           []string
 	categoriesOnY  bool // true for horizontal bar charts
+	// flipCats mirrors a horizontal bar chart's rows: OOXML draws the first
+	// category at the bottom (deck 00022823 slide23: "Fairplay" idx3 top,
+	// "Our Results" idx0 bottom), the opposite of the label order in the file.
+	flipCats bool
+	// catLabelGap is the space between the category labels' right edge and
+	// the plot: the legacy 5px inset, or one label line height when a
+	// manualLayout pins the plot (measured 50-54px on 24pt labels).
+	catLabelGap int
 }
 
 func (p chartPlotArea) valueY(v float64) int {
@@ -201,6 +209,68 @@ func chartFormatNumber(v float64) string {
 		return strconv.FormatInt(int64(v), 10)
 	}
 	return strconv.FormatFloat(v, 'g', 8, 64)
+}
+
+// chartFormatNumberWith renders a value with an Excel-style format code.
+// Only the codes PowerPoint actually puts on value axes are honoured —
+// "#,##0" (thousands groups + optional decimals) and trailing "%" — anything
+// else (dates, fractions, accounting) falls back to the plain rendering
+// rather than guessing wrong.
+func chartFormatNumberWith(v float64, format string) string {
+	format = strings.TrimSpace(format)
+	if format == "" || format == "General" {
+		return chartFormatNumber(v)
+	}
+	pct := strings.Contains(format, "%")
+	grouped := strings.Contains(format, "#,##0")
+	if !grouped && !pct {
+		return chartFormatNumber(v)
+	}
+	av := math.Abs(v)
+	if pct {
+		av *= 100
+	}
+	dec := 0
+	if i := strings.IndexByte(format, '.'); i >= 0 {
+		for _, c := range format[i+1:] {
+			if c == '0' || c == '#' {
+				dec++
+				continue
+			}
+			break
+		}
+	}
+	s := strconv.FormatFloat(av, 'f', dec, 64)
+	if grouped {
+		intPart, frac := s, ""
+		if i := strings.IndexByte(s, '.'); i >= 0 {
+			intPart, frac = s[:i], s[i:]
+		}
+		n := len(intPart)
+		b := make([]byte, 0, n+n/3)
+		for i := 0; i < n; i++ {
+			if i > 0 && (n-i)%3 == 0 {
+				b = append(b, ',')
+			}
+			b = append(b, intPart[i])
+		}
+		s = string(b) + frac
+	}
+	if pct {
+		s += "%"
+	}
+	if v < 0 || (v == 0 && math.Signbit(v)) {
+		s = "-" + s
+	}
+	return s
+}
+
+// axisNumFormat returns the tick-label format of an axis ("" when absent).
+func axisNumFormat(ax *ChartAxis) string {
+	if ax == nil {
+		return ""
+	}
+	return ax.NumberFormat
 }
 
 // --- font / text helpers ---
@@ -380,6 +450,16 @@ func (r *renderer) renderChart(s *ChartShape) {
 		innerH -= legendH
 	}
 
+	// <c:manualLayout> pins the inner plot rect as fractions of the chart
+	// frame. Measured against COM exports the placement is exact (deck
+	// 00022823 slide22: layout right edge 1449.5 vs measured 1449), so it is
+	// applied after the title/legend strips, on frame-relative coordinates.
+	if L := s.plotArea.layout; L != nil && L.w > 0 && L.h > 0 {
+		nx, ny := x+int(L.x*float64(w)), y+int(L.y*float64(h))
+		nx2, ny2 := x+int((L.x+L.w)*float64(w)), y+int((L.y+L.h)*float64(h))
+		innerX, innerY, innerW, innerH = nx, ny, nx2-nx, ny2-ny
+	}
+
 	if innerW < 8 || innerH < 8 {
 		return
 	}
@@ -421,6 +501,36 @@ func (r *renderer) chartPlotAreaFor(s *ChartShape, px, py, pw, ph int, sc chartS
 	valueFace := r.chartFace(axisFont(axV), "")
 	catFace := r.chartFaceForCats(axisFont(axX), cats)
 
+	// With a manualLayout the rect handed in IS the plot rect: the category
+	// labels live outside it (right-aligned, one line height away), and only
+	// when they cannot fit does the plot shove right — PowerPoint measured
+	// behaviour on deck 00022823 slides 22/23.
+	if s.plotArea.layout != nil {
+		base := chartPlotArea{
+			ox: px, oy: py, ow: pw, oh: ph,
+			scale: sc, cats: cats, categoriesOnY: categoriesOnY,
+			catLabelGap: r.chartLineHeight(catFace),
+		}
+		base.x, base.y, base.w, base.h = px, py, pw, ph
+		if categoriesOnY {
+			gap := base.catLabelGap
+			lw := chartMaxLabelWidth(catFace, cats, 0)
+			frameX := r.emuToPixelX(s.offsetX)
+			if px-gap-lw < frameX {
+				// Labels don't fit between the frame edge and the pinned
+				// plot — slide23 does exactly this (labels end 275, pinned
+				// plot starts 165, PowerPoint moves the plot to 329).
+				shift := frameX + lw + gap - px
+				base.x = px + shift
+				base.w = pw - shift
+			}
+		}
+		if base.w < 4 || base.h < 4 {
+			base.x, base.y, base.w, base.h = px, py, pw, ph
+		}
+		return base
+	}
+
 	left, top, right, bottom := 3, 2, 4, 2
 	if axV == nil || axV.Visible {
 		if categoriesOnY {
@@ -428,7 +538,7 @@ func (r *renderer) chartPlotAreaFor(s *ChartShape, px, py, pw, ph int, sc chartS
 		} else {
 			lw := 0
 			for _, t := range sc.ticks() {
-				if tw := chartTextWidth(valueFace, chartFormatNumber(t)); tw > lw {
+				if tw := chartTextWidth(valueFace, chartFormatNumberWith(t, axisNumFormat(axV))); tw > lw {
 					lw = tw
 				}
 			}
@@ -464,6 +574,7 @@ func (r *renderer) chartPlotAreaFor(s *ChartShape, px, py, pw, ph int, sc chartS
 	base := chartPlotArea{
 		ox: px, oy: py, ow: pw, oh: ph,
 		scale: sc, cats: cats, categoriesOnY: categoriesOnY,
+		catLabelGap: 5,
 	}
 	if dataW < 4 || dataH < 4 {
 		// Not enough room for labels — draw the series in the full area.
@@ -488,20 +599,22 @@ func (r *renderer) drawChartAxes(s *ChartShape, p chartPlotArea) {
 	axV := s.plotArea.GetAxisY()
 	axX := s.plotArea.GetAxisX()
 
-	// Major gridlines. PowerPoint shows them by default on the value axis.
-	gridColor := color.RGBA{R: 217, G: 217, B: 217, A: 255}
-	gridW := 1
+	// Major gridlines. Drawn only when the chart declares them: charts 3/4
+	// of deck 00022823 carry no <c:majorGridlines> and the COM exports show
+	// none, while every chart that does declare them keeps its grid.
 	if axV != nil && axV.MajorGridlines != nil {
+		gridColor := color.RGBA{R: 217, G: 217, B: 217, A: 255}
+		gridW := 1
 		gridColor = argbToRGBA(axV.MajorGridlines.Color)
 		gridW = maxInt(axV.MajorGridlines.Width, 1)
-	}
-	for _, t := range p.scale.ticks() {
-		if p.categoriesOnY {
-			gx := p.valueX(t)
-			r.drawLineAA(gx, p.y, gx, p.y+p.h, gridColor, gridW)
-		} else {
-			gy := p.valueY(t)
-			r.drawLineAA(p.x, gy, p.x+p.w, gy, gridColor, gridW)
+		for _, t := range p.scale.ticks() {
+			if p.categoriesOnY {
+				gx := p.valueX(t)
+				r.drawLineAA(gx, p.y, gx, p.y+p.h, gridColor, gridW)
+			} else {
+				gy := p.valueY(t)
+				r.drawLineAA(p.x, gy, p.x+p.w, gy, gridColor, gridW)
+			}
 		}
 	}
 
@@ -520,7 +633,7 @@ func (r *renderer) drawChartAxes(s *ChartShape, p chartPlotArea) {
 		ascent := face.Metrics().Ascent.Ceil()
 		descent := face.Metrics().Descent.Ceil()
 		for _, t := range p.scale.ticks() {
-			label := chartFormatNumber(t)
+			label := chartFormatNumberWith(t, axisNumFormat(axV))
 			if p.categoriesOnY {
 				tw := chartTextWidth(face, label)
 				r.drawChartText(label, face, fc, p.valueX(t)-tw/2, p.y+p.h+2+ascent)
@@ -538,12 +651,20 @@ func (r *renderer) drawChartAxes(s *ChartShape, p chartPlotArea) {
 		fc := chartFontColor(axisFont(axX))
 		ascent := face.Metrics().Ascent.Ceil()
 		descent := face.Metrics().Descent.Ceil()
+		gap := p.catLabelGap
+		if gap <= 0 {
+			gap = 5
+		}
 		if p.categoriesOnY {
 			rowH := float64(p.h) / float64(len(p.cats))
 			for i, cat := range p.cats {
-				cy := p.y + int((float64(i)+0.5)*rowH)
+				row := i
+				if p.flipCats {
+					row = len(p.cats) - 1 - i
+				}
+				cy := p.y + int((float64(row)+0.5)*rowH)
 				tw := chartTextWidth(face, cat)
-				r.drawChartText(cat, face, fc, p.x-5-tw, cy+(ascent+descent)/2-descent)
+				r.drawChartText(cat, face, fc, p.x-gap-tw, cy+(ascent+descent)/2-descent)
 			}
 		} else {
 			catW := float64(p.w) / float64(len(p.cats))
@@ -650,8 +771,14 @@ func (r *renderer) renderBarChart(c *BarChart, s *ChartShape, px, py, pw, ph int
 	if percent {
 		minV, maxV = 0, 100
 	}
+	axCat := s.plotArea.GetAxisX()
 	sc := chartComputeScale(minV, maxV, s.plotArea.GetAxisY(), !percent)
 	plot := r.chartPlotAreaFor(s, px, py, pw, ph, sc, cats, horizontal)
+	// Horizontal bar charts draw the first category at the bottom (OOXML
+	// semantics; maxMin orientation restores file order).
+	if horizontal {
+		plot.flipCats = axCat == nil || !axCat.ReversedOrder
+	}
 	r.drawChartAxes(s, plot)
 
 	gapPct := c.GapWidthPercent
@@ -671,7 +798,11 @@ func (r *renderer) renderBarChart(c *BarChart, s *ChartShape, px, py, pw, ph int
 			clusterH = 1
 		}
 		for ci, cat := range cats {
-			rowY := float64(plot.y) + float64(ci)*rowH + (rowH-clusterH)/2
+			row := ci
+			if plot.flipCats {
+				row = nCats - 1 - ci
+			}
+			rowY := float64(plot.y) + float64(row)*rowH + (rowH-clusterH)/2
 			if stacked {
 				acc := 0.0
 				for si, ser := range c.Series {
@@ -682,7 +813,7 @@ func (r *renderer) renderBarChart(c *BarChart, s *ChartShape, px, py, pw, ph int
 					x0 := plot.valueX(acc)
 					x1 := plot.valueX(acc + v)
 					r.fillHBar(int(rowY), int(clusterH), x0, x1,
-						getSeriesColor(ser, si, palette))
+						seriesPointColor(ser, si, ci, palette))
 					acc += v
 				}
 			} else {
@@ -703,7 +834,7 @@ func (r *renderer) renderBarChart(c *BarChart, s *ChartShape, px, py, pw, ph int
 					x0 := plot.valueX(0)
 					x1 := plot.valueX(v)
 					r.fillHBar(y0, bh, x0, x1,
-						getSeriesColor(ser, si, palette))
+						seriesPointColor(ser, si, ci, palette))
 				}
 			}
 		}
@@ -725,7 +856,7 @@ func (r *renderer) renderBarChart(c *BarChart, s *ChartShape, px, py, pw, ph int
 					y0 := plot.valueY(acc)
 					y1 := plot.valueY(acc + v)
 					r.fillVBar(int(groupX), int(clusterW), y0, y1,
-						getSeriesColor(ser, si, palette))
+						seriesPointColor(ser, si, ci, palette))
 					acc += v
 				}
 			} else {
@@ -746,7 +877,7 @@ func (r *renderer) renderBarChart(c *BarChart, s *ChartShape, px, py, pw, ph int
 					y0 := plot.valueY(0)
 					y1 := plot.valueY(v)
 					r.fillVBar(bx, bw, y0, y1,
-						getSeriesColor(ser, si, palette))
+						seriesPointColor(ser, si, ci, palette))
 				}
 			}
 		}

@@ -287,6 +287,9 @@ func (w *PPTXWriter) writeAxesXML(chart *ChartShape) string {
 	if axX.Title != "" {
 		catAxisXML += chartTitleXML(axX.Title, axX.Font)
 	}
+	if axX.NumberFormat != "" && axX.NumberFormat != "General" {
+		catAxisXML += fmt.Sprintf("        <c:numFmt formatCode=%q sourceLinked=\"0\"/>\n", axX.NumberFormat)
+	}
 	catAxisXML += chartTickMarksXML("        ", axX.MajorTickMark, axX.MinorTickMark)
 	catAxisXML += fmt.Sprintf("        <c:tickLblPos val=\"%s\"/>\n", axX.TickLabelPos)
 	catAxisXML += chartTxPrXML("        ", axX.Font)
@@ -324,6 +327,9 @@ func (w *PPTXWriter) writeAxesXML(chart *ChartShape) string {
 	}
 	if axY.Title != "" {
 		valAxisXML += chartTitleXML(axY.Title, axY.Font)
+	}
+	if axY.NumberFormat != "" && axY.NumberFormat != "General" {
+		valAxisXML += fmt.Sprintf("        <c:numFmt formatCode=%q sourceLinked=\"0\"/>\n", axY.NumberFormat)
 	}
 	valAxisXML += chartTickMarksXML("        ", axY.MajorTickMark, axY.MinorTickMark)
 	valAxisXML += fmt.Sprintf("        <c:tickLblPos val=\"%s\"/>\n", axY.TickLabelPos)
@@ -442,6 +448,21 @@ func (w *PPTXWriter) writeSeriesXML(series []*ChartSeries, categories []string, 
           <c:order val="%d"/>
           <c:tx><c:strRef><c:f>Sheet1!$B$1</c:f><c:strCache><c:ptCount val="1"/><c:pt idx="0"><c:v>%s</c:v></c:pt></c:strCache></c:strRef></c:tx>
 %s`, idx, idx, xmlEscape(s.Title), spPrXML))
+
+		// Per-point overrides. CT_BarSer/CT_PieSer put the <c:dPt> run after
+		// <c:spPr> and before <c:dLbls>; each carries the point's fill.
+		for i := 0; i < len(categories); i++ {
+			c, ok := s.PointColors[i]
+			if !ok || c.ARGB == "" || c.ARGB == "00000000" {
+				continue
+			}
+			sb.WriteString(fmt.Sprintf(`          <c:dPt>
+            <c:idx val="%d"/>
+            <c:bubble3D val="0"/>
+            <c:spPr><a:solidFill><a:srgbClr val="%s"/></a:solidFill></c:spPr>
+          </c:dPt>
+`, i, colorRGB(c)))
+		}
 
 		// Data labels. CT_DLbls orders <c:txPr> before <c:dLblPos> and the show
 		// flags, and <c:separator> last. The label font goes in the txPr, which

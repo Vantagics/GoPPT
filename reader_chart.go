@@ -124,26 +124,27 @@ func parseChartXML(data []byte, themeColors map[string]string) *ChartShape {
 	dec.Strict = false
 
 	var (
-		inPlotArea   bool
-		inSeries     bool
-		inSeriesSpPr bool
-		inSeriesLn   bool
-		inChartSpPr  bool
-		inChartLn    bool
-		chartNoFill  bool
-		inMarker     bool
-		inDLbls      bool
-		inGridlines  bool
-		inAxis       bool
-		axisIsValue  bool
-		inColor      bool
-		inV          bool
-		inT          bool
-		inSeparator  bool
-		inLegend     bool
-		titleTarget  string // "", "chart" or "axis"
-		txPrTarget   string // "", "axis", "legend" or "series"
-		valueCtx     string // "", "serTitle", "cat", "val", "xval", "yval"
+		inPlotArea     bool
+		inSeries       bool
+		inSeriesSpPr   bool
+		inSeriesLn     bool
+		inChartSpPr    bool
+		inChartLn      bool
+		chartNoFill    bool
+		inMarker       bool
+		inDLbls        bool
+		inGridlines    bool
+		inAxis         bool
+		axisIsValue    bool
+		inColor        bool
+		inV            bool
+		inT            bool
+		inSeparator    bool
+		inLegend       bool
+		inManualLayout bool
+		titleTarget    string // "", "chart" or "axis"
+		txPrTarget     string // "", "axis", "legend" or "series"
+		valueCtx       string // "", "serTitle", "cat", "val", "xval", "yval"
 
 		plotType    string
 		barDir      string
@@ -164,6 +165,9 @@ func parseChartXML(data []byte, themeColors map[string]string) *ChartShape {
 		serMark   *SeriesMarker
 		serSmooth bool
 		serDlbls  *chartSeriesLabels
+		inDPt     bool
+		dPtIdx    int
+		dPtFill   map[int]Color
 
 		curAxis      *ChartAxis
 		curGridlines *Gridlines
@@ -229,6 +233,8 @@ func parseChartXML(data []byte, themeColors map[string]string) *ChartShape {
 		serSmooth = false
 		serDlbls = nil
 		serFont = nil
+		inDPt = false
+		dPtFill = nil
 	}
 
 	finishSeries := func() {
@@ -280,6 +286,9 @@ func parseChartXML(data []byte, themeColors map[string]string) *ChartShape {
 			// Line/scatter series encode their colour on the outline.
 			s.FillColor = *serLine
 		}
+		if dPtFill != nil {
+			s.PointColors = dPtFill
+		}
 		if serLine != nil || serLw > 0 {
 			outline := &SeriesOutline{Width: serLw}
 			if serLine != nil {
@@ -324,6 +333,11 @@ func parseChartXML(data []byte, themeColors map[string]string) *ChartShape {
 		case "serFill":
 			cc := c
 			serFill = &cc
+		case "dPtFill":
+			if dPtFill == nil {
+				dPtFill = make(map[int]Color)
+			}
+			dPtFill[dPtIdx] = c
 		case "serLine":
 			cc := c
 			serLine = &cc
@@ -474,6 +488,8 @@ func parseChartXML(data []byte, themeColors map[string]string) *ChartShape {
 					inColor = true
 					pendColor = &c
 					switch {
+					case inDPt && inSeriesSpPr && !inSeriesLn:
+						pendTarget = "dPtFill"
 					case inSeriesSpPr && inSeriesLn:
 						pendTarget = "serLine"
 					case inSeriesSpPr:
@@ -493,6 +509,21 @@ func parseChartXML(data []byte, themeColors map[string]string) *ChartShape {
 				if inColor && pendColor != nil {
 					if pct, err := strconv.Atoi(val); err == nil {
 						pendColor.ARGB = applyAlphaPercent(pendColor.ARGB, pct)
+					}
+				}
+
+			case "dPt":
+				// Per-data-point override (a highlighted bar in a series).
+				// Its <c:spPr> must not be mistaken for the series fill: it
+				// comes after the series <c:spPr> and used to overwrite it,
+				// painting every bar the highlight colour.
+				if inSeries {
+					inDPt = true
+					dPtIdx = 0
+					if v := attrValue(t, "idx"); v != "" {
+						if n, err := strconv.Atoi(v); err == nil {
+							dPtIdx = n
+						}
 					}
 				}
 
@@ -573,6 +604,23 @@ func parseChartXML(data []byte, themeColors map[string]string) *ChartShape {
 					}
 				}
 
+			case "x", "y", "w", "h":
+				// manualLayout fractions (exponent notation included).
+				if inManualLayout && chart.plotArea.layout != nil {
+					if f, err := strconv.ParseFloat(val, 64); err == nil {
+						switch name {
+						case "x":
+							chart.plotArea.layout.x = f
+						case "y":
+							chart.plotArea.layout.y = f
+						case "w":
+							chart.plotArea.layout.w = f
+						case "h":
+							chart.plotArea.layout.h = f
+						}
+					}
+				}
+
 			case "catAx":
 				newAxis(false)
 			case "valAx":
@@ -582,6 +630,26 @@ func parseChartXML(data []byte, themeColors map[string]string) *ChartShape {
 			case "orientation":
 				if inAxis && curAxis != nil {
 					curAxis.ReversedOrder = val == "maxMin"
+				}
+			case "numFmt":
+				// Axis tick label format ("#,##0", "0.0%", "General", ...).
+				// Data-point caches carry their own numFmt; only the axis
+				// one drives the tick labels the renderer draws. "General"
+				// stays empty so the model keeps a single "unformatted" state.
+				if inAxis && curAxis != nil {
+					if fc := attrValue(t, "formatCode"); fc != "" && fc != "General" {
+						curAxis.NumberFormat = fc
+					}
+				}
+			case "manualLayout":
+				// <c:plotArea><c:layout><c:manualLayout> pins the inner plot
+				// rect as fractions of the chart frame. Legend layouts are
+				// not modelled, so only read it inside the plot area.
+				if inPlotArea && !inLegend {
+					inManualLayout = true
+					if chart.plotArea.layout == nil {
+						chart.plotArea.layout = &chartManualLayout{}
+					}
 				}
 			case "delete":
 				if inAxis && curAxis != nil {
@@ -842,6 +910,8 @@ func parseChartXML(data []byte, themeColors map[string]string) *ChartShape {
 
 			case "marker":
 				inMarker = false
+			case "dPt":
+				inDPt = false
 			case "dLbls":
 				inDLbls = false
 			case "separator":
@@ -929,6 +999,9 @@ func parseChartXML(data []byte, themeColors map[string]string) *ChartShape {
 
 			case "legend":
 				inLegend = false
+
+			case "manualLayout":
+				inManualLayout = false
 
 			case "t":
 				if inT {

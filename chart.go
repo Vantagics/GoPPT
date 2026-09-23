@@ -82,6 +82,16 @@ type PlotArea struct {
 	chartType ChartType
 	axisX     *ChartAxis
 	axisY     *ChartAxis
+	// layout is the <c:manualLayout> inner-plot rect, as fractions of the
+	// chart frame. PowerPoint pins the plot to it exactly (measured on COM
+	// exports: slide22 of deck 00022823 lands within 1px); only when the
+	// category tick labels no longer fit does it shove the plot aside.
+	layout *chartManualLayout
+}
+
+// chartManualLayout holds the four <c:manualLayout> fractions.
+type chartManualLayout struct {
+	x, y, w, h float64
 }
 
 // NewPlotArea creates a new plot area.
@@ -123,6 +133,9 @@ type ChartAxis struct {
 	TickLabelPos   string
 	OutlineWidth   int
 	OutlineColor   Color
+	// NumberFormat is the axis tick label format code (<c:numFmt
+	// formatCode>), e.g. "#,##0". Empty or "General" renders plain numbers.
+	NumberFormat string
 }
 
 // Axis crossing constants.
@@ -329,10 +342,14 @@ type ChartType interface {
 
 // ChartSeries represents a data series in a chart.
 type ChartSeries struct {
-	Title            string
-	Values           map[string]float64 // category -> value
-	Categories       []string           // ordered category names
-	FillColor        Color
+	Title      string
+	Values     map[string]float64 // category -> value
+	Categories []string           // ordered category names
+	FillColor  Color
+	// PointColors holds per-data-point fill overrides (<c:dPt><c:spPr>),
+	// keyed by category index. PowerPoint uses it to highlight one bar of a
+	// series ("Our Results" green, the rest blue).
+	PointColors      map[int]Color
 	ShowCategoryName bool
 	ShowLegendKey    bool
 	ShowPercentage   bool
