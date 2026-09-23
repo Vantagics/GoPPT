@@ -769,6 +769,8 @@ const (
 	AutoShapePie                   AutoShapeType = "pie"
 	AutoShapeArc                   AutoShapeType = "arc"
 	AutoShapeBentArrow             AutoShapeType = "bentArrow"
+	AutoShapeBentUpArrow           AutoShapeType = "bentUpArrow"
+	AutoShapeSnip2DiagRect         AutoShapeType = "snip2DiagRect"
 	AutoShapeUturnArrow            AutoShapeType = "uturnArrow"
 	AutoShapeLeftBrace             AutoShapeType = "leftBrace"
 	AutoShapeRightBrace            AutoShapeType = "rightBrace"

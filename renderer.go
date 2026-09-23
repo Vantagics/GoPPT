@@ -1807,6 +1807,20 @@ func (r *renderer) renderAutoShapeFill(s *AutoShape, x, y, w, h int) {
 		r.fillUturnArrow(x, y, w, h, fc, s.adjustValues)
 	case AutoShapeBentArrow:
 		r.fillBentArrow(x, y, w, h, fc, s.adjustValues)
+	case AutoShapeBentUpArrow:
+		pts := r.bentUpArrowPoints(x, y, w, h, s.adjustValues)
+		if s.fill.Type == FillSolid {
+			r.fillPolygon(pts, fc)
+		} else {
+			r.fillPolygonGradient(pts, s.fill)
+		}
+	case AutoShapeSnip2DiagRect:
+		pts := r.snip2DiagRectPoints(x, y, w, h, s.adjustValues)
+		if s.fill.Type == FillSolid {
+			r.fillPolygon(pts, fc)
+		} else {
+			r.fillPolygonGradient(pts, s.fill)
+		}
 	case AutoShapeArc:
 		// Arc preset geometry has no fill by default (it's just a stroke).
 		// Skip fill for arc shapes.
@@ -1863,6 +1877,12 @@ func (r *renderer) renderAutoShapeBorder(s *AutoShape, x, y, w, h int) {
 			{float64(x + w - offset), float64(y + h)},
 			{float64(x), float64(y + h)},
 		}
+		r.drawPolygon(pts, bc, pw)
+	case AutoShapeBentUpArrow:
+		pts := r.bentUpArrowPoints(x, y, w, h, s.adjustValues)
+		r.drawPolygon(pts, bc, pw)
+	case AutoShapeSnip2DiagRect:
+		pts := r.snip2DiagRectPoints(x, y, w, h, s.adjustValues)
 		r.drawPolygon(pts, bc, pw)
 	case AutoShapeBentArrow:
 		// Draw border following the bentArrow shape outline
@@ -4537,6 +4557,84 @@ func (r *renderer) snip2SameRectPoints(x, y, w, h int, adj map[string]int) []fpo
 func (r *renderer) fillSnip2SameRect(x, y, w, h int, c color.RGBA, adj map[string]int) {
 	pts := r.snip2SameRectPoints(x, y, w, h, adj)
 	r.fillPolygon(pts, c)
+}
+
+// bentUpArrowPoints builds the bentUpArrow preset outline (bottom
+// horizontal bar, right end bending up into an arrowhead). Measured against
+// PowerPoint COM exports at adj defaults and eight variant combinations:
+//
+//	shaft thickness = min(adj1, 50000)·ss           (adj1 default 25000)
+//	head base width = min(adj2·2, 100000)·ss        (adj2 default 25000)
+//	head triangle height = min(adj3, 50000)·ss      (adj3 default 25000)
+//
+// with ss = min(w,h). The head's base right corner sits on the shape's right
+// edge and the vertical arm is centred on the head's base midpoint; arm and
+// bar share the shaft thickness.
+func (r *renderer) bentUpArrowPoints(x, y, w, h int, adj map[string]int) []fpoint {
+	adj1v, adj2v, adj3v := 25000, 25000, 25000
+	if adj != nil {
+		if v, ok := adj["adj1"]; ok {
+			adj1v = v
+		}
+		if v, ok := adj["adj2"]; ok {
+			adj2v = v
+		}
+		if v, ok := adj["adj3"]; ok {
+			adj3v = v
+		}
+	}
+	ss := float64(minInt(w, h))
+	st := ss * math.Min(float64(adj1v)/100000.0, 0.5)
+	tw := ss * math.Min(float64(adj2v)/100000.0*2.0, 1.0)
+	th := ss * math.Min(float64(adj3v)/100000.0, 0.5)
+
+	fx, fy := float64(x), float64(y)
+	fw, fh := float64(w), float64(h)
+	cx := fx + fw - tw/2 // arm centre: head base midpoint, base right corner on the right edge
+	baseY := fy + th     // head base (triangle bottom edge)
+	barTop := fy + fh - st
+	armL, armR := cx-st/2, cx+st/2
+
+	return []fpoint{
+		{fx, fy + fh},      // bar bottom-left
+		{armR, fy + fh},    // bar bottom-right (= arm bottom-right)
+		{armR, baseY},      // arm right edge up to the head base
+		{cx + tw/2, baseY}, // head base right corner
+		{cx, fy},           // head apex (top edge)
+		{cx - tw/2, baseY}, // head base left corner
+		{armL, baseY},      // arm left edge at the head base
+		{armL, barTop},     // arm left edge down to the bar top
+		{fx, barTop},       // bar top-left
+	}
+}
+
+// snip2DiagRectPoints builds the snip2DiagRect preset outline: a rectangle
+// with the top-right and bottom-left corners cut off at 45 degrees. Each
+// snip measures adj·ss/100000 along both edges (default 16667, max 50000).
+func (r *renderer) snip2DiagRectPoints(x, y, w, h int, adj map[string]int) []fpoint {
+	adj1v, adj2v := 16667, 16667
+	if adj != nil {
+		if v, ok := adj["adj1"]; ok {
+			adj1v = v
+		}
+		if v, ok := adj["adj2"]; ok {
+			adj2v = v
+		}
+	}
+	ss := float64(minInt(w, h))
+	snipBR := ss * math.Min(float64(adj1v)/100000.0, 0.5) // bottom-left corner
+	snipTR := ss * math.Min(float64(adj2v)/100000.0, 0.5) // top-right corner
+	fx, fy := float64(x), float64(y)
+	fw, fh := float64(w), float64(h)
+
+	return []fpoint{
+		{fx, fy},               // top-left
+		{fx + fw - snipTR, fy}, // top-right snip start
+		{fx + fw, fy + snipTR}, // top-right snip end
+		{fx + fw, fy + fh},     // bottom-right
+		{fx + snipBR, fy + fh}, // bottom-left snip end (on bottom edge)
+		{fx, fy + fh - snipBR}, // bottom-left snip start (on left edge)
+	}
 }
 
 func (r *renderer) fillBentArrow(x, y, w, h int, c color.RGBA, adj map[string]int) {
