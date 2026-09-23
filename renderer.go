@@ -2023,12 +2023,14 @@ func (r *renderer) renderAutoShapeBorder(s *AutoShape, x, y, w, h int) {
 	}
 }
 
-// drawBrace strokes a rightBrace/leftBrace preset: a corner hook curving into
-// a centre spine and mirroring back out at the bottom. OOXML geometry —
-// x1 = adj1·min(w,h)/100000 (hook depth and roundness), the spine sits at
-// w−x1 (right) or x1 (left), y1 = adj2·(h/2)/100000 down from the top edge,
-// y2 = h−y1. Each hook is one cubic Bezier; the OOXML path declares fill
-// none, so a brace is outline-only by default.
+// drawBrace strokes a rightBrace/leftBrace preset along the ECMA-376 preset
+// path. Each endpoint hook is a quarter ellipse (radii w/2 × y1) from the box
+// corner to the centre spine at x=w/2, and the middle apex is a pair of
+// quarter ellipses meeting in a cusp at the outer edge — (w, y3) for a right
+// brace, (0, y3) for a left brace. y1 = ss·adj1/100000 is the hook radius,
+// pinned to maxAdj1 = min(1−adj2, adj2)/2·h/ss so the spine never inverts;
+// y3 = h·adj2/100000 centres the apex. The OOXML path declares fill none, so
+// a brace is outline-only by default.
 func (r *renderer) drawBrace(t AutoShapeType, x, y, w, h int, c color.RGBA, pw int, adj map[string]int) {
 	adj1, adj2 := 8333, 50000
 	if adj != nil {
@@ -2041,18 +2043,44 @@ func (r *renderer) drawBrace(t AutoShapeType, x, y, w, h int, c color.RGBA, pw i
 	}
 	fx, fy := float64(x), float64(y)
 	fw, fh := float64(w), float64(h)
-	x1 := math.Min(fw, fh) * float64(adj1) / 100000.0
-	y1 := fh / 2 * float64(adj2) / 100000.0
-	y2 := fh - y1
+	ss := math.Min(fw, fh)
+	a2 := math.Min(math.Max(float64(adj2), 0), 100000)
+	maxAdj1 := math.Min(100000-a2, a2) / 2 * fh / ss
+	a1 := math.Min(math.Max(float64(adj1), 0), maxAdj1)
+	y1 := ss * a1 / 100000.0
+	y3 := fh * a2 / 100000.0
+	wd2 := fw / 2
+
+	const steps = 24
+	// arc samples a quarter ellipse of radii (wd2, y1) centred on
+	// (fx+cx, fy+cy), starting at stAng and sweeping by sweep degrees.
+	arc := func(cx, cy, stAng, sweep float64, pts *[]fpoint) {
+		for i := 1; i <= steps; i++ {
+			a := (stAng + sweep*float64(i)/steps) * math.Pi / 180.0
+			*pts = append(*pts, fpoint{fx + cx + wd2*math.Cos(a), fy + cy + y1*math.Sin(a)})
+		}
+	}
+	var pts []fpoint
 	if t == AutoShapeRightBrace {
-		x2 := fw - x1
-		r.drawCubicBezierAA(fx, fy, fx+x1, fy, fx+x2, fy+y1-x1, fx+x2, fy+y1, c, pw)
-		r.drawLineThick(int(math.Round(fx+x2)), int(math.Round(fy+y1)), int(math.Round(fx+x2)), int(math.Round(fy+y2)), c, pw)
-		r.drawCubicBezierAA(fx+x2, fy+y2, fx+x2, fy+y2+x1, fx+x1, fy+fh, fx, fy+fh, c, pw)
+		pts = append(pts, fpoint{fx, fy})                    // top endpoint
+		arc(0, y1, 270, 90, &pts)                            // hook: (0,0) -> (wd2,y1)
+		pts = append(pts, fpoint{fx + wd2, fy + y3 - y1})    // spine down
+		arc(fw, y3-y1, 180, -90, &pts)                       // apex upper: -> (fw,y3)
+		arc(fw, y3+y1, 270, -90, &pts)                       // apex lower: -> (wd2,y3+y1)
+		pts = append(pts, fpoint{fx + wd2, fy + fh - y1})    // spine down
+		arc(0, fh-y1, 0, 90, &pts)                           // hook: (wd2,fh-y1) -> (0,fh)
 	} else {
-		r.drawCubicBezierAA(fx+fw, fy, fx+fw-x1, fy, fx+x1, fy+y1-x1, fx+x1, fy+y1, c, pw)
-		r.drawLineThick(int(math.Round(fx+x1)), int(math.Round(fy+y1)), int(math.Round(fx+x1)), int(math.Round(fy+y2)), c, pw)
-		r.drawCubicBezierAA(fx+x1, fy+y2, fx+x1, fy+y2+x1, fx+fw-x1, fy+fh, fx+fw, fy+fh, c, pw)
+		pts = append(pts, fpoint{fx + fw, fy})               // top endpoint
+		arc(fw, y1, 270, -90, &pts)                          // hook: (fw,0) -> (wd2,y1)
+		pts = append(pts, fpoint{fx + wd2, fy + y3 - y1})    // spine down
+		arc(0, y3-y1, 0, 90, &pts)                           // apex upper: -> (0,y3)
+		arc(0, y3+y1, 270, 90, &pts)                         // apex lower: -> (wd2,y3+y1)
+		pts = append(pts, fpoint{fx + wd2, fy + fh - y1})    // spine down
+		arc(fw, fh-y1, 180, -90, &pts)                       // hook: (wd2,fh-y1) -> (fw,fh)
+	}
+	for i := 1; i < len(pts); i++ {
+		r.drawLineAA(int(math.Round(pts[i-1].x)), int(math.Round(pts[i-1].y)),
+			int(math.Round(pts[i].x)), int(math.Round(pts[i].y)), c, pw)
 	}
 }
 

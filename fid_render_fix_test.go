@@ -10,7 +10,6 @@ import (
 	"testing"
 
 	"golang.org/x/image/font/basicfont"
-	"math"
 )
 
 // Regression tests for the fidelity fixes that came out of the
@@ -1898,25 +1897,28 @@ func TestBracePresetsStrokeTheOutline(t *testing.T) {
 	rect := emuRect(t, pres, 500000, 500000, 300000, 2000000, opts.Width)
 	x0, y0 := rect.Min.X, rect.Min.Y
 	wpx, hpx := rect.Dx(), rect.Dy()
-	x1 := int(math.Min(float64(wpx), float64(hpx)) * 26110.0 / 100000.0)
-	spine := x0 + wpx - x1 // the rightBrace spine, adj2=50000 puts it mid-height
+	// Preset law: the spine sits at the box centre (hc), not near an edge.
+	spine := x0 + wpx/2
 	ink := func(x, y int) bool {
 		r, g, b, a := img.At(x, y).RGBA()
 		return a != 0 && (r+g+b)/3 < 20000
 	}
-	// The spine has ink where it crosses mid-height.
-	if !anyInkAround(img, spine, y0+hpx/2, ink) {
-		t.Errorf("no ink at the spine (x=%d, y=%d)", spine, y0+hpx/2)
+	// The spine has ink where it crosses quarter height (above the apex bump).
+	if !anyInkAround(img, spine, y0+hpx/4, ink) {
+		t.Errorf("no ink on the centre spine (x=%d, y=%d)", spine, y0+hpx/4)
 	}
-	// The interior off the spine stays empty — no bounding-box fill, no
-	// rectangle stroke: the box interior is far from spine and hooks.
-	midX := x0 + wpx/2
-	if spine-midX > 6 {
-		for dx := -2; dx <= 2; dx++ {
-			for dy := -2; dy <= 2; dy++ {
-				if ink(midX+dx, y0+hpx/2+dy) {
-					t.Errorf("ink at the brace interior (x=%d, y=%d): the shape was filled or boxed", midX, y0+hpx/2)
-				}
+	// The middle apex cusp reaches the right edge at mid-height.
+	if !anyInkAround(img, x0+wpx, y0+hpx/2, ink) {
+		t.Errorf("no ink at the apex cusp (x=%d, y=%d)", x0+wpx, y0+hpx/2)
+	}
+	// The interior off the path stays empty — no bounding-box fill, no
+	// rectangle stroke: probe between the spine and the right edge at
+	// quarter height, far from both the spine line and the apex bump.
+	midX := x0 + wpx - 2
+	for dx := -2; dx <= 2; dx++ {
+		for dy := -2; dy <= 2; dy++ {
+			if ink(midX+dx, y0+hpx/4+dy) {
+				t.Errorf("ink at the brace interior (x=%d, y=%d): the shape was filled or boxed", midX, y0+hpx/4)
 			}
 		}
 	}
