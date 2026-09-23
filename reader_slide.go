@@ -5,6 +5,7 @@ import (
 	"bytes"
 	"encoding/xml"
 	"fmt"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -289,6 +290,24 @@ func (r *PPTXReader) readSlideNotes(zr *zip.Reader, slide *Slide, rels []xmlRelF
 // the file: it is named by the <a:lnL>/<a:lnR>/<a:lnT>/<a:lnB> element the
 // value sits inside, which the scanner records as a side marker. Nothing
 // outside the scanner can reach a single side, so the mapping lives here.
+// dedupeGradStops collapses the raw gs list into ordered stops. Repeated
+// positions keep the LAST colour written there (PowerPoint's reading); the
+// result is sorted by position.
+func dedupeGradStops(colors []Color, positions []int) []GradStop {
+	var out []GradStop
+	index := make(map[int]int)
+	for i, c := range colors {
+		if idx, ok := index[positions[i]]; ok {
+			out[idx].Color = c
+		} else {
+			index[positions[i]] = len(out)
+			out = append(out, GradStop{Pos: positions[i], Color: c})
+		}
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].Pos < out[j].Pos })
+	return out
+}
+
 func setCellBorderStyle(cell *TableCell, side string, style BorderStyle) {
 	if cell == nil || cell.border == nil {
 		return
@@ -723,6 +742,11 @@ func (r *PPTXReader) parseSlideXML(decoder *xml.Decoder, slide *Slide, rels []xm
 	_ = gradStopColors
 	_ = gradStopPositions
 	_ = gradAngle
+	// Gradient path geometry: <a:path path=...>, <a:fillToRect> and
+	// <a:tileRect> insets (l, t, r, b) in 0..100000 gradient-box units.
+	var gradPathKind string
+	var gradFillTo [4]int
+	var gradTileTo [4]int
 
 	// Deferred shape-level border (spPr ln comes before txBody)
 	var pendingBorder *Border
@@ -1747,16 +1771,25 @@ func (r *PPTXReader) parseSlideXML(decoder *xml.Decoder, slide *Slide, rels []xm
 					gradStopColors = nil
 					gradStopPositions = nil
 					gradAngle = 0
+					gradPathKind = ""
+					gradFillTo = [4]int{}
+					gradTileTo = [4]int{}
 				} else if state.inSpPr && !state.inTxBody && !state.inLn && !state.inExtLst {
 					state.inGradFill = true
 					gradStopColors = nil
 					gradStopPositions = nil
 					gradAngle = 0
+					gradPathKind = ""
+					gradFillTo = [4]int{}
+					gradTileTo = [4]int{}
 				} else if state.inBgPr {
 					state.inGradFill = true
 					gradStopColors = nil
 					gradStopPositions = nil
 					gradAngle = 0
+					gradPathKind = ""
+					gradFillTo = [4]int{}
+					gradTileTo = [4]int{}
 				}
 			case "gsLst":
 				if state.inGradFill {
@@ -1780,6 +1813,46 @@ func (r *PPTXReader) parseSlideXML(decoder *xml.Decoder, slide *Slide, rels []xm
 						if attr.Name.Local == "ang" {
 							if v, err := strconv.Atoi(attr.Value); err == nil {
 								gradAngle = v / 60000
+							}
+						}
+					}
+				}
+			case "fillToRect":
+				// Path-gradient focus rectangle: insets (l, t, r, b) from
+				// the gradient box, in 0..100000 box units. The focus is the
+				// centre of the rectangle they carve out.
+				if state.inGradFill {
+					for _, attr := range t.Attr {
+						if v, err := strconv.Atoi(attr.Value); err == nil {
+							switch attr.Name.Local {
+							case "l":
+								gradFillTo[0] = v
+							case "t":
+								gradFillTo[1] = v
+							case "r":
+								gradFillTo[2] = v
+							case "b":
+								gradFillTo[3] = v
+							}
+						}
+					}
+				}
+			case "tileRect":
+				// Tile rectangle insets — negative values grow the tile
+				// beyond the gradient box, which moves the gradient's t=1
+				// boundary (and with it the whole colour ramp) outward.
+				if state.inGradFill {
+					for _, attr := range t.Attr {
+						if v, err := strconv.Atoi(attr.Value); err == nil {
+							switch attr.Name.Local {
+							case "l":
+								gradTileTo[0] = v
+							case "t":
+								gradTileTo[1] = v
+							case "r":
+								gradTileTo[2] = v
+							case "b":
+								gradTileTo[3] = v
 							}
 						}
 					}
@@ -2394,6 +2467,18 @@ func (r *PPTXReader) parseSlideXML(decoder *xml.Decoder, slide *Slide, rels []xm
 						}
 					}
 				}
+				// Slide-level colour (gradient stops, solid fills): apply in
+				// document order like the other transforms, with the
+				// no-S-clamp semantics PowerPoint uses (applySatMod).
+				if state.inSrgbClr && lastColor != nil {
+					for _, attr := range t.Attr {
+						if attr.Name.Local == "val" {
+							if v, err := strconv.Atoi(attr.Value); err == nil {
+								applySatMod(lastColor, float64(v)/100000.0)
+							}
+						}
+					}
+				}
 			case "latin":
 				if state.inRunProps && currentFont != nil {
 					if n := typefaceOf(pres, t.Attr); n != "" {
@@ -2853,6 +2938,15 @@ func (r *PPTXReader) parseSlideXML(decoder *xml.Decoder, slide *Slide, rels []xm
 						}
 					}
 					pendingCustomPath = &CustomGeomPath{Width: pw, Height: ph}
+				} else if state.inGradFill {
+					// <a:path path="circle"> — the gradient-path kind. The
+					// custGeom branch above owns this element name inside
+					// pathLst; gradFill's <a:path> carries only the kind.
+					for _, attr := range t.Attr {
+						if attr.Name.Local == "path" {
+							gradPathKind = attr.Value
+						}
+					}
 				}
 			case "moveTo":
 				if state.inCustPath {
@@ -3634,19 +3728,30 @@ func (r *PPTXReader) parseSlideXML(decoder *xml.Decoder, slide *Slide, rels []xm
 					currentFont.Color = gradStopColors[0]
 					state.inRunPropsGradFill = false
 				} else if state.inGradFill && len(gradStopColors) >= 2 {
-					startColor := gradStopColors[0]
-					endColor := gradStopColors[len(gradStopColors)-1]
-					if state.inBgPr {
-						if slide.background == nil {
-							slide.background = NewFill()
+					// Fold the full stop list into the fill. Duplicate
+					// positions collapse to the LAST stop written there —
+					// PowerPoint's own reading (measured with a variant deck:
+					// a pos=0 red followed by three pos=0 purples renders
+					// purple, the red never shows). Linear gradients keep
+					// their legacy angle; path gradients carry the kind and
+					// the fillToRect/tileRect insets.
+					stops := dedupeGradStops(gradStopColors, gradStopPositions)
+					if len(stops) >= 2 {
+						if state.inBgPr {
+							if slide.background == nil {
+								slide.background = NewFill()
+							}
+							slide.background.SetGradientStops(stops, gradAngle, gradPathKind, gradFillTo, gradTileTo)
+						} else if state.inSpPr && state.inSp {
+							pendingShapeFill = NewFill()
+							pendingShapeFill.SetGradientStops(stops, gradAngle, gradPathKind, gradFillTo, gradTileTo)
 						}
-						slide.background.SetGradientLinear(startColor, endColor, gradAngle)
-					} else if state.inSpPr && state.inSp {
-						pendingShapeFill = NewFill()
-						pendingShapeFill.SetGradientLinear(startColor, endColor, gradAngle)
 					}
 				}
 				state.inGradFill = false
+				gradPathKind = ""
+				gradFillTo = [4]int{}
+				gradTileTo = [4]int{}
 			case "blipFill":
 				state.inSpPrBlipFill = false
 				state.inBgBlipFill = false

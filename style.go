@@ -255,6 +255,49 @@ type Fill struct {
 	// fillRef-2 shape. The writer writes it back between the other stops.
 	MidColor Color
 	MidPos   int
+	// Stops carries the full ordered stop list of an N-stop gradient (nil =
+	// legacy fields above). Pos is in 0..100000 gradient-vector units.
+	Stops []GradStop
+	// Path is the gradient-path kind for FillGradientPath fills ("circle",
+	// "rect", "shape"); empty for linear gradients. FillTo holds the
+	// <a:fillToRect> insets and TileTo the <a:tileRect> insets, both as
+	// (l, t, r, b) in 0..100000 gradient-box units — tileRect values may be
+	// negative, which grows the tile beyond the box.
+	Path   string
+	FillTo [4]int
+	TileTo [4]int
+}
+
+// GradStop is one stop of a multi-stop gradient.
+type GradStop struct {
+	Pos   int // 0..100000 along the gradient vector
+	Color Color
+}
+
+// SetGradientStops installs a full N-stop gradient, linear (path == "") or
+// path-shaped. The legacy two/three-stop fields are kept in sync so callers
+// and the writer that predate Stops keep working.
+func (f *Fill) SetGradientStops(stops []GradStop, angle int, path string, fillTo, tileTo [4]int) *Fill {
+	f.Stops = stops
+	f.Color = stops[0].Color
+	f.EndColor = stops[len(stops)-1].Color
+	if len(stops) == 3 {
+		f.MidColor = stops[1].Color
+		f.MidPos = stops[1].Pos
+	} else {
+		f.MidColor = Color{}
+		f.MidPos = 0
+	}
+	if path != "" {
+		f.Type = FillGradientPath
+		f.Path = path
+		f.FillTo = fillTo
+		f.TileTo = tileTo
+	} else {
+		f.Type = FillGradientLinear
+		f.Rotation = ((angle % 360) + 360) % 360
+	}
+	return f
 }
 
 // FillType represents the type of fill.
@@ -553,6 +596,17 @@ func clamp8(v float64) uint8 {
 		return 255
 	}
 	return uint8(v + 0.5)
+}
+
+// applySatMod multiplies the saturation by factor (e.g. 1.6 = 160%) WITHOUT
+// clamping S to 1 first: PowerPoint lets the multiplied S exceed 1 and clamps
+// only the resulting RGB channels. ED7D31 with satMod 160% renders FF7200;
+// clamping S first would give FF7A1F. Measured against PowerPoint's own
+// output (r39 op-probe deck, 34 solid swatches).
+func applySatMod(c *Color, factor float64) {
+	h, s, l := rgbToHSL(c.GetRed(), c.GetGreen(), c.GetBlue())
+	nr, ng, nb := hslToRGB(h, s*factor, l)
+	c.ARGB = c.ARGB[:2] + colorHex(nr) + colorHex(ng) + colorHex(nb)
 }
 
 // applyLumMod multiplies the luminance by factor (e.g. 0.75 = 75%).

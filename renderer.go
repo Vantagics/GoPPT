@@ -1815,14 +1815,14 @@ func (r *renderer) renderAutoShapeFill(s *AutoShape, x, y, w, h int) {
 		if s.fill.Type == FillSolid {
 			r.fillPolygon(pts, fc)
 		} else {
-			r.fillPolygonGradient(pts, s.fill)
+			r.fillPolygonGradient(pts, image.Rect(x, y, x+w, y+h), s.fill)
 		}
 	case AutoShapeSnip2DiagRect:
 		pts := r.snip2DiagRectPoints(x, y, w, h, s.adjustValues)
 		if s.fill.Type == FillSolid {
 			r.fillPolygon(pts, fc)
 		} else {
-			r.fillPolygonGradient(pts, s.fill)
+			r.fillPolygonGradient(pts, image.Rect(x, y, x+w, y+h), s.fill)
 		}
 	case AutoShapeArc:
 		// Arc preset geometry has no fill by default (it's just a stroke).
@@ -3084,18 +3084,71 @@ func (r *renderer) scaleAlpha(c color.RGBA) color.RGBA {
 	return c
 }
 
-func (r *renderer) fillGradientLinear(rect image.Rectangle, fill *Fill) {
-	startC := argbToRGBA(fill.Color)
-	endC := argbToRGBA(fill.EndColor)
-	// Optional middle stop: the theme fill styles are three-stop gradients
-	// whose knee (35% or 55% along the vector) sits far enough off the
-	// end-to-end line that a two-stop approximation bands visibly.
-	var midC [4]uint8
-	midT := -1.0
+// gradientStopsRGBA normalises a Fill's gradient into sorted stop positions
+// (0..1) with colours. The N-stop list wins when present; otherwise the
+// legacy start/middle/end fields are used.
+func gradientStopsRGBA(fill *Fill) ([]float64, [][4]uint8) {
+	if fill == nil {
+		return nil, nil
+	}
+	if len(fill.Stops) >= 2 {
+		pos := make([]float64, len(fill.Stops))
+		cols := make([][4]uint8, len(fill.Stops))
+		for i, s := range fill.Stops {
+			t := float64(s.Pos) / 100000.0
+			if t < 0 {
+				t = 0
+			} else if t > 1 {
+				t = 1
+			}
+			pos[i] = t
+			c := argbToRGBA(s.Color)
+			cols[i] = [4]uint8{c.R, c.G, c.B, c.A}
+		}
+		return pos, cols
+	}
+	start := argbToRGBA(fill.Color)
+	end := argbToRGBA(fill.EndColor)
 	if fill.MidPos > 0 && fill.MidPos < 100000 {
-		mc := argbToRGBA(fill.MidColor)
-		midC = [4]uint8{mc.R, mc.G, mc.B, mc.A}
-		midT = float64(fill.MidPos) / 100000.0
+		mid := argbToRGBA(fill.MidColor)
+		return []float64{0, float64(fill.MidPos) / 100000.0, 1},
+			[][4]uint8{{start.R, start.G, start.B, start.A}, {mid.R, mid.G, mid.B, mid.A}, {end.R, end.G, end.B, end.A}}
+	}
+	return []float64{0, 1},
+		[][4]uint8{{start.R, start.G, start.B, start.A}, {end.R, end.G, end.B, end.A}}
+}
+
+// gradStopColor evaluates an N-stop piecewise-linear ramp at t (sRGB space,
+// the same space the two-stop paths have always interpolated in).
+func gradStopColor(pos []float64, cols [][4]uint8, t float64) [4]uint8 {
+	if t <= pos[0] {
+		return cols[0]
+	}
+	n := len(pos)
+	if t >= pos[n-1] {
+		return cols[n-1]
+	}
+	for i := 1; i < n; i++ {
+		if t <= pos[i] {
+			span := pos[i] - pos[i-1]
+			seg := (t - pos[i-1]) / span
+			it := 1 - seg
+			a, b := cols[i-1], cols[i]
+			return [4]uint8{
+				uint8(float64(a[0])*it + float64(b[0])*seg),
+				uint8(float64(a[1])*it + float64(b[1])*seg),
+				uint8(float64(a[2])*it + float64(b[2])*seg),
+				uint8(float64(a[3])*it + float64(b[3])*seg),
+			}
+		}
+	}
+	return cols[n-1]
+}
+
+func (r *renderer) fillGradientLinear(rect image.Rectangle, fill *Fill) {
+	pos, cols := gradientStopsRGBA(fill)
+	if pos == nil {
+		return
 	}
 	w := rect.Dx()
 	h := rect.Dy()
@@ -3133,34 +3186,7 @@ func (r *renderer) fillGradientLinear(rect image.Rectangle, fill *Fill) {
 			} else if t > 1 {
 				t = 1
 			}
-			var outC [4]uint8
-			if midT > 0 && t < midT {
-				seg := t / midT
-				iseg := 1 - seg
-				outC = [4]uint8{
-					uint8(float64(startC.R)*iseg + float64(midC[0])*seg),
-					uint8(float64(startC.G)*iseg + float64(midC[1])*seg),
-					uint8(float64(startC.B)*iseg + float64(midC[2])*seg),
-					uint8(float64(startC.A)*iseg + float64(midC[3])*seg),
-				}
-			} else if midT > 0 {
-				seg := (t - midT) / (1 - midT)
-				iseg := 1 - seg
-				outC = [4]uint8{
-					uint8(float64(midC[0])*iseg + float64(endC.R)*seg),
-					uint8(float64(midC[1])*iseg + float64(endC.G)*seg),
-					uint8(float64(midC[2])*iseg + float64(endC.B)*seg),
-					uint8(float64(midC[3])*iseg + float64(endC.A)*seg),
-				}
-			} else {
-				it := 1 - t
-				outC = [4]uint8{
-					uint8(float64(startC.R)*it + float64(endC.R)*t),
-					uint8(float64(startC.G)*it + float64(endC.G)*t),
-					uint8(float64(startC.B)*it + float64(endC.B)*t),
-					uint8(float64(startC.A)*it + float64(endC.A)*t),
-				}
-			}
+			outC := gradStopColor(pos, cols, t)
 			pix[off] = outC[0]
 			pix[off+1] = outC[1]
 			pix[off+2] = outC[2]
@@ -3170,21 +3196,124 @@ func (r *renderer) fillGradientLinear(rect image.Rectangle, fill *Fill) {
 	}
 }
 
+// pathGradGeom carries the normalisation of a path gradient over a box, per
+// the r39 pinned semantics (measured against PowerPoint COM exports with
+// chromatic variant decks):
+//
+//   - The focus is the centre of the rectangle <a:fillToRect> carves out of
+//     the box.
+//   - The tile is the box grown/shrunk by the <a:tileRect> insets (negative
+//     insets grow it).
+//   - Focus strictly inside the tile: t = |P−F| / D, D the distance from the
+//     focus to the FARTHEST TILE CORNER (not the box corner — a tile grown
+//     by tileRect moves the t=1 ring outward with it).
+//   - Focus on the tile boundary: Euclidean collapses (the whole tile is on
+//     one side of the focus) and PowerPoint switches to a max-metric: t is
+//     the largest of the per-axis distances from the focus, each normalised
+//     by the focus-to-farthest-tile-edge distance on that axis.
+//
+// t is clamped to [0,1] — path gradients do not tile.
+type pathGradGeom struct {
+	fx, fy     float64
+	dInv       float64 // euclidean regime: 1/D
+	farX, farY float64 // max-metric regime: focus-to-far-edge extents
+	euclidean  bool
+}
+
+func pathGradientGeometry(w, h float64, fill *Fill) pathGradGeom {
+	// Focus: centre of the fillToRect rectangle. l/t/r/b insets in
+	// 0..100000 box units.
+	fl := float64(fill.FillTo[0]) / 100000.0
+	ft := float64(fill.FillTo[1]) / 100000.0
+	fr := float64(fill.FillTo[2]) / 100000.0
+	fb := float64(fill.FillTo[3]) / 100000.0
+	fx := w * (1 + fl - fr) / 2
+	fy := h * (1 + ft - fb) / 2
+
+	// Tile rectangle in box-local coordinates.
+	tl := float64(fill.TileTo[0]) / 100000.0
+	tt := float64(fill.TileTo[1]) / 100000.0
+	tr := float64(fill.TileTo[2]) / 100000.0
+	tb := float64(fill.TileTo[3]) / 100000.0
+	tminX := w * tl
+	tminY := h * tt
+	tmaxX := w * (1 - tr)
+	tmaxY := h * (1 - tb)
+
+	// Regime: interior focus (any real margin) is Euclidean; a focus sitting
+	// on an edge (margin ~0) is max-metric. Real decks use either a tile
+	// centred on the focus or the bare box with a corner focus.
+	const eps = 0.5
+	margin := fx - tminX
+	if tmaxX-fx < margin {
+		margin = tmaxX - fx
+	}
+	if fy-tminY < margin {
+		margin = fy - tminY
+	}
+	if tmaxY-fy < margin {
+		margin = tmaxY - fy
+	}
+	g := pathGradGeom{fx: fx, fy: fy}
+	if margin > eps {
+		g.euclidean = true
+		// Farthest tile corner.
+		d := math.Hypot(fx-tminX, fy-tminY)
+		if v := math.Hypot(tmaxX-fx, fy-tminY); v > d {
+			d = v
+		}
+		if v := math.Hypot(fx-tminX, tmaxY-fy); v > d {
+			d = v
+		}
+		if v := math.Hypot(tmaxX-fx, tmaxY-fy); v > d {
+			d = v
+		}
+		if d < 1 {
+			d = 1
+		}
+		g.dInv = 1 / d
+	} else {
+		g.farX = math.Max(fx-tminX, tmaxX-fx)
+		g.farY = math.Max(fy-tminY, tmaxY-fy)
+		if g.farX < 1 {
+			g.farX = 1
+		}
+		if g.farY < 1 {
+			g.farY = 1
+		}
+	}
+	return g
+}
+
+// pathGradientT evaluates the gradient parameter at a box-local point.
+func pathGradientT(g pathGradGeom, px, py float64) float64 {
+	var t float64
+	if g.euclidean {
+		t = math.Hypot(px-g.fx, py-g.fy) * g.dInv
+	} else {
+		tx := math.Abs(px-g.fx) / g.farX
+		ty := math.Abs(py-g.fy) / g.farY
+		t = math.Max(tx, ty)
+	}
+	if t < 0 {
+		t = 0
+	} else if t > 1 {
+		t = 1
+	}
+	return t
+}
+
 func (r *renderer) fillGradientPath(rect image.Rectangle, fill *Fill) {
-	startC := argbToRGBA(fill.Color)
-	endC := argbToRGBA(fill.EndColor)
+	pos, cols := gradientStopsRGBA(fill)
+	if pos == nil {
+		return
+	}
 	w := rect.Dx()
 	h := rect.Dy()
 	if w <= 0 || h <= 0 {
 		return
 	}
-	cx := float64(w) / 2
-	cy := float64(h) / 2
-	maxDist := math.Sqrt(cx*cx + cy*cy)
-	if maxDist < 1 {
-		maxDist = 1
-	}
-	invMaxDist := 1.0 / maxDist
+	g := pathGradientGeometry(float64(w), float64(h), fill)
 
 	pix := r.img.Pix
 	bounds := r.img.Bounds()
@@ -3194,20 +3323,15 @@ func (r *renderer) fillGradientPath(rect image.Rectangle, fill *Fill) {
 		if py < bounds.Min.Y || py >= bounds.Max.Y {
 			continue
 		}
-		dyf := float64(py-rect.Min.Y) - cy
-		dy2 := dyf * dyf
+		pyLocal := float64(py-rect.Min.Y) + 0.5
 		off := (py-bounds.Min.Y)*stride + (maxInt(rect.Min.X, bounds.Min.X)-bounds.Min.X)*4
 		for px := maxInt(rect.Min.X, bounds.Min.X); px < minInt(rect.Max.X, bounds.Max.X); px++ {
-			dxf := float64(px-rect.Min.X) - cx
-			t := math.Sqrt(dxf*dxf+dy2) * invMaxDist
-			if t > 1 {
-				t = 1
-			}
-			it := 1 - t
-			pix[off] = uint8(float64(startC.R)*it + float64(endC.R)*t)
-			pix[off+1] = uint8(float64(startC.G)*it + float64(endC.G)*t)
-			pix[off+2] = uint8(float64(startC.B)*it + float64(endC.B)*t)
-			pix[off+3] = uint8(float64(startC.A)*it + float64(endC.A)*t)
+			pxLocal := float64(px-rect.Min.X) + 0.5
+			outC := gradStopColor(pos, cols, pathGradientT(g, pxLocal, pyLocal))
+			pix[off] = outC[0]
+			pix[off+1] = outC[1]
+			pix[off+2] = outC[2]
+			pix[off+3] = outC[3]
 			off += 4
 		}
 	}
@@ -4005,8 +4129,18 @@ func (r *renderer) fillPolygon(pts []fpoint, c color.RGBA) {
 	}
 }
 
-func (r *renderer) fillPolygonGradient(pts []fpoint, fill *Fill) {
+// fillPolygonGradient fills a polygon with a gradient. box is the shape's
+// bounding rectangle — the gradient geometry (focus, tile, linear vector)
+// lives in shape-box space, not the polygon's own bbox: a bent-up arrow only
+// covers part of its box, and PowerPoint spreads its gradient across the
+// whole box. Path gradients take the r39 pinned model; linear gradients keep
+// the legacy bbox projection.
+func (r *renderer) fillPolygonGradient(pts []fpoint, box image.Rectangle, fill *Fill) {
 	if len(pts) < 3 || fill == nil {
+		return
+	}
+	if fill.Type == FillGradientPath {
+		r.fillPolygonPathGradient(pts, box, fill)
 		return
 	}
 	startC := argbToRGBA(fill.Color)
@@ -4115,6 +4249,85 @@ func (r *renderer) drawPolygon(pts []fpoint, c color.RGBA, width int) {
 	for i := 0; i < n; i++ {
 		j := (i + 1) % n
 		r.drawLineAA(int(pts[i].x), int(pts[i].y), int(pts[j].x), int(pts[j].y), c, width)
+	}
+}
+
+// fillPolygonPathGradient fills a polygon with a path gradient whose geometry
+// (focus, tile) lives in shape-box space. Each scanline is clipped to the
+// polygon exactly like fillPolygon does; the colour comes from the box-space
+// gradient parameter, so the ramp lines up with sibling shapes that share the
+// box (an arrow's head and shaft continue one another's gradient).
+func (r *renderer) fillPolygonPathGradient(pts []fpoint, box image.Rectangle, fill *Fill) {
+	pos, cols := gradientStopsRGBA(fill)
+	if pos == nil || box.Dx() <= 0 || box.Dy() <= 0 {
+		return
+	}
+	g := pathGradientGeometry(float64(box.Dx()), float64(box.Dy()), fill)
+
+	minY, maxY := pts[0].y, pts[0].y
+	for _, p := range pts[1:] {
+		if p.y < minY {
+			minY = p.y
+		}
+		if p.y > maxY {
+			maxY = p.y
+		}
+	}
+
+	n := len(pts)
+	intersections := make([]float64, 0, n)
+	bounds := r.img.Bounds()
+	pix := r.img.Pix
+	stride := r.img.Stride
+
+	for y := int(minY); y <= int(maxY); y++ {
+		if y < bounds.Min.Y || y >= bounds.Max.Y {
+			continue
+		}
+		fy := float64(y) + 0.5
+		intersections = intersections[:0]
+		for i := 0; i < n; i++ {
+			j := (i + 1) % n
+			py1, py2 := pts[i].y, pts[j].y
+			if py1 > py2 {
+				py1, py2 = py2, py1
+			}
+			if fy < py1 || fy >= py2 {
+				continue
+			}
+			dy := pts[j].y - pts[i].y
+			if dy == 0 {
+				continue
+			}
+			t := (fy - pts[i].y) / dy
+			intersections = append(intersections, pts[i].x+t*(pts[j].x-pts[i].x))
+		}
+		sort.Float64s(intersections)
+
+		pyLocal := float64(y-box.Min.Y) + 0.5
+		for i := 0; i+1 < len(intersections); i += 2 {
+			x1 := int(math.Ceil(intersections[i]))
+			x2 := int(math.Floor(intersections[i+1]))
+			if x1 > x2 {
+				continue
+			}
+			if x1 < bounds.Min.X {
+				x1 = bounds.Min.X
+			}
+			if x2 >= bounds.Max.X {
+				x2 = bounds.Max.X - 1
+			}
+			off := (y-bounds.Min.Y)*stride + (x1-bounds.Min.X)*4
+			for px := x1; px <= x2; px++ {
+				pxLocal := float64(px-box.Min.X) + 0.5
+				outC := gradStopColor(pos, cols, pathGradientT(g, pxLocal, pyLocal))
+				pix[off] = outC[0]
+				pix[off+1] = outC[1]
+				pix[off+2] = outC[2]
+				pix[off+3] = outC[3]
+				off += 4
+			}
+		}
 	}
 }
 

@@ -1579,17 +1579,66 @@ func (w *PPTXWriter) writeFillXML(f *Fill) string {
 	case FillSolid:
 		return fmt.Sprintf("          <a:solidFill><a:srgbClr val=\"%s\"/></a:solidFill>\n", colorRGB(f.Color))
 	case FillGradientLinear:
+		stops := f.Stops
+		if len(stops) < 2 {
+			stops = []GradStop{{Pos: 0, Color: f.Color}, {Pos: 100000, Color: f.EndColor}}
+		}
 		return fmt.Sprintf(`          <a:gradFill>
             <a:gsLst>
-              <a:gs pos="0"><a:srgbClr val="%s"/></a:gs>
-              <a:gs pos="100000"><a:srgbClr val="%s"/></a:gs>
-            </a:gsLst>
+%s            </a:gsLst>
             <a:lin ang="%d" scaled="1"/>
           </a:gradFill>
-`, colorRGB(f.Color), colorRGB(f.EndColor), f.Rotation*60000)
+`, gradStopsXML(stops), f.Rotation*60000)
+	case FillGradientPath:
+		stops := f.Stops
+		if len(stops) < 2 {
+			stops = []GradStop{{Pos: 0, Color: f.Color}, {Pos: 100000, Color: f.EndColor}}
+		}
+		pathKind := f.Path
+		if pathKind == "" {
+			pathKind = "circle"
+		}
+		inner := gradRectXML("fillToRect", f.FillTo)
+		tile := gradRectXML("tileRect", f.TileTo)
+		return fmt.Sprintf(`          <a:gradFill>
+            <a:gsLst>
+%s            </a:gsLst>
+            <a:path path="%s">%s</a:path>%s
+          </a:gradFill>
+`, gradStopsXML(stops), pathKind, inner, tile)
 	default:
 		return ""
 	}
+}
+
+// gradStopsXML serialises a full stop list; positions are in 0..100000
+// gradient-vector units, as read.
+func gradStopsXML(stops []GradStop) string {
+	var b strings.Builder
+	for _, s := range stops {
+		fmt.Fprintf(&b, "              <a:gs pos=\"%d\"><a:srgbClr val=\"%s\"/></a:gs>\n", s.Pos, colorRGB(s.Color))
+	}
+	return b.String()
+}
+
+// gradRectXML serialises fillToRect/tileRect insets, omitting zero attrs the
+// way PowerPoint does. An all-zero rect serialises as empty (no element
+// content beyond the tag is needed).
+func gradRectXML(tag string, v [4]int) string {
+	attrs := ""
+	if v[0] != 0 {
+		attrs += fmt.Sprintf(" l=\"%d\"", v[0])
+	}
+	if v[1] != 0 {
+		attrs += fmt.Sprintf(" t=\"%d\"", v[1])
+	}
+	if v[2] != 0 {
+		attrs += fmt.Sprintf(" r=\"%d\"", v[2])
+	}
+	if v[3] != 0 {
+		attrs += fmt.Sprintf(" b=\"%d\"", v[3])
+	}
+	return fmt.Sprintf("<a:%s%s/>", tag, attrs)
 }
 
 // writeBorderXML serialises a Border as an <a:ln> element.

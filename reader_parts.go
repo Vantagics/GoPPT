@@ -592,6 +592,17 @@ func (r *PPTXReader) parseThemeFormatScheme(data []byte, pres *Presentation) {
 	}
 }
 
+// clamp01 keeps an HLS→RGB channel inside 0..1 (satMod with S>1 overflows).
+func clamp01(v float64) float64 {
+	if v < 0 {
+		return 0
+	}
+	if v > 1 {
+		return 1
+	}
+	return v
+}
+
 // applyColorOps folds a transform list into a colour, in document order. The
 // spaces differ per op (see applyColorTransforms): tint/shade linear,
 // lumMod/lumOff/satMod on the HLS axes.
@@ -617,12 +628,21 @@ func applyColorOps(c Color, ops []themeColorOp) Color {
 			} else if l < 0 {
 				l = 0
 			}
-			if s > 1 {
-				s = 1
-			} else if s < 0 {
-				s = 0
+			// satMod is the one op whose S PowerPoint does NOT clamp before
+			// converting back: S>1 carries through and only the final RGB
+			// channels saturate (ED7D31 satMod 160% → FF7200, measured). The
+			// channel clamp below absorbs the overflow.
+			if o.op != "satMod" {
+				if s > 1 {
+					s = 1
+				} else if s < 0 {
+					s = 0
+				}
 			}
 			r, g, b := hlsToRGB(h, l, s)
+			r = clamp01(r)
+			g = clamp01(g)
+			b = clamp01(b)
 			c = Color{ARGB: fmtARGB(uint8(r*255+0.5), uint8(g*255+0.5), uint8(b*255+0.5))}
 		}
 	}
