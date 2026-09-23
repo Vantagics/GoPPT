@@ -137,14 +137,17 @@ func parseChartXML(data []byte, themeColors map[string]string) *ChartShape {
 		inGridlines    bool
 		inAxis         bool
 		axisIsValue    bool
+		inAxisSpPr     bool
+		inAxisLn       bool
 		inColor        bool
 		inV            bool
 		inT            bool
 		inSeparator    bool
 		inLegend       bool
 		inManualLayout bool
+		inChartElem    bool
 		titleTarget    string // "", "chart" or "axis"
-		txPrTarget     string // "", "axis", "legend" or "series"
+		txPrTarget     string // "", "axis", "legend", "series" or "chartspace"
 		valueCtx       string // "", "serTitle", "cat", "val", "xval", "yval"
 
 		plotType    string
@@ -176,6 +179,13 @@ func parseChartXML(data []byte, themeColors map[string]string) *ChartShape {
 		gridColor    *Color
 		gridWidth    int
 		gridNoFill   bool
+
+		// The axis line's own <c:spPr><a:ln>: width in points, an explicit
+		// colour, or <a:noFill> (chart5's left value axis declares noFill and
+		// PowerPoint draws no line there at all).
+		axisLnW      int
+		axisLnNoFill bool
+		axisLnColor  *Color
 
 		chartFillColor *Color
 		chartLineColor *Color
@@ -224,7 +234,16 @@ func parseChartXML(data []byte, themeColors map[string]string) *ChartShape {
 		txPrBoldSet          bool
 		txPrItalicSet        bool
 		serFont              *Font
+
+		// The chartSpace-level <c:txPr> is the default text size for every
+		// chart element that does not declare its own (chart3 of deck
+		// 00022823 states 20pt there and nothing on its value axis, and
+		// PowerPoint renders 20pt tick labels). sizedFonts records the fonts
+		// that did declare a size so the default skips them.
+		chartDefSize int
+		sizedFonts   map[*Font]bool
 	)
+	sizedFonts = make(map[*Font]bool)
 
 	resetSeries := func() {
 		cats = &seriesPoints{}
@@ -364,6 +383,9 @@ func parseChartXML(data []byte, themeColors map[string]string) *ChartShape {
 		case "gridline":
 			cc := c
 			gridColor = &cc
+		case "axisLn":
+			cc := c
+			axisLnColor = &cc
 		case "chartFill":
 			cc := c
 			chartFillColor = &cc
@@ -387,6 +409,9 @@ func parseChartXML(data []byte, themeColors map[string]string) *ChartShape {
 			switch name {
 			case "plotArea":
 				inPlotArea = true
+
+			case "chart":
+				inChartElem = true
 
 			case "barChart":
 				if plotType == "" {
@@ -466,6 +491,10 @@ func parseChartXML(data []byte, themeColors map[string]string) *ChartShape {
 				switch {
 				case inSeries && !inMarker:
 					inSeriesSpPr = true
+				case inAxis && !inGridlines:
+					// The axis line's own spPr. Gridlines also live inside an
+					// axis but carry their own capture path.
+					inAxisSpPr = true
 				case !inSeries && !inAxis && !inPlotArea:
 					// <c:chartSpace><c:spPr> holds the chart area fill/line.
 					inChartSpPr = true
@@ -474,6 +503,15 @@ func parseChartXML(data []byte, themeColors map[string]string) *ChartShape {
 				switch {
 				case inSeriesSpPr:
 					inSeriesLn = true
+				case inAxisSpPr:
+					inAxisLn = true
+					if w := attrValue(t, "w"); w != "" {
+						if n, err := strconv.Atoi(w); err == nil {
+							if pt := (n + 6350) / 12700; pt > 0 {
+								axisLnW = pt
+							}
+						}
+					}
 				case inChartSpPr:
 					inChartLn = true
 				}
@@ -497,6 +535,8 @@ func parseChartXML(data []byte, themeColors map[string]string) *ChartShape {
 				}
 			case "noFill":
 				switch {
+				case inAxisSpPr && inAxisLn:
+					axisLnNoFill = true
 				case inChartSpPr && !inChartLn:
 					chartNoFill = true
 				case inGridlines:
@@ -504,7 +544,7 @@ func parseChartXML(data []byte, themeColors map[string]string) *ChartShape {
 				}
 
 			case "srgbClr", "schemeClr", "sysClr", "prstClr":
-				if !inSeriesSpPr && !inGridlines && !inChartSpPr {
+				if !inSeriesSpPr && !inGridlines && !inChartSpPr && !inAxisSpPr {
 					break
 				}
 				if c, ok := chartColorFromElement(t, themeColors); ok {
@@ -521,6 +561,8 @@ func parseChartXML(data []byte, themeColors map[string]string) *ChartShape {
 						pendTarget = "serFill"
 					case inGridlines:
 						pendTarget = "gridline"
+					case inAxisSpPr && inAxisLn:
+						pendTarget = "axisLn"
 					case inChartSpPr && inChartLn:
 						pendTarget = "chartLine"
 					case inChartSpPr:
@@ -813,6 +855,10 @@ func parseChartXML(data []byte, themeColors map[string]string) *ChartShape {
 					}
 				case inLegend:
 					txPrTarget = "legend"
+				case !inChartElem:
+					// The chartSpace-level <c:txPr> after </c:chart>: the
+					// chart-wide text default.
+					txPrTarget = "chartspace"
 				default:
 					// Somewhere we do not model, e.g. a chart-group level
 					// <c:dLbls>: read nothing rather than guess a target.
@@ -943,9 +989,12 @@ func parseChartXML(data []byte, themeColors map[string]string) *ChartShape {
 				// part look like the chart area's.
 				inChartSpPr = false
 				inChartLn = false
+				inAxisSpPr = false
+				inAxisLn = false
 			case "ln":
 				inSeriesLn = false
 				inChartLn = false
+				inAxisLn = false
 
 			case "srgbClr", "schemeClr", "sysClr", "prstClr":
 				if inColor && pendColor != nil {
@@ -1028,6 +1077,19 @@ func parseChartXML(data []byte, themeColors map[string]string) *ChartShape {
 					if title := strings.TrimSpace(axisTitle.String()); title != "" {
 						curAxis.Title = title
 					}
+					// The axis line's explicit stroke: noFill kills the line
+					// entirely (chart5's left value axis), otherwise the
+					// declared colour and width replace the 134-grey default.
+					if axisLnNoFill {
+						curAxis.OutlineNoFill = true
+					} else {
+						if axisLnColor != nil {
+							curAxis.OutlineColor = *axisLnColor
+						}
+						if axisLnW > 0 {
+							curAxis.OutlineWidth = axisLnW
+						}
+					}
 					switch {
 					case !axisIsValue:
 						chart.plotArea.axisX = curAxis
@@ -1045,6 +1107,9 @@ func parseChartXML(data []byte, themeColors map[string]string) *ChartShape {
 				}
 				curAxis = nil
 				inAxis = false
+				axisLnW = 0
+				axisLnNoFill = false
+				axisLnColor = nil
 
 			case "title":
 				switch {
@@ -1053,10 +1118,16 @@ func parseChartXML(data []byte, themeColors map[string]string) *ChartShape {
 					applyChartTextFont(chart.title.Font, runLatin, runEA)
 					applyChartFontAttributes(chart.title.Font, runSize,
 						runBold, runBoldSet, runItalic, runItalicSet)
+					if runSize > 0 {
+						sizedFonts[chart.title.Font] = true
+					}
 				case titleTarget == "axis" && curAxis != nil:
 					applyChartTextFont(curAxis.Font, runLatin, runEA)
 					applyChartFontAttributes(curAxis.Font, runSize,
 						runBold, runBoldSet, runItalic, runItalicSet)
+					if runSize > 0 {
+						sizedFonts[curAxis.Font] = true
+					}
 				}
 				titleTarget = ""
 
@@ -1070,16 +1141,30 @@ func parseChartXML(data []byte, themeColors map[string]string) *ChartShape {
 					applyChartTextFont(curAxis.Font, txPrLatin, txPrEA)
 					applyChartFontAttributes(curAxis.Font, txPrSize,
 						txPrBold, txPrBoldSet, txPrItalic, txPrItalicSet)
+					if txPrSize > 0 {
+						sizedFonts[curAxis.Font] = true
+					}
 				case txPrTarget == "legend":
 					applyChartTextFont(chart.legend.Font, txPrLatin, txPrEA)
 					applyChartFontAttributes(chart.legend.Font, txPrSize,
 						txPrBold, txPrBoldSet, txPrItalic, txPrItalicSet)
+					if txPrSize > 0 {
+						sizedFonts[chart.legend.Font] = true
+					}
 				case txPrTarget == "series" && serFont != nil:
 					applyChartTextFont(serFont, txPrLatin, txPrEA)
 					applyChartFontAttributes(serFont, txPrSize,
 						txPrBold, txPrBoldSet, txPrItalic, txPrItalicSet)
+					if txPrSize > 0 {
+						sizedFonts[serFont] = true
+					}
+				case txPrTarget == "chartspace":
+					chartDefSize = txPrSize
 				}
 				txPrTarget = ""
+
+			case "chart":
+				inChartElem = false
 
 			case "legend":
 				inLegend = false
@@ -1107,6 +1192,24 @@ func parseChartXML(data []byte, themeColors map[string]string) *ChartShape {
 	// --- Assemble the chart type -------------------------------------------
 	if plotType == "" || len(series) == 0 {
 		return nil
+	}
+
+	// The chartSpace-level <c:txPr> size is every chart font's default: any
+	// axis/legend/series/title font that declared no size of its own inherits
+	// it (chart3 of deck 00022823: value-axis tick labels render at the 20pt
+	// chart default, not the 10pt model fallback).
+	if chartDefSize > 0 {
+		ds := chartDefSize / 100
+		fonts := []*Font{chart.plotArea.axisX.Font, chart.plotArea.axisY.Font,
+			chart.legend.Font, chart.title.Font}
+		for _, s := range series {
+			fonts = append(fonts, s.Font)
+		}
+		for _, f := range fonts {
+			if f != nil && !sizedFonts[f] {
+				f.Size = ds
+			}
+		}
 	}
 
 	switch plotType {

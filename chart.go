@@ -137,6 +137,9 @@ type ChartAxis struct {
 	TickLabelPos   string
 	OutlineWidth   int
 	OutlineColor   Color
+	// OutlineNoFill records <a:noFill/> on the axis line's <a:ln>: PowerPoint
+	// draws no axis line at all (deck 00022823 chart5's left value axis).
+	OutlineNoFill bool
 	// LogBase is the logarithm base of the axis scale (<c:logBase>, e.g. 2
 	// or 10). Zero means a linear axis.
 	LogBase float64

@@ -612,6 +612,26 @@ func (r *renderer) chartPlotAreaFor(s *ChartShape, px, py, pw, ph int, sc chartS
 				base.x = px + shift
 				base.w = pw - shift
 			}
+			// The tick label centred at the plot's right edge must clear the
+			// chart frame: COM slide23 pins the plot right at frame right −
+			// half the widest tick label − 18px (pinned 1667 → measured
+			// 1639), while slide22, whose labels fit comfortably, keeps the
+			// pinned edge exactly.
+			if axV == nil || axV.Visible {
+				halfW := 0
+				for _, t := range sc.ticks() {
+					if hw := chartTextWidth(valueFace, chartFormatNumberWith(t, axisNumFormat(axV))); hw > halfW {
+						halfW = hw
+					}
+				}
+				if halfW > 0 {
+					frameRight := r.emuToPixelX(s.offsetX) + r.emuToPixelX(s.width)
+					limit := frameRight - (halfW+1)/2 - int(102857.0*r.scaleX+0.5)
+					if limit < base.x+base.w {
+						base.w = limit - base.x
+					}
+				}
+			}
 		}
 		if base.w < 4 || base.h < 4 {
 			base.x, base.y, base.w, base.h = px, py, pw, ph
@@ -743,7 +763,10 @@ func (r *renderer) drawChartAxes(s *ChartShape, p chartPlotArea) {
 
 	// Axis lines. PowerPoint's default axis stroke matches the gridlines:
 	// 134,134,134 at 0.75pt (measured on deck 00022823 slide05's value axis
-	// and slide22/23's category axes).
+	// and slide22/23's category axes). An axis that declares its own
+	// <c:spPr><a:ln> overrides colour and width (chart3's value axis is
+	// black); one declaring <a:noFill/> draws no line at all (chart5's left
+	// value axis).
 	axisLine := color.RGBA{R: 134, G: 134, B: 134, A: 255}
 	axisW := maxInt(int(9525.0*r.scaleX+0.5)+1, 2)
 	// Major tick marks: "out" is PowerPoint's default for chart axes — deck
@@ -752,21 +775,40 @@ func (r *renderer) drawChartAxes(s *ChartShape, p chartPlotArea) {
 	// measures ~5pt on the COM golds.
 	tickLen := maxInt(int(63500.0*r.scaleX+0.5), 2)
 	if p.categoriesOnY {
-		r.drawLineAA(p.x, p.y, p.x, p.y+p.h, axisLine, axisW)
+		if c, w, ok := r.chartAxisStroke(axX, axisLine, axisW); ok {
+			r.drawLineAA(p.x, p.y, p.x, p.y+p.h, c, w)
+		}
+		// On a horizontal bar chart the value axis runs along the plot
+		// bottom; PowerPoint draws it like any other axis line (COM deck
+		// 00022823 slide22/23: full-width line at the plot bottom). The old
+		// code drew only the category axis line.
+		if axV == nil || axV.Visible {
+			if c, w, ok := r.chartAxisStroke(axV, axisLine, axisW); ok {
+				r.drawLineAA(p.x, p.y+p.h, p.x+p.w, p.y+p.h, c, w)
+			}
+		}
 	} else {
-		r.drawLineAA(p.x, p.y+p.h, p.x+p.w, p.y+p.h, axisLine, axisW)
+		if c, w, ok := r.chartAxisStroke(axX, axisLine, axisW); ok {
+			r.drawLineAA(p.x, p.y+p.h, p.x+p.w, p.y+p.h, c, w)
+		}
 		// A numeric X axis (scatter, or a date category axis) gets a
 		// vertical value-axis line too — the COM exports show it.
 		if p.scaleX != nil {
-			r.drawLineAA(p.x, p.y, p.x, p.y+p.h, axisLine, axisW)
+			if c, w, ok := r.chartAxisStroke(axV, axisLine, axisW); ok {
+				r.drawLineAA(p.x, p.y, p.x, p.y+p.h, c, w)
+			}
 		}
 	}
 
 	// Major tick marks. Value-axis ticks poke outward (left for a vertical
 	// axis); the tick at the scale maximum is not drawn (COM slide05: the
 	// 1e8 gridline at y=58 carries no tick while the decades below do).
+	// Ticks take the axis line's declared stroke when it has one.
 	if axV != nil && axV.MajorTickMark != "" && axV.MajorTickMark != TickMarkNone && axV.Visible {
 		tickColor := axisLine
+		if axV.OutlineColor.ARGB != "" && !axV.OutlineNoFill {
+			tickColor = argbToRGBA(axV.OutlineColor)
+		}
 		for _, t := range p.scale.ticks() {
 			if !p.categoriesOnY {
 				if maxV := p.scale.max; maxV > p.scale.min && t >= maxV {
@@ -801,7 +843,11 @@ func (r *renderer) drawChartAxes(s *ChartShape, p chartPlotArea) {
 			label := chartFormatNumberWith(t, axisNumFormat(axV))
 			if p.categoriesOnY {
 				tw := chartTextWidth(face, label)
-				r.drawChartText(label, face, fc, p.valueX(t)-tw/2, p.y+p.h+2+ascent)
+				// Labels sit a full em-plus below the axis: COM deck
+				// 00022823 measures the glyph top 1em−2px under the plot
+				// bottom (84px baseline drop at 24pt slide23, 70px at 20pt
+				// slide22), not the +2+ascent (~0.77em) this used to draw.
+				r.drawChartText(label, face, fc, p.valueX(t)-tw/2, p.y+p.h+r.chartValueLabelDropV(axisFont(axV)))
 			} else {
 				tw := chartTextWidth(face, label)
 				gy := p.valueY(t)
@@ -1350,6 +1396,39 @@ func (r *renderer) rotatedTickLabelOffset() int {
 // reservation and the label draw use it, or the labels detach from the axis.
 func (r *renderer) chartValueLabelGap(face font.Face) int {
 	return r.chartLineHeight(face) + 4
+}
+
+// chartAxisStroke resolves the stroke for an axis line: the axis' own
+// <c:spPr><a:ln> colour/width when it declares one, the 134-grey chart
+// default otherwise. ok=false means the axis declared <a:noFill/> and
+// PowerPoint draws no line there.
+func (r *renderer) chartAxisStroke(a *ChartAxis, def color.RGBA, defW int) (color.RGBA, int, bool) {
+	if a != nil && a.OutlineNoFill {
+		return def, defW, false
+	}
+	c, w := def, defW
+	if a != nil {
+		if a.OutlineColor.ARGB != "" {
+			c = argbToRGBA(a.OutlineColor)
+		}
+		if a.OutlineWidth > 0 {
+			w = maxInt(int(float64(a.OutlineWidth)*12700.0*r.scaleX+0.5)+1, 2)
+		}
+	}
+	return c, w, true
+}
+
+// chartValueLabelDropV is the baseline drop of the value-axis tick labels
+// below the plot bottom on a horizontal bar chart. COM deck 00022823 measures
+// the glyph top at 1em−2px under the axis (84px baseline drop at 24pt on
+// slide23, 70px at 20pt on slide22 — 1.57em both sizes), where this used to
+// draw +2+ascent (~0.77em) and floated the labels 34-44px too high.
+func (r *renderer) chartValueLabelDropV(f *Font) int {
+	sz := 10.0
+	if f != nil && f.Size > 0 {
+		sz = float64(f.Size)
+	}
+	return int(1.57*sz*12700.0*r.scaleX + 0.5)
 }
 
 // --- pie / doughnut ---
