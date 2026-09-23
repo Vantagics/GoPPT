@@ -4976,6 +4976,27 @@ func applyMasterTextStyles(ph *PlaceholderShape, m *masterTextStyles) {
 				tr.font.Color = s.color
 			}
 		}
+
+		// A runless paragraph's line box rides its <a:endParaRPr> (round 26),
+		// but PowerPoint-written empty paragraphs usually declare no sz there
+		// — the size then comes from the same ladder the sibling runs resolve
+		// through. slide36's blank line between two groups advances a full
+		// 1.2 × 32pt line in the export where the 14px fallback left it 71px
+		// short, dragging everything below it up. Fill it from the level
+		// style when the paragraph itself said nothing; a paragraph with
+		// runs keeps endParaRPrSize 0 (the writer must not grow the XML).
+		if para.endParaRPrSize == 0 && s.size > 0 {
+			hasText := false
+			for _, elem := range para.elements {
+				if _, ok := elem.(*TextRun); ok {
+					hasText = true
+					break
+				}
+			}
+			if !hasText {
+				para.endParaRPrSize = s.size * 100
+			}
+		}
 	}
 }
 

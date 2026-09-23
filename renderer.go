@@ -6599,9 +6599,10 @@ func (r *renderer) drawParagraphs(paragraphs []*Paragraph, x, y, w, h int, ancho
 							sd.DrawString(seg)
 						}
 						if run.font != nil && run.font.Underline != UnderlineNone {
-							uy := runBaseline + 2
+							uo, ut := r.underlineGeometry(run.font)
+							uy := runBaseline + uo
 							w := measureStringWithKern(run.face, seg).Ceil()
-							r.drawUnderline(drawX, drawX+w, uy, fc, run.font.Underline)
+							r.drawUnderline(drawX, drawX+w, uy, fc, run.font.Underline, ut)
 						}
 						drawX += measureStringWithKern(run.face, seg).Ceil()
 					}
@@ -6662,8 +6663,9 @@ func (r *renderer) drawParagraphs(paragraphs []*Paragraph, x, y, w, h int, ancho
 
 			// Underline
 			if run.font != nil && run.font.Underline != UnderlineNone {
-				uy := runBaseline + 2
-				r.drawUnderline(drawX, drawX+run.width, uy, fc, run.font.Underline)
+				uo, ut := r.underlineGeometry(run.font)
+				uy := runBaseline + uo
+				r.drawUnderline(drawX, drawX+run.width, uy, fc, run.font.Underline, ut)
 			}
 
 			// Strikethrough
@@ -6812,18 +6814,39 @@ func boxBlurAlpha(m *image.Alpha, radius, passes int) {
 	}
 }
 
+// underlineGeometry returns (offset below baseline, thickness in px) for an
+// underline — the law the u46 COM variant deck pinned (one underlined run per
+// size, 14-44pt): offset = floor(0.1em) below the baseline (18/24/28/32/44pt
+// measured 4/5/6/7/9px) and thickness = round(em/16 + 0.1) (measured 3/3/4/5/6px;
+// plain em/16 rounding misses 32pt by a pixel). The old constant "+2, 1px"
+// drew a hairline that vanished at report scale where PowerPoint draws a band.
+func (r *renderer) underlineGeometry(f *Font) (int, int) {
+	off, thick := 2, 1
+	if f != nil && f.Size > 0 {
+		em := r.fontSizePixels(f)
+		off = int(0.1 * em)
+		thick = int(em/16.0 + 0.1 + 0.5)
+		if thick < 1 {
+			thick = 1
+		}
+	}
+	return off, thick
+}
+
 // drawUnderline draws an underline of the given style.
-func (r *renderer) drawUnderline(x1, x2, y int, c color.RGBA, style UnderlineType) {
+func (r *renderer) drawUnderline(x1, x2, y int, c color.RGBA, style UnderlineType, thick int) {
 	switch style {
 	case UnderlineSingle:
-		r.drawLine(x1, y, x2, y, c)
+		for i := 0; i < thick; i++ {
+			r.drawLine(x1, y+i, x2, y+i, c)
+		}
 	case UnderlineDouble:
 		r.drawLine(x1, y-1, x2, y-1, c)
-		r.drawLine(x1, y+1, x2, y+1, c)
+		r.drawLine(x1, y+thick, x2, y+thick, c)
 	case UnderlineHeavy:
-		r.drawLine(x1, y-1, x2, y-1, c)
-		r.drawLine(x1, y, x2, y, c)
-		r.drawLine(x1, y+1, x2, y+1, c)
+		for i := 0; i < thick+2; i++ {
+			r.drawLine(x1, y-1+i, x2, y-1+i, c)
+		}
 	case UnderlineDash:
 		r.drawDashedHLine(x1, x2, y, c, 6, 3)
 	case UnderlineWavy:
@@ -6832,7 +6855,9 @@ func (r *renderer) drawUnderline(x1, x2, y int, c color.RGBA, style UnderlineTyp
 			r.blendPixel(px, wy, c)
 		}
 	default:
-		r.drawLine(x1, y, x2, y, c)
+		for i := 0; i < thick; i++ {
+			r.drawLine(x1, y+i, x2, y+i, c)
+		}
 	}
 }
 
