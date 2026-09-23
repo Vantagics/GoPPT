@@ -1190,19 +1190,22 @@ func (r *renderer) renderDrawing(s *DrawingShape) {
 		srcImg = applyColorReplaces(srcImg, s.recolors)
 	}
 
-	// Apply srcRect crop if set (values are in 1/1000 of a percent)
+	// <a:srcRect> crop, kept as a float sub-rectangle of the source image.
+	// The resampler samples it directly (fractional pixel edges included),
+	// which is what PowerPoint's pipeline does; truncating to whole pixels
+	// first shifts the content by up to a pixel after scaling.
+	var cropF *[4]float64
 	if s.cropLeft > 0 || s.cropTop > 0 || s.cropRight > 0 || s.cropBottom > 0 {
-		bounds := srcImg.Bounds()
-		imgW := bounds.Dx()
-		imgH := bounds.Dy()
-		cx0 := int(float64(imgW) * float64(s.cropLeft) / 100000.0)
-		cy0 := int(float64(imgH) * float64(s.cropTop) / 100000.0)
-		cx1 := imgW - int(float64(imgW)*float64(s.cropRight)/100000.0)
-		cy1 := imgH - int(float64(imgH)*float64(s.cropBottom)/100000.0)
-		if cx1 > cx0 && cy1 > cy0 {
-			cropped := image.NewRGBA(image.Rect(0, 0, cx1-cx0, cy1-cy0))
-			draw.Draw(cropped, cropped.Bounds(), srcImg, image.Pt(bounds.Min.X+cx0, bounds.Min.Y+cy0), draw.Src)
-			srcImg = cropped
+		b := srcImg.Bounds()
+		iw, ih := float64(b.Dx()), float64(b.Dy())
+		cropF = &[4]float64{
+			iw * float64(s.cropLeft) / 100000.0,
+			ih * float64(s.cropTop) / 100000.0,
+			iw - iw*float64(s.cropRight)/100000.0,
+			ih - ih*float64(s.cropBottom)/100000.0,
+		}
+		if (*cropF)[2]-(*cropF)[0] < 1 || (*cropF)[3]-(*cropF)[1] < 1 {
+			cropF = nil // degenerate crop: draw the whole image
 		}
 	}
 
@@ -1215,7 +1218,7 @@ func (r *renderer) renderDrawing(s *DrawingShape) {
 		if tr != r {
 			ox, oy = 0, 0
 		}
-		scaledImg := tr.scaleForRender(srcImg, w, h)
+		scaledImg := tr.scaleForRender(srcImg, w, h, cropF)
 		// <a:lum bright contrast> adjusts the picture's own pixels. It is
 		// applied here rather than to the decoded image because it is a
 		// per-channel point operation: scaling first costs one pass over the
@@ -7572,13 +7575,186 @@ func normalizeToRGBA(src image.Image) *image.RGBA {
 	return out
 }
 
-// scaleForRender resizes a decoded image for compositing, choosing the cheapest
-// filter that the current quality mode allows.
-func (r *renderer) scaleForRender(src image.Image, dstW, dstH int) *image.RGBA {
+// scaleForRender resizes a decoded image for compositing, choosing the filter
+// that the current quality mode allows. crop, when non-nil, is the source
+// sub-rectangle in source pixel coordinates (a:srcRect); the resampler samples
+// it directly so fractional crop edges land where PowerPoint puts them.
+func (r *renderer) scaleForRender(src image.Image, dstW, dstH int, crop *[4]float64) *image.RGBA {
 	if r.draft {
-		return scaleImageNearest(src, dstW, dstH)
+		return scaleImageNearest(applyIntCrop(src, crop), dstW, dstH)
 	}
-	return scaleImageBilinear(src, dstW, dstH)
+	return scaleImageMitchell(src, dstW, dstH, crop)
+}
+
+// applyIntCrop crops src to the whole-pixel approximation of the float crop
+// rectangle. Used by the draft path, where the cheap nearest-neighbour
+// resampler cannot sample sub-rectangles itself.
+func applyIntCrop(src image.Image, crop *[4]float64) image.Image {
+	if crop == nil {
+		return src
+	}
+	b := src.Bounds()
+	x0 := b.Min.X + int((*crop)[0])
+	y0 := b.Min.Y + int((*crop)[1])
+	x1 := b.Min.X + int((*crop)[2])
+	y1 := b.Min.Y + int((*crop)[3])
+	if x1 <= x0 || y1 <= y0 {
+		return src
+	}
+	out := image.NewRGBA(image.Rect(0, 0, x1-x0, y1-y0))
+	draw.Draw(out, out.Bounds(), src, image.Pt(x0, y0), draw.Src)
+	return out
+}
+
+// scaleImageMitchell resamples src so that the source sub-rectangle crop (full
+// image when nil) maps onto the dstW×dstH output.
+//
+// The filter is Mitchell-Netravali with B=C=1/3 — the kernel behind GDI+
+// InterpolationModeHighQualityBicubic, which is what PowerPoint uses to scale
+// pictures. Sampling is corner-mapped: destination pixel dx covers [dx, dx+1)
+// of the destination rectangle and samples source coordinate
+// cropLeft + dx*cropWidth/dstW, with no half-pixel offset. Both choices were
+// pinned against PowerPoint COM goldens (r38): across the four picture slides
+// of the comparison deck, corner mapping beat centre mapping on every one, and
+// the Mitchell kernel beat bicubic a=-0.5, bilinear and Lanczos3. Sampling
+// happens on the premultiplied sRGB values; edges are clamped.
+func scaleImageMitchell(src image.Image, dstW, dstH int, crop *[4]float64) *image.RGBA {
+	if dstW <= 0 || dstH <= 0 {
+		return image.NewRGBA(image.Rect(0, 0, 1, 1))
+	}
+	rgba := normalizeToRGBA(src)
+	b := rgba.Bounds()
+	srcW, srcH := b.Dx(), b.Dy()
+	full := [4]float64{0, 0, float64(srcW), float64(srcH)}
+	if crop != nil {
+		full = *crop
+	}
+	dst := image.NewRGBA(image.Rect(0, 0, dstW, dstH))
+	if srcW <= 0 || srcH <= 0 || full[2]-full[0] <= 0 || full[3]-full[1] <= 0 {
+		return dst
+	}
+	// Identity fast path: no crop and a 1:1 size match needs no filtering.
+	if crop == nil && dstW == srcW && dstH == srcH {
+		draw.Draw(dst, dst.Bounds(), rgba, b.Min, draw.Src)
+		return dst
+	}
+
+	const (
+		mB = 1.0 / 3.0
+		mC = 1.0 / 3.0
+	)
+	kernel := func(t float64) float64 {
+		t = math.Abs(t)
+		t2 := t * t
+		if t < 1 {
+			return ((12-9*mB-6*mC)*t*t2 + (-18+12*mB+6*mC)*t2 + (6 - 2*mB)) / 6
+		}
+		if t < 2 {
+			return ((-mB-6*mC)*t*t2 + (6*mB+30*mC)*t2 + (-12*mB-48*mC)*t + (8*mB + 24*mC)) / 6
+		}
+		return 0
+	}
+
+	cw := full[2] - full[0]
+	ch := full[3] - full[1]
+
+	// Per-destination-column source taps and normalised weights. Weights stay
+	// float64 through the accumulation: float32 sums land a hair under the
+	// .5 rounding boundary on symmetric blends and flip pixels by one.
+	type axisTaps struct {
+		idx [4]int32
+		w   [4]float64
+	}
+	cols := make([]axisTaps, dstW)
+	for dx := range cols {
+		sx := full[0] + (float64(dx)+0.0)*cw/float64(dstW)
+		f := math.Floor(sx)
+		wsum := 0.0
+		for i := 0; i < 4; i++ {
+			idx := int(f) - 1 + i
+			if idx < 0 {
+				idx = 0
+			}
+			if idx >= srcW {
+				idx = srcW - 1
+			}
+			cols[dx].idx[i] = int32(idx)
+			cols[dx].w[i] = kernel(sx - f - float64(i-1))
+			wsum += cols[dx].w[i]
+		}
+		if wsum > 0 {
+			for i := 0; i < 4; i++ {
+				cols[dx].w[i] /= wsum
+			}
+		}
+	}
+
+	srcPix := rgba.Pix
+	stride := rgba.Stride
+	for dy := 0; dy < dstH; dy++ {
+		sy := full[1] + float64(dy)*ch/float64(dstH)
+		f := math.Floor(sy)
+		var rows axisTaps
+		wsum := 0.0
+		for j := 0; j < 4; j++ {
+			idx := int(f) - 1 + j
+			if idx < 0 {
+				idx = 0
+			}
+			if idx >= srcH {
+				idx = srcH - 1
+			}
+			rows.idx[j] = int32(idx)
+			rows.w[j] = kernel(sy - f - float64(j-1))
+			wsum += rows.w[j]
+		}
+		if wsum > 0 {
+			for j := 0; j < 4; j++ {
+				rows.w[j] /= wsum
+			}
+		}
+		dstOff := dy * dst.Stride
+		for dx := 0; dx < dstW; dx++ {
+			col := &cols[dx]
+			var r, g, bl, a float64
+			for j := 0; j < 4; j++ {
+				wy := rows.w[j]
+				if wy == 0 {
+					continue
+				}
+				rowOff := int(rows.idx[j]) * stride
+				for i := 0; i < 4; i++ {
+					w := wy * col.w[i]
+					if w == 0 {
+						continue
+					}
+					o := rowOff + int(col.idx[i])*4
+					r += w * float64(srcPix[o])
+					g += w * float64(srcPix[o+1])
+					bl += w * float64(srcPix[o+2])
+					a += w * float64(srcPix[o+3])
+				}
+			}
+			dst.Pix[dstOff] = clampByte(r)
+			dst.Pix[dstOff+1] = clampByte(g)
+			dst.Pix[dstOff+2] = clampByte(bl)
+			dst.Pix[dstOff+3] = clampByte(a)
+			dstOff += 4
+		}
+	}
+	return dst
+}
+
+// clampByte rounds a filter accumulator to a byte, half-up like the Python
+// reference model the sampling semantics were pinned with.
+func clampByte(v float64) uint8 {
+	if v <= 0 {
+		return 0
+	}
+	if v >= 255 {
+		return 255
+	}
+	return uint8(v + 0.5)
 }
 
 // --- Utility functions ---
