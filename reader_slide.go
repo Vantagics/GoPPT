@@ -1051,6 +1051,10 @@ func (r *PPTXReader) parseSlideXML(decoder *xml.Decoder, slide *Slide, rels []xm
 				if state.inTcPr {
 					state.inTcPrLn = true
 					state.tcPrLnSide = "L"
+					if currentTable != nil && currentTableRow >= 0 && currentTableCol >= 0 &&
+						currentTableRow < len(currentTable.rows) && currentTableCol < len(currentTable.rows[currentTableRow]) {
+						currentTable.rows[currentTableRow][currentTableCol].border.leftDeclared = true
+					}
 					for _, attr := range t.Attr {
 						if attr.Name.Local == "w" {
 							if v, err := strconv.Atoi(attr.Value); err == nil {
@@ -1067,6 +1071,10 @@ func (r *PPTXReader) parseSlideXML(decoder *xml.Decoder, slide *Slide, rels []xm
 				if state.inTcPr {
 					state.inTcPrLn = true
 					state.tcPrLnSide = "R"
+					if currentTable != nil && currentTableRow >= 0 && currentTableCol >= 0 &&
+						currentTableRow < len(currentTable.rows) && currentTableCol < len(currentTable.rows[currentTableRow]) {
+						currentTable.rows[currentTableRow][currentTableCol].border.rightDeclared = true
+					}
 					for _, attr := range t.Attr {
 						if attr.Name.Local == "w" {
 							if v, err := strconv.Atoi(attr.Value); err == nil {
@@ -1083,6 +1091,10 @@ func (r *PPTXReader) parseSlideXML(decoder *xml.Decoder, slide *Slide, rels []xm
 				if state.inTcPr {
 					state.inTcPrLn = true
 					state.tcPrLnSide = "T"
+					if currentTable != nil && currentTableRow >= 0 && currentTableCol >= 0 &&
+						currentTableRow < len(currentTable.rows) && currentTableCol < len(currentTable.rows[currentTableRow]) {
+						currentTable.rows[currentTableRow][currentTableCol].border.topDeclared = true
+					}
 					for _, attr := range t.Attr {
 						if attr.Name.Local == "w" {
 							if v, err := strconv.Atoi(attr.Value); err == nil {
@@ -1099,6 +1111,10 @@ func (r *PPTXReader) parseSlideXML(decoder *xml.Decoder, slide *Slide, rels []xm
 				if state.inTcPr {
 					state.inTcPrLn = true
 					state.tcPrLnSide = "B"
+					if currentTable != nil && currentTableRow >= 0 && currentTableCol >= 0 &&
+						currentTableRow < len(currentTable.rows) && currentTableCol < len(currentTable.rows[currentTableRow]) {
+						currentTable.rows[currentTableRow][currentTableCol].border.bottomDeclared = true
+					}
 					for _, attr := range t.Attr {
 						if attr.Name.Local == "w" {
 							if v, err := strconv.Atoi(attr.Value); err == nil {
@@ -1699,12 +1715,16 @@ func (r *PPTXReader) parseSlideXML(decoder *xml.Decoder, slide *Slide, rels []xm
 							switch state.tcPrLnSide {
 							case "L":
 								cell.border.Left.Style = BorderNone
+								cell.border.leftDeclared = true
 							case "R":
 								cell.border.Right.Style = BorderNone
+								cell.border.rightDeclared = true
 							case "T":
 								cell.border.Top.Style = BorderNone
+								cell.border.topDeclared = true
 							case "B":
 								cell.border.Bottom.Style = BorderNone
+								cell.border.bottomDeclared = true
 							}
 						}
 					}
@@ -3523,6 +3543,7 @@ func (r *PPTXReader) parseSlideXML(decoder *xml.Decoder, slide *Slide, rels []xm
 				state.inTbl = false
 				if currentTable != nil {
 					applyTableStyleFill(currentTable, pres)
+					applyTableStyleBorders(currentTable, pres)
 				}
 			case "tr":
 				state.inTr = false

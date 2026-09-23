@@ -1082,6 +1082,10 @@ type CellBorders struct {
 	Bottom *Border
 	Left   *Border
 	Right  *Border
+	// Per-side record of whether the cell's <a:tcPr> wrote an explicit line
+	// (including an explicit <a:noFill/>) for that side. A side the file
+	// never mentions falls to the table style's lines instead.
+	topDeclared, bottomDeclared, leftDeclared, rightDeclared bool
 }
 
 // NewTableCell creates a new table cell.

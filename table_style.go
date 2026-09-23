@@ -10,9 +10,31 @@ import (
 	"archive/zip"
 )
 
+// tableStyleLine is one <a:ln> declaration inside a style part's <a:tcBdr>,
+// one of left/right/top/bottom/insideH/insideV. Declared distinguishes "the
+// element is absent" (the wholeTbl part's line shows through) from an explicit
+// <a:noFill/> (the line is suppressed even when another cell's declaration is
+// heavier).
+type tableStyleLine struct {
+	declared bool
+	noFill   bool
+	width    int // points, from the ln w attribute
+	scheme   string
+	tint     float64 // -1: none; else 0..1
+	shade    float64 // -1: none; else 0..1
+	lumMod   float64 // -1: none; else 0..1
+	lumOff   float64 // -1: none; else 0..1
+}
+
+// tableStyleBorders holds the six line declarations of one part's tcBdr.
+type tableStyleBorders struct {
+	left, right, top, bottom, insideH, insideV tableStyleLine
+}
+
 // tableStyleBand is one named part of a table style — wholeTbl, a band, or an
 // edge row/column. A part may declare a fill (a scheme colour plus the colour
-// transforms written inside it) and a text treatment (bold).
+// transforms written inside it), a border treatment (six tcBdr lines), and a
+// text treatment (bold, and the tcTxStyle colour).
 type tableStyleBand struct {
 	hasFill    bool
 	scheme     string  // scheme colour name, e.g. "accent1"
@@ -22,6 +44,14 @@ type tableStyleBand struct {
 	lumOff     float64 // -1: none; else 0..1
 	bold       bool
 	hasTextMod bool
+	// tcTxStyle's own colour reference (a schemeClr sibling of the fontRef,
+	// not a fill colour). Empty when the part declares none.
+	textScheme string
+	textTint   float64 // -1: none; else 0..1
+	textShade  float64 // -1: none; else 0..1
+	textLumMod float64 // -1: none; else 0..1
+	textLumOff float64 // -1: none; else 0..1
+	borders    tableStyleBorders
 }
 
 // tableStyle is one <a:tblStyle> from ppt/tableStyles.xml, keyed by the GUID a
@@ -63,6 +93,13 @@ func parseTableStyles(data []byte) (styles map[string]*tableStyle, def string) {
 	// colour-transform accumulation for the band's scheme colour
 	var inScheme bool
 	var inFill bool
+	// tcBdr line accumulation: the current side element and its <a:ln>
+	var inTcBdr bool
+	var inTcBdrSide string
+	var bdrLine *tableStyleLine
+	var bdrW int
+	// tcTxStyle colour accumulation
+	var inTcTx bool
 	for {
 		tok, err := dec.Token()
 		if err == io.EOF {
@@ -87,57 +124,102 @@ func parseTableStyles(data []byte) (styles map[string]*tableStyle, def string) {
 			case "wholeTbl":
 				if cur != nil {
 					band = &cur.wholeTbl
-					*band = tableStyleBand{tint: -1, shade: -1, lumMod: -1, lumOff: -1}
+					*band = tableStyleBand{tint: -1, shade: -1, lumMod: -1, lumOff: -1,
+						textTint: -1, textShade: -1, textLumMod: -1, textLumOff: -1}
 				}
 			case "band1H":
 				if cur != nil {
 					band = &cur.band1H
-					*band = tableStyleBand{tint: -1, shade: -1, lumMod: -1, lumOff: -1}
+					*band = tableStyleBand{tint: -1, shade: -1, lumMod: -1, lumOff: -1,
+						textTint: -1, textShade: -1, textLumMod: -1, textLumOff: -1}
 				}
 			case "band2H":
 				if cur != nil {
 					band = &cur.band2H
-					*band = tableStyleBand{tint: -1, shade: -1, lumMod: -1, lumOff: -1}
+					*band = tableStyleBand{tint: -1, shade: -1, lumMod: -1, lumOff: -1,
+						textTint: -1, textShade: -1, textLumMod: -1, textLumOff: -1}
 				}
 			case "band1V":
 				if cur != nil {
 					band = &cur.band1V
-					*band = tableStyleBand{tint: -1, shade: -1, lumMod: -1, lumOff: -1}
+					*band = tableStyleBand{tint: -1, shade: -1, lumMod: -1, lumOff: -1,
+						textTint: -1, textShade: -1, textLumMod: -1, textLumOff: -1}
 				}
 			case "band2V":
 				if cur != nil {
 					band = &cur.band2V
-					*band = tableStyleBand{tint: -1, shade: -1, lumMod: -1, lumOff: -1}
+					*band = tableStyleBand{tint: -1, shade: -1, lumMod: -1, lumOff: -1,
+						textTint: -1, textShade: -1, textLumMod: -1, textLumOff: -1}
 				}
 			case "firstRow":
 				if cur != nil {
 					band = &cur.firstRow
-					*band = tableStyleBand{tint: -1, shade: -1, lumMod: -1, lumOff: -1}
+					*band = tableStyleBand{tint: -1, shade: -1, lumMod: -1, lumOff: -1,
+						textTint: -1, textShade: -1, textLumMod: -1, textLumOff: -1}
 				}
 			case "lastRow":
 				if cur != nil {
 					band = &cur.lastRow
-					*band = tableStyleBand{tint: -1, shade: -1, lumMod: -1, lumOff: -1}
+					*band = tableStyleBand{tint: -1, shade: -1, lumMod: -1, lumOff: -1,
+						textTint: -1, textShade: -1, textLumMod: -1, textLumOff: -1}
 				}
 			case "firstCol":
 				if cur != nil {
 					band = &cur.firstCol
-					*band = tableStyleBand{tint: -1, shade: -1, lumMod: -1, lumOff: -1}
+					*band = tableStyleBand{tint: -1, shade: -1, lumMod: -1, lumOff: -1,
+						textTint: -1, textShade: -1, textLumMod: -1, textLumOff: -1}
 				}
 			case "lastCol":
 				if cur != nil {
 					band = &cur.lastCol
-					*band = tableStyleBand{tint: -1, shade: -1, lumMod: -1, lumOff: -1}
+					*band = tableStyleBand{tint: -1, shade: -1, lumMod: -1, lumOff: -1,
+						textTint: -1, textShade: -1, textLumMod: -1, textLumOff: -1}
 				}
 			case "fill":
 				// The band's own fill; the colours inside it are the ones
 				// that count (a tcBdr's line colours are also schemeClr).
 				inFill = true
-			case "tcStyle", "tcBdr":
+			case "tcStyle":
 				// container; nothing to do
+			case "tcBdr":
+				inTcBdr = true
+				inTcBdrSide = ""
+				bdrLine = nil
+			case "left", "right", "top", "bottom", "insideH", "insideV":
+				if inTcBdr && band != nil {
+					inTcBdrSide = t.Name.Local
+					switch inTcBdrSide {
+					case "left":
+						bdrLine = &band.borders.left
+					case "right":
+						bdrLine = &band.borders.right
+					case "top":
+						bdrLine = &band.borders.top
+					case "bottom":
+						bdrLine = &band.borders.bottom
+					case "insideH":
+						bdrLine = &band.borders.insideH
+					case "insideV":
+						bdrLine = &band.borders.insideV
+					}
+					*bdrLine = tableStyleLine{tint: -1, shade: -1, lumMod: -1, lumOff: -1}
+				}
+			case "ln":
+				if inTcBdrSide != "" && bdrLine != nil {
+					bdrLine.declared = true
+					bdrW = 0
+					for _, a := range t.Attr {
+						if a.Name.Local == "w" {
+							if v, err := strconv.Atoi(a.Value); err == nil {
+								bdrW = v
+							}
+						}
+					}
+				}
 			case "tcTxStyle":
 				if band != nil {
 					band.hasTextMod = true
+					inTcTx = true
 					for _, a := range t.Attr {
 						if a.Name.Local == "b" {
 							band.bold = a.Value == "1" || a.Value == "on" || a.Value == "true"
@@ -145,7 +227,21 @@ func parseTableStyles(data []byte) (styles map[string]*tableStyle, def string) {
 					}
 				}
 			case "schemeClr":
-				if band != nil && inFill {
+				if bdrLine != nil && inTcBdrSide != "" {
+					// a tcBdr line's colour reference
+					for _, a := range t.Attr {
+						if a.Name.Local == "val" {
+							bdrLine.scheme = a.Value
+						}
+					}
+				} else if inTcTx && band != nil {
+					// the tcTxStyle's own colour reference
+					for _, a := range t.Attr {
+						if a.Name.Local == "val" {
+							band.textScheme = a.Value
+						}
+					}
+				} else if band != nil && inFill {
 					band.hasFill = true
 					inScheme = true
 					for _, a := range t.Attr {
@@ -168,27 +264,75 @@ func parseTableStyles(data []byte) (styles map[string]*tableStyle, def string) {
 							band.scheme = "srgb:" + a.Value
 						}
 					}
+				} else if bdrLine != nil && inTcBdrSide != "" {
+					for _, a := range t.Attr {
+						if a.Name.Local == "val" {
+							bdrLine.scheme = "srgb:" + a.Value
+						}
+					}
+				} else if inTcTx && band != nil {
+					for _, a := range t.Attr {
+						if a.Name.Local == "val" {
+							band.textScheme = "srgb:" + a.Value
+						}
+					}
+				}
+			case "noFill":
+				if bdrLine != nil && inTcBdrSide != "" {
+					bdrLine.noFill = true
 				}
 			case "tint":
-				if band != nil && inScheme {
+				if bdrLine != nil && inTcBdrSide != "" {
+					if v, err := strconv.ParseFloat(attrVal(t, "val"), 64); err == nil {
+						bdrLine.tint = v / 100000.0
+					}
+				} else if inTcTx && band != nil {
+					if v, err := strconv.ParseFloat(attrVal(t, "val"), 64); err == nil {
+						band.textTint = v / 100000.0
+					}
+				} else if band != nil && inScheme {
 					if v, err := strconv.ParseFloat(attrVal(t, "val"), 64); err == nil {
 						band.tint = v / 100000.0
 					}
 				}
 			case "shade":
-				if band != nil && inScheme {
+				if bdrLine != nil && inTcBdrSide != "" {
+					if v, err := strconv.ParseFloat(attrVal(t, "val"), 64); err == nil {
+						bdrLine.shade = v / 100000.0
+					}
+				} else if inTcTx && band != nil {
+					if v, err := strconv.ParseFloat(attrVal(t, "val"), 64); err == nil {
+						band.textShade = v / 100000.0
+					}
+				} else if band != nil && inScheme {
 					if v, err := strconv.ParseFloat(attrVal(t, "val"), 64); err == nil {
 						band.shade = v / 100000.0
 					}
 				}
 			case "lumMod":
-				if band != nil && inScheme {
+				if bdrLine != nil && inTcBdrSide != "" {
+					if v, err := strconv.ParseFloat(attrVal(t, "val"), 64); err == nil {
+						bdrLine.lumMod = v / 100000.0
+					}
+				} else if inTcTx && band != nil {
+					if v, err := strconv.ParseFloat(attrVal(t, "val"), 64); err == nil {
+						band.textLumMod = v / 100000.0
+					}
+				} else if band != nil && inScheme {
 					if v, err := strconv.ParseFloat(attrVal(t, "val"), 64); err == nil {
 						band.lumMod = v / 100000.0
 					}
 				}
 			case "lumOff":
-				if band != nil && inScheme {
+				if bdrLine != nil && inTcBdrSide != "" {
+					if v, err := strconv.ParseFloat(attrVal(t, "val"), 64); err == nil {
+						bdrLine.lumOff = v / 100000.0
+					}
+				} else if inTcTx && band != nil {
+					if v, err := strconv.ParseFloat(attrVal(t, "val"), 64); err == nil {
+						band.textLumOff = v / 100000.0
+					}
+				} else if band != nil && inScheme {
 					if v, err := strconv.ParseFloat(attrVal(t, "val"), 64); err == nil {
 						band.lumOff = v / 100000.0
 					}
@@ -200,6 +344,21 @@ func parseTableStyles(data []byte) (styles map[string]*tableStyle, def string) {
 				inScheme = false
 			case "fill":
 				inFill = false
+			case "ln":
+				if bdrLine != nil && inTcBdrSide != "" {
+					bdrLine.width = bdrW / 12700
+				}
+			case "left", "right", "top", "bottom", "insideH", "insideV":
+				if inTcBdr {
+					inTcBdrSide = ""
+					bdrLine = nil
+				}
+			case "tcBdr":
+				inTcBdr = false
+				inTcBdrSide = ""
+				bdrLine = nil
+			case "tcTxStyle":
+				inTcTx = false
 			case "tblStyle":
 				if cur != nil && cur.id != "" {
 					styles[cur.id] = cur
@@ -209,6 +368,9 @@ func parseTableStyles(data []byte) (styles map[string]*tableStyle, def string) {
 			case "wholeTbl", "band1H", "band2H", "band1V", "band2V",
 				"firstRow", "lastRow", "firstCol", "lastCol":
 				band = nil
+				bdrLine = nil
+				inTcBdrSide = ""
+				inTcTx = false
 			}
 		}
 	}
@@ -381,6 +543,15 @@ func applyTableStyleFill(s *TableShape, pres *Presentation) {
 			dataRow = ri - 1
 		}
 		for ci, cell := range row {
+			// The tcTxStyle colour applies to every cell of the band
+			// regardless of fills: the firstRow part of the r33 deck says
+			// lt1, and its header text is white while we painted it black.
+			// Only runs without a colour of their own (the reader's default
+			// black) take it.
+			if cell != nil {
+				band, _ := tableStyleBandFor(s, st, ri, ci, dataRow)
+				applyBandTextColor(cell, pres, band)
+			}
 			// FillNone covers both "never declared" and an explicit
 			// <a:noFill/>; the two are not distinguished here, and the style
 			// wins over either.
@@ -471,4 +642,196 @@ func resolveStyleColor(pres *Presentation, scheme string) string {
 		return "FF" + v
 	}
 	return ""
+}
+
+// applyBandTextColor gives a cell's runs the tcTxStyle colour of the band
+// their position earns, but only where a run carries no colour of its own —
+// the reader leaves an unstyled run at the default black, and "FF000000" is
+// the same convention the lstStyle defaults already use.
+func applyBandTextColor(cell *TableCell, pres *Presentation, band tableStyleBand) {
+	if !band.hasTextMod || band.textScheme == "" {
+		return
+	}
+	argb := resolveStyleColor(pres, band.textScheme)
+	if argb == "" {
+		return
+	}
+	c := applyColorTransforms(NewColor(argb), band.textTint, band.textShade, band.textLumMod, band.textLumOff)
+	for _, para := range cell.paragraphs {
+		for _, elem := range para.elements {
+			tr, ok := elem.(*TextRun)
+			if !ok || tr.font == nil {
+				continue
+			}
+			if tr.font.Color.ARGB == "" || tr.font.Color.ARGB == "FF000000" {
+				tr.font.Color = c
+			}
+		}
+	}
+}
+
+// applyTableStyleBorders gives every cell the lines its position earns under
+// the table's style, for the sides the cell's own <a:tcPr> left undeclared.
+//
+// The mapping is positional, per the style part the cell lands in: a part's
+// left/right/top/bottom line applies to that side of its cells (which for
+// wholeTbl means the table's perimeter, since only perimeter cells have that
+// side "outward"), and insideH/insideV to the interior edges. A part that
+// declares no line for a side shows the wholeTbl part's line for it — the
+// same fallback the fills already follow. Where two cells declare conflicting
+// lines for one shared edge, the heavier line wins (firstRow's 3pt bottom
+// separator beats the 1pt insideH of the row below it).
+func applyTableStyleBorders(s *TableShape, pres *Presentation) {
+	if s == nil || pres == nil || len(pres.tableStyles) == 0 {
+		return
+	}
+	st := pres.tableStyles[s.styleGUID]
+	if st == nil {
+		st = pres.tableStyles[pres.defaultTableStyle]
+	}
+	if st == nil {
+		return
+	}
+	lineFor := func(part, whole tableStyleLine) tableStyleLine {
+		if part.declared {
+			return part
+		}
+		return whole
+	}
+	for ri, row := range s.rows {
+		dataRow := ri
+		if s.firstRow && ri == 0 {
+			dataRow = -1
+		} else if s.lastRow && ri == s.numRows-1 {
+			dataRow = -2
+		} else if s.firstRow && ri > 0 {
+			dataRow = ri - 1
+		}
+		for ci, cell := range row {
+			if cell == nil || cell.border == nil {
+				continue
+			}
+			band, _ := tableStyleBandFor(s, st, ri, ci, dataRow)
+			lastRow := ri == s.numRows-1
+			lastCol := ci == s.numCols-1
+			edges := [4]tableStyleLine{
+				lineFor(band.borders.top, pickWholeTblEdge(&st.wholeTbl.borders, ri == 0, true)),
+				lineFor(band.borders.bottom, pickWholeTblEdge(&st.wholeTbl.borders, lastRow, true)),
+				lineFor(band.borders.left, pickWholeTblEdge(&st.wholeTbl.borders, ci == 0, false)),
+				lineFor(band.borders.right, pickWholeTblEdge(&st.wholeTbl.borders, lastCol, false)),
+			}
+			// Interior edges compete with the neighbour's declaration: the
+			// heavier line wins (the firstRow part's 3pt bottom beats the
+			// 1pt insideH the row below resolves for its top).
+			if ri > 0 {
+				edges[0] = heavierLine(edges[0], neighbourLine(s, st, ri-1, ci, dataRow, "bottom"))
+			}
+			if !lastRow {
+				edges[1] = heavierLine(edges[1], neighbourLine(s, st, ri+1, ci, dataRow, "top"))
+			}
+			if ci > 0 {
+				edges[2] = heavierLine(edges[2], neighbourLine(s, st, ri, ci-1, dataRow, "right"))
+			}
+			if !lastCol {
+				edges[3] = heavierLine(edges[3], neighbourLine(s, st, ri, ci+1, dataRow, "left"))
+			}
+			if !cell.border.topDeclared {
+				setCellSide(pres, cell.border.Top, edges[0])
+			}
+			if !cell.border.bottomDeclared {
+				setCellSide(pres, cell.border.Bottom, edges[1])
+			}
+			if !cell.border.leftDeclared {
+				setCellSide(pres, cell.border.Left, edges[2])
+			}
+			if !cell.border.rightDeclared {
+				setCellSide(pres, cell.border.Right, edges[3])
+			}
+		}
+	}
+}
+
+// pickWholeTblEdge picks the wholeTbl line an interior edge falls back to:
+// insideH for horizontal edges, insideV for vertical ones.
+func pickWholeTblEdge(b *tableStyleBorders, outer bool, horizontal bool) tableStyleLine {
+	if outer {
+		if horizontal {
+			return b.top
+		}
+		return b.left
+	}
+	if horizontal {
+		return b.insideH
+	}
+	return b.insideV
+}
+
+// neighbourLine resolves the line a neighbouring cell declares toward this
+// cell across their shared edge, so a heavy separator (firstRow's bottom)
+// wins over the lighter insideH the row below resolves for its top.
+func neighbourLine(s *TableShape, st *tableStyle, ri, ci, dataRow int, toward string) tableStyleLine {
+	if ri < 0 || ri >= len(s.rows) || ci < 0 || ci >= len(s.rows[ri]) {
+		return tableStyleLine{tint: -1, shade: -1, lumMod: -1, lumOff: -1}
+	}
+	band, _ := tableStyleBandFor(s, st, ri, ci, dataRow)
+	whole := &st.wholeTbl.borders
+	switch toward {
+	case "bottom":
+		return lineFallback(band.borders.bottom, whole.bottom, whole.insideH, ri == s.numRows-1)
+	case "top":
+		return lineFallback(band.borders.top, whole.top, whole.insideH, ri == 0)
+	case "right":
+		return lineFallback(band.borders.right, whole.right, whole.insideV, ci == s.numCols-1)
+	case "left":
+		return lineFallback(band.borders.left, whole.left, whole.insideV, ci == 0)
+	}
+	return tableStyleLine{tint: -1, shade: -1, lumMod: -1, lumOff: -1}
+}
+
+// lineFallback resolves one side of a band: the band's own line, else the
+// wholeTbl line for that side when the edge is on the table's perimeter,
+// else the wholeTbl interior line.
+func lineFallback(part, wholeOuter, wholeInner tableStyleLine, outer bool) tableStyleLine {
+	if part.declared {
+		return part
+	}
+	if outer {
+		return wholeOuter
+	}
+	return wholeInner
+}
+
+// heavierLine picks the line that wins a shared edge: the heavier width; an
+// explicit noFill weighs nothing but still beats an undeclared side.
+func heavierLine(a, b tableStyleLine) tableStyleLine {
+	if !b.declared {
+		return a
+	}
+	if !a.declared {
+		return b
+	}
+	if b.width > a.width {
+		return b
+	}
+	return a
+}
+
+// setCellSide writes one resolved style line into a cell's side, leaving the
+// side untouched when the style declares nothing for it.
+func setCellSide(pres *Presentation, b *Border, line tableStyleLine) {
+	if !line.declared {
+		return
+	}
+	if line.noFill || line.scheme == "" {
+		b.Style = BorderNone
+		b.Width = 0
+		return
+	}
+	argb := resolveStyleColor(pres, line.scheme)
+	if argb == "" {
+		return
+	}
+	b.Style = BorderSolid
+	b.Width = line.width
+	b.Color = applyColorTransforms(NewColor(argb), line.tint, line.shade, line.lumMod, line.lumOff)
 }
