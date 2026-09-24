@@ -244,6 +244,10 @@ func (w *PPTXWriter) getImageExtension(ds *DrawingShape) string {
 			return "bmp"
 		case "image/svg+xml":
 			return "svg"
+		case "image/x-wmf":
+			return "wmf"
+		case "image/x-emf":
+			return "emf"
 		}
 	}
 	if ds.path != "" {

@@ -731,6 +731,12 @@ func (r *PPTXReader) parseSlideXML(decoder *xml.Decoder, slide *Slide, rels []xm
 	// graphicData references a chart part through a relationship id.
 	var chartRelID string
 	var graphicDataIsChart bool
+	// OLE graphicFrame tracking: <p:oleObj spid progId r:id> inside a
+	// graphicData whose uri is the PresentationML OLE namespace. The frame
+	// itself carries no pixels — the preview image lives either in a <p:pic>
+	// child or, when that is absent, in the legacy VML drawing part under the
+	// shape id this spid names.
+	var oleSPID, oleProgID, oleRelID string
 	// graphicDataURI is the raw a:graphicData uri of the graphicFrame being
 	// read. It classifies the frame when it turns out to be neither a table nor
 	// a chart, so the stand-in can name what it replaced.
@@ -963,6 +969,7 @@ func (r *PPTXReader) parseSlideXML(decoder *xml.Decoder, slide *Slide, rels []xm
 					shapeRotation = 0
 					chartRelID = ""
 					graphicDataIsChart = false
+					oleSPID, oleProgID, oleRelID = "", "", ""
 					graphicDataURI = ""
 				}
 			case "graphicData":
@@ -980,6 +987,24 @@ func (r *PPTXReader) parseSlideXML(decoder *xml.Decoder, slide *Slide, rels []xm
 					for _, attr := range t.Attr {
 						if attr.Name.Local == "id" {
 							chartRelID = attr.Value
+						}
+					}
+				}
+			case "oleObj":
+				// <p:oleObj spid="_x0000_sN" progId="..." r:id="rIdM"/> inside
+				// an OLE graphicData. spid names the matching <v:shape> in the
+				// legacy VML drawing part, whose <v:imagedata> points at the
+				// preview picture (a WMF/EMF metafile) PowerPoint renders for
+				// an embedded object without a <p:pic> fallback.
+				if state.inGraphicFrame {
+					for _, attr := range t.Attr {
+						switch attr.Name.Local {
+						case "spid":
+							oleSPID = attr.Value
+						case "progId":
+							oleProgID = attr.Value
+						case "id": // r:id
+							oleRelID = attr.Value
 						}
 					}
 				}
@@ -3747,12 +3772,45 @@ func (r *PPTXReader) parseSlideXML(decoder *xml.Decoder, slide *Slide, rels []xm
 					chartRelID = ""
 					graphicDataIsChart = false
 
+					// An OLE graphicFrame renders through its preview image.
+					// Resolve the metafile bytes (VML imagedata keyed by the
+					// oleObj spid) and model the frame as the picture that
+					// preview is — visually identical to what PowerPoint
+					// draws, and the writer re-emits it as an ordinary
+					// <p:pic> so it survives a round trip.
+					oleResolved := false
+					if oleSPID != "" || oleRelID != "" {
+						if data, ext := r.resolveOLEPreview(zr, rels, slidePath, oleSPID, oleRelID); data != nil {
+							ole := &DrawingShape{}
+							ole.name = shapeName
+							if ole.name == "" {
+								ole.name = "OLE " + oleProgID
+							}
+							ole.hidden = shapeHidden
+							ole.offsetX = offX
+							ole.offsetY = offY
+							ole.width = extCX
+							ole.height = extCY
+							ole.rotation = ((shapeRotation % 360) + 360) % 360
+							ole.flipHorizontal = flipH
+							ole.flipVertical = flipV
+							ole.data = data
+							ole.mimeType = olePreviewMIME(ext)
+							if state.inGrpSp && currentGroup != nil {
+								currentGroup.AddShape(ole)
+							} else {
+								slide.shapes = append(slide.shapes, ole)
+							}
+							oleResolved = true
+						}
+					}
+
 					// Anything else — SmartArt, an OLE object, a chart whose part
 					// could not be read — used to be dropped here, which left a
 					// blank region in the preview that nobody could tell apart
 					// from a correctly rendered empty shape. Keep a visible
 					// stand-in so the gap is obvious and reportable.
-					if !isTable && !isChart {
+					if !isTable && !isChart && !oleResolved {
 						reason := classifyGraphicData(graphicDataURI)
 						if hadChartRef {
 							reason = "chart (its part could not be read)"

@@ -8830,6 +8830,28 @@ func findEmbeddedImage(data []byte) image.Image {
 // decodeWMFDIB extracts a DIB bitmap from a WMF file by scanning for
 // StretchDIBits (0x0B41) or SetDIBitsToDevice (0x0D33) records that
 // contain a BITMAPINFOHEADER.
+//
+// wmfFont is the LOGFONT a META_CREATEFONTINDIRECT record installs into
+// the object table. wmfTextRecord is one ExtTextOut with the GDI state it
+// played under.
+type wmfFont struct {
+	face    string
+	height  int16 // logical units; negative = em size
+	weight  uint16
+	italic  bool
+	charset byte // 2 = SYMBOL_CHARSET: bytes map to U+F000+byte
+}
+
+type wmfTextRecord struct {
+	x, y    int
+	raw     []byte
+	dx      []int16 // per-char advances in logical units, when supplied
+	f       *wmfFont
+	col     color.RGBA
+	align   uint16
+	centerH bool // TA_CENTER
+}
+
 func decodeWMFDIB(data []byte, fc *FontCache) image.Image {
 	if len(data) < 18 {
 		return nil
@@ -8846,15 +8868,26 @@ func decodeWMFDIB(data []byte, fc *FontCache) image.Image {
 		img                        image.Image
 		bitCount                   uint16
 	}
-	type textRecord struct {
-		x, y    int
-		text    string
-		centerH bool // TA_CENTER
-	}
 
 	var dibs []dibRecord
-	var texts []textRecord
-	textAlignCenter := false
+	var texts []wmfTextRecord
+	// GDI state the text records need: the object table (fonts at the slots
+	// creates fill, SelectObject picks by index), the current font, the text
+	// colour and the text alignment.
+	objects := make([]interface{}, 0, 8)
+	newObjectSlot := func(v interface{}) int {
+		for i, o := range objects {
+			if o == nil {
+				objects[i] = v
+				return i
+			}
+		}
+		objects = append(objects, v)
+		return len(objects) - 1
+	}
+	curFont := &wmfFont{face: "Times New Roman", height: 12}
+	textColor := color.RGBA{R: 0, G: 0, B: 0, A: 255}
+	textAlign := uint16(0)
 
 	pos := 18
 	for pos+6 < len(data) {
@@ -8920,8 +8953,57 @@ func decodeWMFDIB(data []byte, fc *FontCache) image.Image {
 
 		case 0x012E: // SetTextAlign
 			if recBytes >= 8 {
-				align := uint16(data[pos+6]) | uint16(data[pos+7])<<8
-				textAlignCenter = (align & 0x06) == 0x06 // TA_CENTER
+				textAlign = uint16(data[pos+6]) | uint16(data[pos+7])<<8
+			}
+
+		case 0x0209: // SetTextColor (COLORREF 0x00BBGGRR)
+			if recBytes >= 8 {
+				textColor = color.RGBA{
+					R: data[pos+6],
+					G: data[pos+7],
+					B: data[pos+8],
+					A: 255,
+				}
+			}
+
+		case 0x02FB: // CreateFontIndirect (16-bit LOGFONT)
+			if recBytes >= 6+18 {
+				p := pos + 6
+				f := &wmfFont{
+					height:  int16(uint16(data[p]) | uint16(data[p+1])<<8),
+					weight:  uint16(data[p+8]) | uint16(data[p+9])<<8,
+					italic:  data[p+10] != 0,
+					charset: data[p+13],
+				}
+				if face := data[p+18 : p+50]; recBytes >= 6+50 {
+					if i := bytes.IndexByte(face, 0); i >= 0 {
+						f.face = string(face[:i])
+					} else {
+						f.face = string(face)
+					}
+				}
+				newObjectSlot(f)
+			}
+
+		case 0x02FA, 0x02FC, 0x06FF: // CreatePenIndirect/BrushIndirect/Pen
+			newObjectSlot(struct{}{})
+
+		case 0x012D: // SelectObject
+			if recBytes >= 8 {
+				idx := int(uint16(data[pos+6]) | uint16(data[pos+7])<<8)
+				if idx >= 0 && idx < len(objects) {
+					if f, ok := objects[idx].(*wmfFont); ok {
+						curFont = f
+					}
+				}
+			}
+
+		case 0x01F0: // DeleteObject
+			if recBytes >= 8 {
+				idx := int(uint16(data[pos+6]) | uint16(data[pos+7])<<8)
+				if idx >= 0 && idx < len(objects) {
+					objects[idx] = nil
+				}
 			}
 
 		case 0x0A32: // ExtTextOut
@@ -8935,10 +9017,23 @@ func decodeWMFDIB(data []byte, fc *FontCache) image.Image {
 				if opts&0x0006 != 0 {
 					strOff = 16
 				}
-				if p+strOff+count <= pos+recBytes && count > 0 {
+				if count > 0 && p+strOff+count <= pos+recBytes {
 					raw := data[p+strOff : p+strOff+count]
-					text := decodeGBKToUTF8(raw)
-					texts = append(texts, textRecord{tx, ty, text, textAlignCenter})
+					// The dx array follows the string, padded to a word.
+					var dx []int16
+					if dxOff := p + strOff + count + (count & 1); dxOff+2*count <= pos+recBytes {
+						dx = make([]int16, count)
+						for i := 0; i < count; i++ {
+							dx[i] = int16(uint16(data[dxOff+2*i]) | uint16(data[dxOff+2*i+1])<<8)
+						}
+					}
+					texts = append(texts, wmfTextRecord{
+						x: tx, y: ty, raw: raw, dx: dx,
+						f:       curFont,
+						col:     textColor,
+						align:   textAlign,
+						centerH: textAlign&0x06 == 0x06,
+					})
 				}
 			}
 		}
@@ -8972,8 +9067,14 @@ func decodeWMFDIB(data []byte, fc *FontCache) image.Image {
 	}
 
 	canvas := image.NewRGBA(image.Rect(0, 0, imgW, imgH))
-	// Fill with white background
-	draw.Draw(canvas, canvas.Bounds(), &image.Uniform{color.White}, image.Point{}, draw.Src)
+	// Bitmap metafiles composite their DIBs against an opaque backdrop (the
+	// SRCAND/SRCINVERT mask dance below assumes one). Text-and-vector
+	// metafiles — OLE equation previews above all — stay transparent so they
+	// overprint whatever the slide already has, exactly as PowerPoint plays
+	// them: two stacked Equation objects must show through each other.
+	if len(dibs) > 0 {
+		draw.Draw(canvas, canvas.Bounds(), &image.Uniform{color.White}, image.Point{}, draw.Src)
+	}
 
 	// Draw DIBs with mask compositing
 	var maskImg image.Image
@@ -9007,10 +9108,93 @@ func decodeWMFDIB(data []byte, fc *FontCache) image.Image {
 	for _, t := range texts {
 		tx := int(float64(t.x) * scale)
 		ty := int(float64(t.y) * scale)
-		drawWMFText(canvas, tx, ty, t.text, scale, t.centerH, fc)
+		drawWMFTextRecord(canvas, tx, ty, t, scale, fc)
 	}
 
 	return canvas
+}
+
+// drawWMFTextRecord renders one ExtTextOut record with the font state the
+// metafile had selected when the record played. Symbol-charset runs map each
+// byte to U+F000+byte — the private-use range every Windows symbol font
+// (Symbol, MT Extra) publishes in its cmap — so ∇ (Symbol 0xD1) and the MT
+// Extra overbar (0x72) rasterise from the real system fonts.
+func drawWMFTextRecord(canvas *image.RGBA, x, y int, t wmfTextRecord, scale float64, fc *FontCache) {
+	if len(t.raw) == 0 {
+		return
+	}
+	f := t.f
+	if f == nil {
+		f = &wmfFont{face: "Times New Roman", height: 12}
+	}
+
+	// Text as runes: symbol fonts go through the PUA range, everything else
+	// keeps the metafile's legacy ANSI/GBK decode.
+	var text string
+	if f.charset == 2 {
+		for _, b := range t.raw {
+			text += string(rune(0xF000 + int(b)))
+		}
+	} else {
+		text = decodeGBKToUTF8(t.raw)
+	}
+
+	// Face resolution: the named font first; if the machine lacks it and the
+	// run is symbol-charset, fall back to Segoe UI Symbol with the same PUA
+	// code points (its coverage supersedes Symbol's). Anything still missing
+	// degrades to Times New Roman rather than dropping the run.
+	sizePx := float64(f.height) * scale
+	if sizePx < 0 {
+		sizePx = -sizePx
+	}
+	if sizePx == 0 {
+		sizePx = 10 * scale
+	}
+	var face font.Face
+	if fc != nil {
+		face = fc.GetFace(f.face, sizePx, f.weight >= 700, f.italic)
+		if face == nil && f.charset == 2 {
+			face = fc.GetFace("Segoe UI Symbol", sizePx, false, false)
+		}
+		if face == nil {
+			face = fc.GetFace("Times New Roman", sizePx, f.weight >= 700, f.italic)
+		}
+	}
+	if face == nil {
+		face = basicfont.Face7x13
+	}
+
+	d := &font.Drawer{
+		Dst:  canvas,
+		Src:  image.NewUniform(drawSrc(t.col)),
+		Face: face,
+	}
+	// GDI y is the line top unless TA_BASELINE/TA_BOTTOM is set.
+	dotY := y
+	if t.align&0x18 == 0 {
+		dotY += face.Metrics().Ascent.Ceil()
+	}
+	d.Dot = fixed.P(x, dotY)
+	if t.centerH {
+		w := font.MeasureString(face, text).Ceil()
+		d.Dot.X -= fixed.I(w / 2)
+	}
+	// Draw rune by rune. font.Drawer.DrawString cannot be used here: it
+	// ignores Glyph's ok flag and paints the .notdef box whenever the face
+	// lacks a glyph, which would stencil empty rectangles over every
+	// uncovered codepoint. GDI ExtTextOut instead draws only what exists.
+	// Per-character dx advances (logical units) step the pen when supplied.
+	for i, r := range []rune(text) {
+		dr, mask, mp, adv, ok := d.Face.Glyph(d.Dot, r)
+		if ok && !dr.Empty() {
+			draw.DrawMask(canvas, dr, d.Src, image.Point{}, mask, mp, draw.Over)
+		}
+		if len(t.dx) > 0 && i < len(t.dx) {
+			d.Dot.X += fixed.I(int(float64(t.dx[i]) * scale))
+		} else {
+			d.Dot.X += adv
+		}
+	}
 }
 
 // decodeGBKToUTF8 converts GBK/GB2312 encoded bytes to a UTF-8 string.
@@ -9020,38 +9204,6 @@ func decodeGBKToUTF8(data []byte) string {
 		return string(data)
 	}
 	return string(decoded)
-}
-
-// drawWMFText draws text onto the canvas at the given position.
-func drawWMFText(canvas *image.RGBA, x, y int, text string, scale float64, centerH bool, fc *FontCache) {
-	col := color.Black
-	// Try to use a proper font that supports Chinese characters
-	var face font.Face
-	if fc != nil {
-		// Try common Chinese fonts at a size proportional to the scale
-		fontSize := 10 * scale
-		for _, name := range []string{"microsoft yahei", "微软雅黑", "simsun", "宋体", "simhei", "黑体"} {
-			if f := fc.GetFace(name, fontSize, false, false); f != nil {
-				face = f
-				break
-			}
-		}
-	}
-	if face == nil {
-		face = basicfont.Face7x13
-	}
-	d := &font.Drawer{
-		Dst:  canvas,
-		Src:  image.NewUniform(col),
-		Face: face,
-		Dot:  fixed.P(x, y+face.Metrics().Ascent.Ceil()),
-	}
-	if centerH {
-		// Measure text width and offset x to center
-		textWidth := d.MeasureString(text)
-		d.Dot.X = fixed.I(x) - textWidth/2
-	}
-	d.DrawString(text)
 }
 
 // parseDIB parses a BITMAPINFOHEADER + pixel data into an image.

@@ -4,6 +4,7 @@ import (
 	"archive/zip"
 	"encoding/xml"
 	"math"
+	"path/filepath"
 	"strconv"
 	"strings"
 )
@@ -46,6 +47,132 @@ func (r *PPTXReader) readSlideInk(zr *zip.Reader, slide *Slide, rels []xmlRelFor
 			slide.shapes = append(slide.shapes, shape)
 		}
 	}
+}
+
+// relTypeOLEObject is the relationship type of an OLE object embedding part.
+const relTypeOLEObject = "http://schemas.openxmlformats.org/officeDocument/2006/relationships/oleObject"
+
+// vmlImageDataMap parses a VML drawing part and returns the <v:imagedata>
+// preview picture each shape references: shape id → relationship id. OLE
+// object frames (Equation.3 and friends) have no <p:pic> fallback in the
+// slide XML — PowerPoint draws their preview from exactly this mapping, with
+// the <p:oleObj spid> naming the shape.
+func vmlImageDataMap(data []byte) map[string]string {
+	out := map[string]string{}
+	curID := ""
+	decoder := xml.NewDecoder(strings.NewReader(string(data)))
+	for {
+		tok, err := decoder.Token()
+		if err != nil {
+			break
+		}
+		switch t := tok.(type) {
+		case xml.StartElement:
+			switch t.Name.Local {
+			case "shape":
+				curID = ""
+				for _, attr := range t.Attr {
+					if attr.Name.Local == "id" {
+						curID = attr.Value
+					}
+				}
+			case "imagedata":
+				if curID == "" {
+					continue
+				}
+				for _, attr := range t.Attr {
+					// o:relid — the Office namespace extension that points
+					// at the preview image relationship.
+					if attr.Name.Local == "relid" || attr.Name.Local == "id" {
+						out[curID] = attr.Value
+					}
+				}
+			}
+		case xml.EndElement:
+			if t.Name.Local == "shape" {
+				curID = ""
+			}
+		}
+	}
+	return out
+}
+
+// resolveOLEPreview fetches the preview image bytes of an OLE object frame.
+// It looks the spid up in each VML drawing related from the slide, resolves
+// the imagedata relationship through the VML part's own .rels, and returns
+// the target part's bytes plus its file extension ("wmf", "emf", ...). A
+// <p:pic> fallback child (rare) would carry its own blip; real PowerPoint
+// files for Equation objects rely on the VML path only.
+func (r *PPTXReader) resolveOLEPreview(zr *zip.Reader, rels []xmlRelForRead, slidePath, spid, embedRelID string) ([]byte, string) {
+	if spid == "" {
+		return nil, ""
+	}
+	for _, rel := range rels {
+		if rel.Type != relTypeVMLDrawing {
+			continue
+		}
+		target := rel.Target
+		if !strings.HasPrefix(target, "ppt/") {
+			dir := strings.TrimSuffix(slidePath, "/"+lastPathComponent(slidePath))
+			target = resolveRelativePath(dir, target)
+		}
+		data, err := readFileFromZip(zr, target)
+		if err != nil {
+			continue
+		}
+		imgRelID, ok := vmlImageDataMap(data)[spid]
+		if !ok {
+			continue
+		}
+		// The preview image hangs off the VML part's relationships.
+		vmlRelsPath := strings.Replace(target, "drawings/", "drawings/_rels/", 1) + ".rels"
+		relData, err := readFileFromZip(zr, vmlRelsPath)
+		if err != nil {
+			continue
+		}
+		var vmlRels xmlRelsForRead
+		if err := xml.Unmarshal(relData, &vmlRels); err != nil {
+			continue
+		}
+		for _, vr := range vmlRels.Relationships {
+			if vr.ID != imgRelID {
+				continue
+			}
+			imgPath := vr.Target
+			if !strings.HasPrefix(imgPath, "ppt/") {
+				dir := strings.TrimSuffix(target, "/"+lastPathComponent(target))
+				imgPath = resolveRelativePath(dir, imgPath)
+			}
+			imgData, err := readFileFromZip(zr, imgPath)
+			if err != nil {
+				continue
+			}
+			ext := strings.ToLower(strings.TrimPrefix(filepath.Ext(imgPath), "."))
+			return imgData, ext
+		}
+	}
+	_ = embedRelID
+	return nil, ""
+}
+
+// olePreviewMIME maps a preview file extension to the MIME type the writer
+// stores on the picture model (and derives its part extension from).
+func olePreviewMIME(ext string) string {
+	switch ext {
+	case "wmf":
+		return "image/x-wmf"
+	case "emf":
+		return "image/x-emf"
+	case "png":
+		return "image/png"
+	case "jpg", "jpeg":
+		return "image/jpeg"
+	case "gif":
+		return "image/gif"
+	case "bmp":
+		return "image/bmp"
+	}
+	return ""
 }
 
 // parseVMLDrawing extracts every stroked <v:shape> from a VML drawing part,
