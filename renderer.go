@@ -1531,7 +1531,7 @@ func (r *renderer) applyBevelShading(x, y, w, h int, bevelWEMU, bevelHEMU int64)
 				inBand = true
 				var a float64
 				if dt < hp {
-					a = math.Sin(math.Pi / 2 * (float64(dt)+0.5) / float64(hp)) * bevelSpecular
+					a = math.Sin(math.Pi/2*(float64(dt)+0.5)/float64(hp)) * bevelSpecular
 				} else {
 					u := ((float64(dt) + 0.5) - float64(hp)) / float64(wp-hp)
 					a = math.Pow(1-u, 1.5) * bevelSpecular
@@ -2295,21 +2295,21 @@ func (r *renderer) drawBrace(t AutoShapeType, x, y, w, h int, c color.RGBA, pw i
 	}
 	var pts []fpoint
 	if t == AutoShapeRightBrace {
-		pts = append(pts, fpoint{fx, fy})                    // top endpoint
-		arc(0, y1, 270, 90, &pts)                            // hook: (0,0) -> (wd2,y1)
-		pts = append(pts, fpoint{fx + wd2, fy + y3 - y1})    // spine down
-		arc(fw, y3-y1, 180, -90, &pts)                       // apex upper: -> (fw,y3)
-		arc(fw, y3+y1, 270, -90, &pts)                       // apex lower: -> (wd2,y3+y1)
-		pts = append(pts, fpoint{fx + wd2, fy + fh - y1})    // spine down
-		arc(0, fh-y1, 0, 90, &pts)                           // hook: (wd2,fh-y1) -> (0,fh)
+		pts = append(pts, fpoint{fx, fy})                 // top endpoint
+		arc(0, y1, 270, 90, &pts)                         // hook: (0,0) -> (wd2,y1)
+		pts = append(pts, fpoint{fx + wd2, fy + y3 - y1}) // spine down
+		arc(fw, y3-y1, 180, -90, &pts)                    // apex upper: -> (fw,y3)
+		arc(fw, y3+y1, 270, -90, &pts)                    // apex lower: -> (wd2,y3+y1)
+		pts = append(pts, fpoint{fx + wd2, fy + fh - y1}) // spine down
+		arc(0, fh-y1, 0, 90, &pts)                        // hook: (wd2,fh-y1) -> (0,fh)
 	} else {
-		pts = append(pts, fpoint{fx + fw, fy})               // top endpoint
-		arc(fw, y1, 270, -90, &pts)                          // hook: (fw,0) -> (wd2,y1)
-		pts = append(pts, fpoint{fx + wd2, fy + y3 - y1})    // spine down
-		arc(0, y3-y1, 0, 90, &pts)                           // apex upper: -> (0,y3)
-		arc(0, y3+y1, 270, 90, &pts)                         // apex lower: -> (wd2,y3+y1)
-		pts = append(pts, fpoint{fx + wd2, fy + fh - y1})    // spine down
-		arc(fw, fh-y1, 180, -90, &pts)                       // hook: (wd2,fh-y1) -> (fw,fh)
+		pts = append(pts, fpoint{fx + fw, fy})            // top endpoint
+		arc(fw, y1, 270, -90, &pts)                       // hook: (fw,0) -> (wd2,y1)
+		pts = append(pts, fpoint{fx + wd2, fy + y3 - y1}) // spine down
+		arc(0, y3-y1, 0, 90, &pts)                        // apex upper: -> (0,y3)
+		arc(0, y3+y1, 270, 90, &pts)                      // apex lower: -> (wd2,y3+y1)
+		pts = append(pts, fpoint{fx + wd2, fy + fh - y1}) // spine down
+		arc(fw, fh-y1, 180, -90, &pts)                    // hook: (wd2,fh-y1) -> (fw,fh)
 	}
 	for i := 1; i < len(pts); i++ {
 		r.drawLineAA(int(math.Round(pts[i-1].x)), int(math.Round(pts[i-1].y)),
@@ -3809,25 +3809,25 @@ func (r *renderer) renderShadowEllipse(shadow *Shadow, rect image.Rectangle, rin
 	if bw <= 0 || bh <= 0 || rect.Dx() <= 0 || rect.Dy() <= 0 {
 		return
 	}
-	cxf := (float64(rect.Dx())/2)*sxf
-	cyf := (float64(rect.Dy())/2)*syf
-	rxf := (float64(rect.Dx())/2+0.5)*sxf
-	ryf := (float64(rect.Dy())/2+0.5)*syf
+	cxf := (float64(rect.Dx()) / 2) * sxf
+	cyf := (float64(rect.Dy()) / 2) * syf
+	rxf := (float64(rect.Dx())/2 + 0.5) * sxf
+	ryf := (float64(rect.Dy())/2 + 0.5) * syf
 	inX := rxf - float64(ringPx)*sxf
 	inY := ryf - float64(ringPx)*syf
 	ring := ringPx > 0 && inX > 0 && inY > 0
 	mask := image.NewAlpha(image.Rect(0, 0, bw, bh))
 	for py := 0; py < scaledH; py++ {
 		row := mask.Pix[(py+pad)*mask.Stride:]
-		ny := (float64(py)+0.5+ay - cyf) / ryf
+		ny := (float64(py) + 0.5 + ay - cyf) / ryf
 		for px := 0; px < scaledW; px++ {
-			nx := (float64(px)+0.5+ax - cxf) / rxf
+			nx := (float64(px) + 0.5 + ax - cxf) / rxf
 			if nx*nx+ny*ny > 1 {
 				continue
 			}
 			if ring {
-				nxi := (float64(px)+0.5+ax - cxf) / inX
-				nyi := (float64(py)+0.5+ay - cyf) / inY
+				nxi := (float64(px) + 0.5 + ax - cxf) / inX
+				nyi := (float64(py) + 0.5 + ay - cyf) / inY
 				if nxi*nxi+nyi*nyi < 1 {
 					continue
 				}
@@ -3838,6 +3838,7 @@ func (r *renderer) renderShadowEllipse(shadow *Shadow, rect image.Rectangle, rin
 	boxBlurAlpha(mask, radius, 3)
 	r.compositeShadowMask(shadowColor, mask, rect.Min.X-pad+dx, rect.Min.Y-pad+dy)
 }
+
 // compositeShadowMask blends a blurred shadow silhouette at the given offset.
 func (r *renderer) compositeShadowMask(shadowColor color.RGBA, mask *image.Alpha, ox, oy int) {
 	bounds := r.img.Bounds()
@@ -4003,6 +4004,8 @@ func (r *renderer) picFramePoints(prst string, x, y, w, h int) []fpoint {
 	switch AutoShapeType(prst) {
 	case AutoShapeSnip2DiagRect:
 		return r.snip2DiagRectPoints(x, y, w, h, nil)
+	case AutoShapeRtTriangle:
+		return rtTrianglePoints(x, y, w, h)
 	case AutoShapeEllipse:
 		// 72-gon approximation of the elliptical frame; the polygon alpha
 		// mask clips the photo to it. 72 segments on a 250px frame put the
@@ -4584,7 +4587,7 @@ func (r *renderer) drawEllipseAA(cx, cy, w, h int, c color.RGBA, lineWidth int) 
 			// vertices and correct to first order elsewhere.
 			distPx := 0.0
 			if d > 1e-9 {
-				grad := math.Sqrt(dxNorm*dxNorm/(rx*rx) + dy2/(ry*ry)) / d
+				grad := math.Sqrt(dxNorm*dxNorm/(rx*rx)+dy2/(ry*ry)) / d
 				distPx = math.Abs(d-1.0) / grad
 			}
 			if distPx < threshold {
@@ -5288,13 +5291,22 @@ func (r *renderer) fillLeftRightArrow(x, y, w, h int, c color.RGBA) {
 	r.fillPolygon(pts, c)
 }
 
-func (r *renderer) fillRtTriangle(x, y, w, h int, c color.RGBA) {
-	pts := []fpoint{
+// rtTrianglePoints returns the preset rtTriangle outline: the right angle sits
+// at the bottom-left corner, the hypotenuse runs from the top-left to the
+// bottom-right corner. Shared by the AutoShape fill and the picture frame —
+// a <p:pic> whose spPr carries prstGeom="rtTriangle" is a photo clipped to
+// that triangle, which is how real decks splice a tone-mapped variant over
+// the original along a diagonal.
+func rtTrianglePoints(x, y, w, h int) []fpoint {
+	return []fpoint{
 		{float64(x), float64(y + h)},
 		{float64(x), float64(y)},
 		{float64(x + w), float64(y + h)},
 	}
-	r.fillPolygon(pts, c)
+}
+
+func (r *renderer) fillRtTriangle(x, y, w, h int, c color.RGBA) {
+	r.fillPolygon(rtTrianglePoints(x, y, w, h), c)
 }
 
 func (r *renderer) fillHomePlate(x, y, w, h int, c color.RGBA) {

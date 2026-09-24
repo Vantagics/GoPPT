@@ -112,7 +112,7 @@ func TestRotatedAlphaFillOverWhiteStaysWhite(t *testing.T) {
 </p:sp>`
 	img := renderXMLSlide(t, shape, 914)
 	cx, cy := (3543320+2063360/2)*914/9144000, (2128800+400110/2)*914/9144000
-	c := color.NRGBAModel.Convert(img.At(cx + 10, cy)).(color.NRGBA)
+	c := color.NRGBAModel.Convert(img.At(cx+10, cy)).(color.NRGBA)
 	if c.R != 255 || c.G != 255 || c.B != 255 {
 		t.Errorf("rotated 50%% white over white: got {%d %d %d}, want pure white — the alpha was applied twice", c.R, c.G, c.B)
 	}

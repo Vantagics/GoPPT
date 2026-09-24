@@ -38,12 +38,12 @@ var bevelTestThemeOverride = `<?xml version="1.0" encoding="UTF-8" standalone="y
       <a:fillStyleLst>` + themeOfficeFillStyles + `</a:fillStyleLst>
       <a:lnStyleLst>` + themeOfficeLnStyles + `</a:lnStyleLst>
       <a:effectStyleLst>` +
-		`<a:effectStyle><a:effectLst/></a:effectStyle>` +
-		`<a:effectStyle><a:effectLst/></a:effectStyle>` +
-		`<a:effectStyle><a:effectLst><a:outerShdw blurRad="40000" dist="23000" dir="5400000" rotWithShape="0"><a:srgbClr val="000000"><a:alpha val="35000"/></a:srgbClr></a:outerShdw></a:effectLst>` +
-		`<a:scene3d><a:camera prst="orthographicFront"/><a:lightRig rig="threePt" dir="t"/></a:scene3d>` +
-		`<a:sp3d><a:bevelT w="63500" h="25400"/></a:sp3d></a:effectStyle>` +
-		`</a:effectStyleLst>
+	`<a:effectStyle><a:effectLst/></a:effectStyle>` +
+	`<a:effectStyle><a:effectLst/></a:effectStyle>` +
+	`<a:effectStyle><a:effectLst><a:outerShdw blurRad="40000" dist="23000" dir="5400000" rotWithShape="0"><a:srgbClr val="000000"><a:alpha val="35000"/></a:srgbClr></a:outerShdw></a:effectLst>` +
+	`<a:scene3d><a:camera prst="orthographicFront"/><a:lightRig rig="threePt" dir="t"/></a:scene3d>` +
+	`<a:sp3d><a:bevelT w="63500" h="25400"/></a:sp3d></a:effectStyle>` +
+	`</a:effectStyleLst>
       <a:bgFillStyleLst><a:solidFill><a:schemeClr val="phClr"/></a:solidFill><a:solidFill><a:schemeClr val="phClr"/></a:solidFill><a:solidFill><a:schemeClr val="phClr"/></a:solidFill></a:bgFillStyleLst>
     </a:fmtScheme>
   </a:themeElements>
