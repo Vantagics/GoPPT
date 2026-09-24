@@ -416,6 +416,15 @@ type Shadow struct {
 	BlurRadius int
 	Color      Color
 	Alpha      int // 0-100
+	// ScaleX/ScaleY scale the shadow silhouette relative to the shape
+	// (percent; 100 = same size). PowerPoint writes e.g. sx="105000"
+	// for a 5% enlarged silhouette.
+	ScaleX int
+	ScaleY int
+	// Algn anchors the scaled silhouette to the shape box ("tl", "ctr",
+	// ...). With tl the enlargement grows right/down; empty means the
+	// writer/reader never saw one and the silhouette stays centred.
+	Algn string
 }
 
 // NewShadow creates a new Shadow.
@@ -426,6 +435,8 @@ func NewShadow() *Shadow {
 		Distance:  0,
 		Color:     Color{ARGB: "80000000"},
 		Alpha:     50,
+		ScaleX:    100,
+		ScaleY:    100,
 	}
 }
 

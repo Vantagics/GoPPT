@@ -472,7 +472,7 @@ func (w *PPTXWriter) writeRichTextShapeXML(s *RichTextShape, shapeID *int) strin
             <a:ext cx="%d" cy="%d"/>
           </a:xfrm>
 %s
-%s%s        </p:spPr>
+%s%s%s        </p:spPr>
         <p:txBody>
           %s
           <a:lstStyle/>
@@ -481,7 +481,7 @@ func (w *PPTXWriter) writeRichTextShapeXML(s *RichTextShape, shapeID *int) strin
 `, id, xmlEscape(name), descrAttr, xfAttrs,
 		s.offsetX, s.offsetY, s.width, s.height,
 		shapeGeomXML("rect", nil, s.customPath, "          "),
-		fillXML, borderXML,
+		fillXML, borderXML, shapeEffectXML(s.GetShadow(), 0, "          "),
 		bodyPrXML(bodyPrAttrs{
 			wrap:           boolToWrap(s.wordWrap),
 			columns:        s.columns,
@@ -1009,30 +1009,7 @@ func (w *PPTXWriter) writeDrawingShapeXML(s *DrawingShape, shapeID *int, slideNu
 	currentSlide := w.presentation.slides[slideNum-1]
 	relIdx := w.countRelIdxBefore(currentSlide.shapes, s)
 
-	shadowXML := ""
-	if s.shadow != nil && s.shadow.Visible {
-		shadowXML = fmt.Sprintf(`
-          <a:effectLst>
-            <a:outerShdw blurRad="%d" dist="%d" dir="%d" algn="bl" rotWithShape="0">
-              <a:srgbClr val="%s">
-                <a:alpha val="%d"/>
-              </a:srgbClr>
-            </a:outerShdw>
-          </a:effectLst>`,
-			s.shadow.BlurRadius*12700,
-			s.shadow.Distance*12700,
-			s.shadow.Direction*60000,
-			colorRGB(s.shadow.Color),
-			s.shadow.Alpha*1000)
-	} else if s.softEdgeRad > 0 {
-		// CT_PictureEffectLst order: blur, fillOverlay, glow, innerShdw,
-		// outerShdw, prstShdw, reflection, softEdge. A lone softEdge is its
-		// own effectLst.
-		shadowXML = fmt.Sprintf(`
-          <a:effectLst>
-            <a:softEdge rad="%d"/>
-          </a:effectLst>`, s.softEdgeRad)
-	}
+	shadowXML := shapeEffectXML(s.shadow, s.softEdgeRad, "          ")
 
 	// The frame's own line. Pictures read from real decks can carry one (a
 	// 7pt white mat around a framed screenshot); the writer used to drop it.
@@ -1076,6 +1053,38 @@ func (w *PPTXWriter) writeDrawingShapeXML(s *DrawingShape, shapeID *int, slideNu
 		xfrmAttrs(&s.BaseShape),
 		s.offsetX, s.offsetY, s.width, s.height,
 		prst, lnXML, shadowXML)
+}
+
+// shapeEffectXML serialises a shape-level <a:effectLst>: the outer shadow —
+// including the sx/sy silhouette scale and algn anchor a real deck carries —
+// and the soft-edge feather. CT_ShapeProperties and CT_PictureEffectLst both
+// order effectLst after a:ln; either chunk may be empty, and a shape with
+// neither returns "". AutoShape and RichTextShape used to drop their shadow
+// here entirely, so a saved deck lost every shape glow.
+func shapeEffectXML(sh *Shadow, softEdgeRad int64, indent string) string {
+	chunks := ""
+	if sh != nil && sh.Visible {
+		attrs := ""
+		if sh.ScaleX != 100 && sh.ScaleX != 0 {
+			attrs += fmt.Sprintf(` sx="%d"`, sh.ScaleX*1000)
+		}
+		if sh.ScaleY != 100 && sh.ScaleY != 0 {
+			attrs += fmt.Sprintf(` sy="%d"`, sh.ScaleY*1000)
+		}
+		if sh.Algn != "" {
+			attrs += fmt.Sprintf(` algn="%s"`, xmlEscape(sh.Algn))
+		}
+		chunks += fmt.Sprintf(`%s<a:outerShdw blurRad="%d" dist="%d" dir="%d"%s rotWithShape="0"><a:srgbClr val="%s"><a:alpha val="%d"/></a:srgbClr></a:outerShdw>`,
+			indent, sh.BlurRadius*12700, sh.Distance*12700, sh.Direction*60000, attrs,
+			colorRGB(sh.Color), sh.Alpha*1000)
+	}
+	if softEdgeRad > 0 {
+		chunks += fmt.Sprintf(`%s<a:softEdge rad="%d"/>`, indent, softEdgeRad)
+	}
+	if chunks == "" {
+		return ""
+	}
+	return fmt.Sprintf("%s<a:effectLst>\n%s%s\n%s</a:effectLst>", indent, indent, chunks, indent)
 }
 
 // blipFillChildrenXML serialises the children of <p:blipFill> that describe the
@@ -1181,13 +1190,13 @@ func (w *PPTXWriter) writeAutoShapeXML(s *AutoShape, shapeID *int) string {
             <a:ext cx="%d" cy="%d"/>
           </a:xfrm>
 %s
-%s%s        </p:spPr>%s
+%s%s%s        </p:spPr>%s
       </p:sp>
 `, id, xmlEscape(name), descrAttr+hiddenAttr(&s.BaseShape),
 		xfrmAttrs(&s.BaseShape),
 		s.offsetX, s.offsetY, s.width, s.height,
 		shapeGeomXML(string(s.shapeType), s.adjustValues, nil, "          "),
-		fillXML, borderXML, textXML)
+		fillXML, borderXML, shapeEffectXML(s.GetShadow(), 0, "          "), textXML)
 }
 
 // autoShapeBodyPr gathers the <a:bodyPr> values an AutoShape carries. The

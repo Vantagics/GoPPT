@@ -3027,6 +3027,16 @@ func (r *PPTXReader) parseSlideXML(decoder *xml.Decoder, slide *Slide, rels []xm
 							if v, err := strconv.Atoi(attr.Value); err == nil {
 								pendingShadow.Direction = v / 60000
 							}
+						case "sx":
+							if v, err := strconv.Atoi(attr.Value); err == nil {
+								pendingShadow.ScaleX = v / 1000
+							}
+						case "sy":
+							if v, err := strconv.Atoi(attr.Value); err == nil {
+								pendingShadow.ScaleY = v / 1000
+							}
+						case "algn":
+							pendingShadow.Algn = attr.Value
 						}
 					}
 				}

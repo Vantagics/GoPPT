@@ -3784,30 +3784,50 @@ func (r *renderer) renderShadowEllipse(shadow *Shadow, rect image.Rectangle, rin
 	blurPx := int(float64(shadow.BlurRadius)*12700*r.scaleX + 0.5)
 	radius := maxInt(1, blurPx/2)
 	pad := radius*3 + 2
-	bw := rect.Dx() + 2*pad
-	bh := rect.Dy() + 2*pad
+	// sx/sy enlarge the shadow silhouette relative to the shape. algn="tl"
+	// pins the scaled box's top-left to the shape's, so the extra area
+	// grows right/down (profile-verified against the COM export: the glow
+	// sits on the right side of the ring); any other alignment centres it.
+	sxf := 1.0
+	syf := 1.0
+	if shadow.ScaleX > 0 {
+		sxf = float64(shadow.ScaleX) / 100
+	}
+	if shadow.ScaleY > 0 {
+		syf = float64(shadow.ScaleY) / 100
+	}
+	ax := 0.0
+	ay := 0.0
+	if shadow.Algn != "tl" {
+		ax = float64(rect.Dx()) * (sxf - 1) / 2
+		ay = float64(rect.Dy()) * (syf - 1) / 2
+	}
+	scaledW := int(float64(rect.Dx())*sxf + 0.5)
+	scaledH := int(float64(rect.Dy())*syf + 0.5)
+	bw := scaledW + 2*pad
+	bh := scaledH + 2*pad
 	if bw <= 0 || bh <= 0 || rect.Dx() <= 0 || rect.Dy() <= 0 {
 		return
 	}
-	cxf := float64(rect.Dx()) / 2
-	cyf := float64(rect.Dy()) / 2
-	rxf := cxf + 0.5
-	ryf := cyf + 0.5
-	inX := rxf - float64(ringPx)
-	inY := ryf - float64(ringPx)
+	cxf := (float64(rect.Dx())/2)*sxf
+	cyf := (float64(rect.Dy())/2)*syf
+	rxf := (float64(rect.Dx())/2+0.5)*sxf
+	ryf := (float64(rect.Dy())/2+0.5)*syf
+	inX := rxf - float64(ringPx)*sxf
+	inY := ryf - float64(ringPx)*syf
 	ring := ringPx > 0 && inX > 0 && inY > 0
 	mask := image.NewAlpha(image.Rect(0, 0, bw, bh))
-	for py := 0; py < rect.Dy(); py++ {
+	for py := 0; py < scaledH; py++ {
 		row := mask.Pix[(py+pad)*mask.Stride:]
-		ny := (float64(py) + 0.5 - cyf) / ryf
-		for px := 0; px < rect.Dx(); px++ {
-			nx := (float64(px) + 0.5 - cxf) / rxf
+		ny := (float64(py)+0.5+ay - cyf) / ryf
+		for px := 0; px < scaledW; px++ {
+			nx := (float64(px)+0.5+ax - cxf) / rxf
 			if nx*nx+ny*ny > 1 {
 				continue
 			}
 			if ring {
-				nxi := (float64(px) + 0.5 - cxf) / inX
-				nyi := (float64(py) + 0.5 - cyf) / inY
+				nxi := (float64(px)+0.5+ax - cxf) / inX
+				nyi := (float64(py)+0.5+ay - cyf) / inY
 				if nxi*nxi+nyi*nyi < 1 {
 					continue
 				}
@@ -4555,7 +4575,18 @@ func (r *renderer) drawEllipseAA(cx, cy, w, h int, c color.RGBA, lineWidth int) 
 		for px := cx - lineWidth - 1; px < cx+w+lineWidth+1; px++ {
 			dxNorm := (float64(px) + 0.5 - centerX) / rx
 			d := math.Sqrt(dxNorm*dxNorm + dy2)
-			distPx := math.Abs(d-1.0) * minR
+			// Pixel distance to the ellipse along its normal. The old
+			// |d-1|*min(r) metric shrank x-distances at the left/right
+			// vertices by rx/ry, painting those arcs ~rx/ry times too
+			// thick (profile: 8px vs the COM gold's 4px on a 2pt ring).
+			// First-order distance |d-1|/|grad d| with
+			// |grad d| = sqrt(u²/rx² + v²/ry²)/d is exact at all four
+			// vertices and correct to first order elsewhere.
+			distPx := 0.0
+			if d > 1e-9 {
+				grad := math.Sqrt(dxNorm*dxNorm/(rx*rx) + dy2/(ry*ry)) / d
+				distPx = math.Abs(d-1.0) / grad
+			}
 			if distPx < threshold {
 				coverage := 1.0
 				if distPx > halfLW {
