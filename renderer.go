@@ -1637,7 +1637,17 @@ func (r *renderer) renderAutoShape(s *AutoShape) {
 						sRadius = int(math.Min(float64(w), float64(h)) * float64(adj) / 100000.0)
 					}
 				}
-				tr.renderShadowRounded(s.shadow, rect, sRadius)
+				if s.shapeType == AutoShapeRoundedRect && (s.fill == nil || s.fill.Type == FillNone) {
+					// A no-fill roundRect encloses no painted area, so the
+					// silhouette PowerPoint blurs is its pen trace — the
+					// 6pt annotation rings on slide30 sit over a table that
+					// must stay visible through them (brace law, round 57).
+					tr.renderShadowPolyline(s.shadow,
+						roundedRectOutlinePoints(ox, oy, w, h, sRadius),
+						autoShapeShadowPenPx(s, tr))
+				} else {
+					tr.renderShadowRounded(s.shadow, rect, sRadius)
+				}
 			case AutoShapeRectangle, "":
 				tr.renderShadow(s.shadow, rect)
 			default:
@@ -1865,7 +1875,13 @@ func (r *renderer) renderAutoShape(s *AutoShape) {
 							sRadius = int(math.Min(float64(w), float64(h)) * float64(adj) / 100000.0)
 						}
 					}
-					tr.renderShadowRounded(s.shadow, rect, sRadius)
+					if s.shapeType == AutoShapeRoundedRect && (s.fill == nil || s.fill.Type == FillNone) {
+						tr.renderShadowPolyline(s.shadow,
+							roundedRectOutlinePoints(ox, oy, w, h, sRadius),
+							autoShapeShadowPenPx(s, tr))
+					} else {
+						tr.renderShadowRounded(s.shadow, rect, sRadius)
+					}
 				case AutoShapeRectangle, "":
 					tr.renderShadow(s.shadow, rect)
 				default:
@@ -2128,6 +2144,54 @@ func (r *renderer) renderAutoShapeFill(s *AutoShape, x, y, w, h int) {
 	default:
 		r.renderFill(s.fill, rect)
 	}
+}
+
+// roundedRectOutlinePoints samples the stroke centreline of a roundRect
+// preset: four edges plus four quarter-arc corners, closed (the first point
+// repeated at the end). Consumers treat it as the pen trace of the shape's
+// outline — e.g. the shadow silhouette of a no-fill rounded rectangle.
+func roundedRectOutlinePoints(x, y, w, h, radius int) []fpoint {
+	if radius*2 > w {
+		radius = w / 2
+	}
+	if radius*2 > h {
+		radius = h / 2
+	}
+	if radius < 0 {
+		radius = 0
+	}
+	fx, fy := float64(x), float64(y)
+	fw, fh := float64(w), float64(h)
+	fr := float64(radius)
+	steps := maxInt(radius, 8)
+	var pts []fpoint
+	// top edge →
+	pts = append(pts, fpoint{fx + fr, fy}, fpoint{fx + fw - fr, fy})
+	arc := func(cx, cy, a0, a1 float64) {
+		for i := 1; i <= steps; i++ {
+			a := a0 + (a1-a0)*float64(i)/float64(steps)
+			pts = append(pts, fpoint{cx + fr*math.Cos(a), cy + fr*math.Sin(a)})
+		}
+	}
+	arc(fx+fw-fr, fy+fr, -math.Pi/2, 0)
+	pts = append(pts, fpoint{fx + fw, fy + fh - fr})
+	arc(fx+fw-fr, fy+fh-fr, 0, math.Pi/2)
+	pts = append(pts, fpoint{fx + fr, fy + fh})
+	arc(fx+fr, fy+fh-fr, math.Pi/2, math.Pi)
+	pts = append(pts, fpoint{fx, fy + fr})
+	arc(fx+fr, fy+fr, math.Pi, 1.5*math.Pi)
+	pts = append(pts, fpoint{fx + fr, fy})
+	return pts
+}
+
+// autoShapeShadowPenPx is the stroke width, in pixels, of the pen trace a
+// no-fill shape casts its shadow from (shared by the brace and roundRect
+// outline-silhouette paths).
+func autoShapeShadowPenPx(s *AutoShape, tr *renderer) int {
+	if s.border == nil || s.border.Style == BorderNone {
+		return 1
+	}
+	return maxInt(int(float64(maxInt(s.border.Width, 1))*12700.0*tr.scaleX), 1)
 }
 
 func (r *renderer) renderAutoShapeBorder(s *AutoShape, x, y, w, h int) {
@@ -7861,6 +7925,16 @@ func (r *renderer) bulletRunFor(para *Paragraph, ordinal, indent int) textRun {
 	}
 	if indent < 0 && bRun.width < -indent {
 		bRun.width = -indent
+	} else if indent < 0 && bRun.face != nil {
+		// PowerPoint draws the bullet glyph and then TABS: the landing is
+		// marL whenever the pen after the GLYPH alone has not passed it —
+		// the trailing space of the bullet text must not count (slide34's
+		// en-dash: glyph pen sits 10px short of marL, glyph+space 3px past,
+		// and the COM export puts the text exactly on marL).
+		if sw := font.MeasureString(bRun.face, " ").Ceil(); sw > 0 &&
+			bRun.width-sw <= -indent {
+			bRun.width = -indent
+		}
 	}
 	return bRun
 }
