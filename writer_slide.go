@@ -1024,6 +1024,14 @@ func (w *PPTXWriter) writeDrawingShapeXML(s *DrawingShape, shapeID *int, slideNu
 			s.shadow.Direction*60000,
 			colorRGB(s.shadow.Color),
 			s.shadow.Alpha*1000)
+	} else if s.softEdgeRad > 0 {
+		// CT_PictureEffectLst order: blur, fillOverlay, glow, innerShdw,
+		// outerShdw, prstShdw, reflection, softEdge. A lone softEdge is its
+		// own effectLst.
+		shadowXML = fmt.Sprintf(`
+          <a:effectLst>
+            <a:softEdge rad="%d"/>
+          </a:effectLst>`, s.softEdgeRad)
 	}
 
 	// The frame's own line. Pictures read from real decks can carry one (a

@@ -2997,6 +2997,19 @@ func (r *PPTXReader) parseSlideXML(decoder *xml.Decoder, slide *Slide, rels []xm
 						}
 					}
 				}
+			case "softEdge":
+				// <a:softEdge rad="..."/> feathers the frame edge out to
+				// transparent over the radius, measured inward. Picture
+				// frames carry it; shape fills ignore it for now.
+				if state.inEffectLst && state.inPic && currentDrawing != nil {
+					for _, attr := range t.Attr {
+						if attr.Name.Local == "rad" {
+							if v, err := strconv.ParseInt(attr.Value, 10, 64); err == nil {
+								currentDrawing.softEdgeRad = v
+							}
+						}
+					}
+				}
 			case "spPr", "grpSpPr":
 				if state.inSp || state.inPic || state.inCxnSp || state.inGrpSp {
 					state.inSpPr = true

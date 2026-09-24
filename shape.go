@@ -572,6 +572,10 @@ type DrawingShape struct {
 	// pic's spPr exactly as they do in a shape's.
 	border *Border
 	shadow *Shadow
+	// softEdgeRad is <a:softEdge rad> in EMU: the picture's frame edge
+	// feathers out to transparent over this distance, measured inward from
+	// the frame outline. 0 = no soft edge.
+	softEdgeRad int64
 }
 
 // colorReplace is one <a:clrChange> rule: source pixels whose RGB equals From
@@ -586,6 +590,15 @@ type colorReplace struct {
 }
 
 func (d *DrawingShape) GetType() ShapeType { return ShapeTypeDrawing }
+
+// GetSoftEdge returns the <a:softEdge> radius in EMU (0 = none).
+func (d *DrawingShape) GetSoftEdge() int64 { return d.softEdgeRad }
+
+// SetSoftEdge sets the soft-edge feather distance in EMU.
+func (d *DrawingShape) SetSoftEdge(rad int64) *DrawingShape {
+	d.softEdgeRad = rad
+	return d
+}
 
 // NewDrawingShape creates a new drawing shape.
 func NewDrawingShape() *DrawingShape {

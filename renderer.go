@@ -165,6 +165,7 @@ func (p *Presentation) SlideToImage(slideIndex int, opts *RenderOptions) (img im
 		fontDiag:            opts.FontDiagnostics,
 		onFontFallback:      opts.OnFontFallback,
 		draft:               opts.Draft,
+		groupScale:          1.0,
 		slideNumber:         slideIndex + 1,
 	}
 
@@ -320,6 +321,12 @@ type renderer struct {
 	// draft skips anti-aliasing, shadows and image smoothing. See
 	// RenderOptions.Draft.
 	draft bool
+	// groupScale is the linear scale the enclosing group transform applies
+	// to the shape currently being rendered (product of nested groups, 1.0
+	// at top level). Distances declared in EMU on a shape — the picture
+	// soft-edge radius — scale with it, because the shape's own extent
+	// already did.
+	groupScale float64
 	// slideNumber is the 1-based number of the slide being rendered. A
 	// <a:fld type="slidenum"> run evaluates to it at draw time; the cached
 	// <a:t> in the file is whatever the last save saw.
@@ -694,6 +701,11 @@ func (r *renderer) renderRotatedExpanded(x, y, w, h, bufH, rotation int, flipH, 
 func (r *renderer) renderGroup(g *GroupShape) {
 	// Transform child coordinates from child space (chOff/chExt) to group space (off/ext)
 	if g.childExtX > 0 && g.childExtY > 0 {
+		// Distances the children declare in EMU (picture soft-edge radius)
+		// scale with the group exactly as their extents do.
+		prevScale := r.groupScale
+		r.groupScale *= (float64(g.width)/float64(g.childExtX) + float64(g.height)/float64(g.childExtY)) / 2
+		defer func() { r.groupScale = prevScale }()
 		for _, gs := range g.shapes {
 			bs := gs.base()
 			origX := bs.offsetX
@@ -1282,6 +1294,58 @@ func (r *renderer) renderDrawing(s *DrawingShape) {
 		// screenshot into a framed, toned exhibit.
 		if s.hasDuotone {
 			applyDuotone(scaledImg, s.duotoneA, s.duotoneB)
+		}
+		// <a:softEdge> feathers the frame edge out to transparent over the
+		// radius, measured inward from the frame outline. The COM-calibrated
+		// falloff (slide40's feathered cylinder golden) is a smoothstep
+		// across the radius — alpha 0 at the edge, 1 one radius in — not a
+		// linear ramp and not a Gaussian.
+		if s.softEdgeRad > 0 {
+			radPx := float64(s.softEdgeRad) * r.scaleX * r.groupScale
+			if radPx < 1 {
+				radPx = 1
+			}
+			b := scaledImg.Bounds()
+			cw, ch := float64(b.Dx()), float64(b.Dy())
+			ell := AutoShapeType(s.presetGeom) == AutoShapeEllipse
+			var ecx, ecy, erx, ery float64
+			if ell {
+				ecx, ecy = cw/2, ch/2
+				erx, ery = cw/2, ch/2
+			}
+			for py := b.Min.Y; py < b.Max.Y; py++ {
+				for px := b.Min.X; px < b.Max.X; px++ {
+					var d float64
+					if ell {
+						dxn := (float64(px-b.Min.X) + 0.5 - ecx) / erx
+						dyn := (float64(py-b.Min.Y) + 0.5 - ecy) / ery
+						q := math.Sqrt(dxn*dxn + dyn*dyn)
+						d = (1 - q) * math.Min(erx, ery)
+					} else {
+						lx := float64(px-b.Min.X) + 0.5
+						ly := float64(py-b.Min.Y) + 0.5
+						d = math.Min(math.Min(lx, cw-lx), math.Min(ly, ch-ly))
+					}
+					t := d / radPx
+					var a float64
+					if t >= 1 {
+						continue
+					}
+					if t <= 0 {
+						a = 0
+					} else {
+						a = t * t * (3 - 2*t)
+					}
+					c := scaledImg.RGBAAt(px, py)
+					// Premultiplied: alpha and channels scale together.
+					scaledImg.SetRGBA(px, py, color.RGBA{
+						R: uint8(float64(c.R) * a),
+						G: uint8(float64(c.G) * a),
+						B: uint8(float64(c.B) * a),
+						A: uint8(float64(c.A) * a),
+					})
+				}
+			}
 		}
 		if pts != nil {
 			// pts are in the same space as the destination rect: absolute for
@@ -3694,6 +3758,18 @@ func (r *renderer) picFramePoints(prst string, x, y, w, h int) []fpoint {
 	switch AutoShapeType(prst) {
 	case AutoShapeSnip2DiagRect:
 		return r.snip2DiagRectPoints(x, y, w, h, nil)
+	case AutoShapeEllipse:
+		// 72-gon approximation of the elliptical frame; the polygon alpha
+		// mask clips the photo to it. 72 segments on a 250px frame put the
+		// chord sag well under half a pixel.
+		pts := make([]fpoint, 0, 72)
+		cx, cy := float64(x)+float64(w)/2, float64(y)+float64(h)/2
+		rx, ry := float64(w)/2, float64(h)/2
+		for i := 0; i < 72; i++ {
+			a := float64(i) * 2 * math.Pi / 72
+			pts = append(pts, fpoint{cx + rx*math.Cos(a), cy + ry*math.Sin(a)})
+		}
+		return pts
 	}
 	return nil
 }
