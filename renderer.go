@@ -2106,6 +2106,20 @@ func (r *renderer) renderAutoShapeFill(s *AutoShape, x, y, w, h int) {
 		} else {
 			r.fillPolygonGradient(pts, image.Rect(x, y, x+w, y+h), s.fill)
 		}
+	case AutoShapeCloudCallout:
+		body, tails, _ := cloudCalloutGeometry(x, y, w, h, s.adjustValues)
+		if s.fill.Type == FillSolid {
+			r.fillPolygonAA(body, fc)
+			for _, c := range tails {
+				r.fillPolygonAA(circleFpoints(c, 48), fc)
+			}
+		} else {
+			rect := image.Rect(x, y, x+w, y+h)
+			r.fillPolygonGradient(body, rect, s.fill)
+			for _, c := range tails {
+				r.fillPolygonGradient(circleFpoints(c, 48), rect, s.fill)
+			}
+		}
 	case AutoShapeArc:
 		// Arc preset geometry has no fill by default (it's just a stroke).
 		// Skip fill for arc shapes.
@@ -2260,6 +2274,15 @@ func (r *renderer) renderAutoShapeBorder(s *AutoShape, x, y, w, h int) {
 		r.drawPolygon(pts, bc, pw)
 	case AutoShapeRightBrace, AutoShapeLeftBrace:
 		r.drawBrace(s.shapeType, x, y, w, h, bc, pw, s.adjustValues)
+	case AutoShapeCloudCallout:
+		body, tails, details := cloudCalloutGeometry(x, y, w, h, s.adjustValues)
+		r.strokeOpenPath(body, bc, pw, true)
+		for _, c := range tails {
+			r.strokeOpenPath(circleFpoints(c, 48), bc, pw, true)
+		}
+		for _, d := range details {
+			r.strokeOpenPath(d, bc, pw, false)
+		}
 	default:
 		r.drawRectBorder(image.Rect(x, y, x+w, y+h), bc, pw, s.border.Style)
 	}
@@ -4939,6 +4962,187 @@ func (r *renderer) fillPolygon(pts []fpoint, c color.RGBA) {
 				}
 			}
 		}
+	}
+}
+
+// fcircle is a stroked-and-filled circle subpath of a preset outline.
+type fcircle struct{ cx, cy, r float64 }
+
+// preset arc tables for cloudCallout (ECMA-376 / Apache POI
+// presetShapeDefinitions.xml, 43200×43200 path space): the cloud body is one
+// closed subpath of 11 arcTo commands, and a stroke-only path repeats each
+// puff as a short inner crease arc. stAng/swAng are in 60000ths of a degree.
+var cloudBodyArcs = [...]struct{ wR, hR, stAng, swAng int }{
+	{6753, 9190, -11429249, 7426832},
+	{5333, 7267, -8646143, 5396714},
+	{4365, 5945, -8748475, 5983381},
+	{4857, 6595, -7859164, 7034504},
+	{5333, 7273, -4722533, 6541615},
+	{6775, 9220, -2776035, 7816140},
+	{5785, 7867, 37501, 6842000},
+	{6752, 9215, 1347096, 6910353},
+	{7720, 10543, 3974558, 4542661},
+	{4360, 5918, -16496525, 8804134},
+	{4345, 5945, -14809710, 9151131},
+}
+
+var cloudDetailArcs = [...]struct{ x, y, wR, hR, stAng, swAng int }{
+	{4693, 26177, 4345, 5945, 5204520, 1585770},
+	{6928, 34899, 4360, 5918, 4416628, 686848},
+	{16478, 39090, 6752, 9215, 8257449, 844866},
+	{28827, 34751, 6752, 9215, 387196, 959901},
+	{34129, 22954, 5785, 7867, -4217541, 4255042},
+	{41798, 15354, 5333, 7273, 1819082, 1665090},
+	{38324, 5426, 4857, 6595, -824660, 891534},
+	{29078, 3952, 4857, 6595, -8950887, 1091722},
+	{22141, 4720, 4365, 5945, -9809656, 1061181},
+	{14000, 5192, 6753, 9190, -4002417, 739161},
+	{4127, 15789, 6753, 9190, 9459261, 711490},
+}
+
+// appendArcToPath appends a flattened OOXML arcTo to pts. cur is the current
+// point already mapped into pixel space; the arc's ellipse centre is the
+// point minus (wR·cos stAng, hR·sin stAng) — the arc starts where the last
+// command ended. Radii scale with the path space like every x/y coordinate.
+func appendArcToPath(pts []fpoint, cur fpoint, wR, hR int, stAng, swAng int, sx, sy float64) []fpoint {
+	wr := float64(wR) * sx
+	hr := float64(hR) * sy
+	if wr < 0.25 || hr < 0.25 {
+		return pts
+	}
+	stRad := float64(stAng) / 60000.0 * math.Pi / 180.0
+	swRad := float64(swAng) / 60000.0 * math.Pi / 180.0
+	cx := cur.x - wr*math.Cos(stRad)
+	cy := cur.y - hr*math.Sin(stRad)
+	steps := maxInt(int(math.Abs(swRad)*(wr+hr)*0.5), 8)
+	aStep := swRad / float64(steps)
+	for i := 1; i <= steps; i++ {
+		a := stRad + aStep*float64(i)
+		pts = append(pts, fpoint{cx + wr*math.Cos(a), cy + hr*math.Sin(a)})
+	}
+	return pts
+}
+
+// cloudCalloutGeometry computes the cloudCallout preset outline. The cloud
+// body and crease arcs live in a 43200×43200 path space scaled to the box;
+// the three tail bubbles hang on the line from the callout tip (xPos,yPos,
+// from adj1/adj2 as offsets from centre) toward the cloud edge, growing from
+// 60000ths to 18000ths of ss along the way — the POI guide chain g6..g25
+// walks that line by similar triangles. Returns the closed cloud body, the
+// three tail circles, and the open crease arcs.
+func cloudCalloutGeometry(x, y, w, h int, adj map[string]int) ([]fpoint, []fcircle, [][]fpoint) {
+	adj1, adj2 := -20833, 62500
+	if adj != nil {
+		if v, ok := adj["adj1"]; ok {
+			adj1 = v
+		}
+		if v, ok := adj["adj2"]; ok {
+			adj2 = v
+		}
+	}
+	fw, fh := float64(w), float64(h)
+	ss := math.Min(fw, fh)
+	wd2, hd2 := fw/2, fh/2
+	dxPos := fw * float64(adj1) / 100000
+	dyPos := fh * float64(adj2) / 100000
+	xPos := wd2 + dxPos
+	yPos := hd2 + dyPos
+	// ht/wt = cat2/sat2 of (hd2/wd2) against the tip offset: the projection
+	// of half the box onto the tip direction. g2/g3 repeat the projection
+	// onto that direction, landing g4/g5 on the cloud edge nearest the tip.
+	dLen := math.Hypot(dxPos, dyPos)
+	if dLen < 1e-9 {
+		dLen = 1e-9
+	}
+	ht := hd2 * dxPos / dLen
+	wt := wd2 * dyPos / dLen
+	hLen := math.Hypot(ht, wt)
+	if hLen < 1e-9 {
+		hLen = 1e-9
+	}
+	g2 := wd2 * ht / hLen
+	g3 := hd2 * wt / hLen
+	g4 := wd2 + g2
+	g5 := hd2 + g3
+	g6 := g4 - xPos
+	g7 := g5 - yPos
+	g8 := math.Hypot(g6, g7)
+	if g8 < 1e-9 {
+		g8 = 1e-9
+	}
+	g9 := ss * 6600 / 21600
+	g10 := g8 - g9
+	g11 := g10 / 3
+	g12 := ss * 1800 / 21600
+	g13 := g11 + g12
+	g14 := g13 * g6 / g8
+	g15 := g13 * g7 / g8
+	g16 := g14 + xPos
+	g17 := g15 + yPos
+	g18 := ss * 4800 / 21600
+	g19 := g11 * 2
+	g20 := g18 + g19
+	g21 := g20 * g6 / g8
+	g22 := g20 * g7 / g8
+	g23 := g21 + xPos
+	g24 := g22 + yPos
+	g25 := ss * 1200 / 21600
+	g26 := ss * 600 / 21600
+
+	// Tail bubbles: each path is moveTo(tip+r, y) then a full circle arc, so
+	// the arc centre = moveTo − (r, 0) = the previous bubble centre walked
+	// one step along the tip→cloud line. Small→large outward from the tip.
+	ox, oy := float64(x), float64(y)
+	// Tail bubble centres carry the box offset like every other point —
+	// geometry helpers must be absolute when given absolute x/y.
+	tails := []fcircle{
+		{ox + xPos, oy + yPos, g26},
+		{ox + g16, oy + g17, g25},
+		{ox + g23, oy + g24, g12},
+	}
+
+	sx := fw / 43200
+	sy := fh / 43200
+
+	body := []fpoint{{ox + 3900*sx, oy + 14370*sy}}
+	for _, a := range cloudBodyArcs {
+		cur := body[len(body)-1]
+		body = appendArcToPath(body, cur, a.wR, a.hR, a.stAng, a.swAng, sx, sy)
+	}
+
+	details := make([][]fpoint, 0, len(cloudDetailArcs))
+	for _, d := range cloudDetailArcs {
+		arc := []fpoint{{ox + float64(d.x)*sx, oy + float64(d.y)*sy}}
+		start := arc[0]
+		arc = appendArcToPath(arc, start, d.wR, d.hR, d.stAng, d.swAng, sx, sy)
+		details = append(details, arc)
+	}
+	return body, tails, details
+}
+
+// circleFpoints returns an n-gon approximation of a circle subpath.
+func circleFpoints(c fcircle, n int) []fpoint {
+	pts := make([]fpoint, 0, n+1)
+	for i := 0; i <= n; i++ {
+		a := 2 * math.Pi * float64(i) / float64(n)
+		pts = append(pts, fpoint{c.cx + c.r*math.Cos(a), c.cy + c.r*math.Sin(a)})
+	}
+	return pts
+}
+
+// strokeOpenPath strokes a polyline with drawLineAA; closed=true repeats the
+// first point at the end. Unlike drawPolygon it leaves open paths (the cloud
+// crease arcs) unclosed.
+func (r *renderer) strokeOpenPath(pts []fpoint, c color.RGBA, width int, closed bool) {
+	n := len(pts)
+	if n < 2 {
+		return
+	}
+	for i := 0; i < n-1; i++ {
+		r.drawLineAA(int(pts[i].x), int(pts[i].y), int(pts[i+1].x), int(pts[i+1].y), c, width)
+	}
+	if closed && n > 2 {
+		r.drawLineAA(int(pts[n-1].x), int(pts[n-1].y), int(pts[0].x), int(pts[0].y), c, width)
 	}
 }
 

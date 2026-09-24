@@ -842,6 +842,7 @@ const (
 	AutoShapeBentUpArrow           AutoShapeType = "bentUpArrow"
 	AutoShapeSnip2DiagRect         AutoShapeType = "snip2DiagRect"
 	AutoShapeUturnArrow            AutoShapeType = "uturnArrow"
+	AutoShapeCloudCallout          AutoShapeType = "cloudCallout"
 	AutoShapeLeftBrace             AutoShapeType = "leftBrace"
 	AutoShapeRightBrace            AutoShapeType = "rightBrace"
 	AutoShapeMathEqual             AutoShapeType = "mathEqual"
