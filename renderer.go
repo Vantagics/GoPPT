@@ -845,29 +845,12 @@ func (r *renderer) renderRichText(s *RichTextShape) {
 	// (rare case where the box expands horizontally).
 	wordWrap := s.wordWrap
 
-	// When default insets are used and text overflows, progressively reduce
-	// insets to make room. Font metric differences between systems can cause
-	// text to be slightly larger than the original authoring environment
-	// expected, so shrinking insets first avoids unnecessary text overflow.
-	if !s.insetsSet {
-		textH := r.measureParagraphsHeight(s.paragraphs, tw, th, s.textAnchor, wordWrap)
-		if textH > th && th > 0 && (pxT+pxB) > 0 {
-			needed := textH - th
-			avail := pxT + pxB
-			if needed >= avail {
-				pxT = 0
-				pxB = 0
-			} else {
-				scale := float64(avail-needed) / float64(avail)
-				pxT = int(float64(pxT) * scale)
-				pxB = int(float64(pxB) * scale)
-			}
-			th = h - pxT - pxB
-			if th < 1 {
-				th = h
-			}
-		}
-	}
+	// No inset shrink on overflow: the round 61 probe deck pinned that
+	// PowerPoint keeps the declared (default) insets even when the text
+	// block is taller than the inset area — a 44pt line in a 120px box
+	// still centres on the 8px-inset area and overflows both ways
+	// (probe slide08/09 gold). Shrinking the insets moved the anchor
+	// datum and cost a pixel on every tight centred title.
 
 	// Auto-shrink text when normAutofit is set without an explicit fontScale.
 	// PowerPoint dynamically calculates the scale to fit text within the box.
@@ -6967,6 +6950,12 @@ type textLine struct {
 	// lines, whose baseline placement the golden image still arbitrates.
 	ascentF  float64
 	descendF float64
+	// Unrounded line advance: PowerPoint accumulates the 1.2 × size pitch —
+	// and every spacing lever on it — as a float and rounds each drawn
+	// baseline once (round 61 probe: six anchor/spacing variants, every
+	// line top predicted). Zero for CJK / metric-derived lines, which keep
+	// the integer accumulation the cjk goldens were tuned against.
+	advanceF float64
 	hasCJK   bool
 }
 
@@ -7092,6 +7081,7 @@ func (r *renderer) buildTextLine(runs []textRun) textLine {
 	// there. Reserving the question beats silently moving a golden.
 	if hasWin && !hasCJK {
 		adv := 0
+		advF := 0.0
 		for _, run := range textRuns {
 			if run.font == nil {
 				continue
@@ -7099,19 +7089,21 @@ func (r *renderer) buildTextLine(runs []textRun) textLine {
 			if h := int(1.2*r.fontSizePixels(run.font) + 0.5); h > adv {
 				adv = h
 			}
+			if f := 1.2 * r.fontSizePixels(run.font); f > advF {
+				advF = f
+			}
 		}
 		if adv > 0 {
 			tl.lineHeight = adv
 		}
-		// Round 59 finding, parked for the follow-up campaign: PowerPoint
-		// accumulates this 1.2 × size pitch as a float and rounds each
-		// line's position (named-font probe export: 20 lines of 14pt
-		// measure 709px over 19 gaps, against 709.33 predicted and 706.8
-		// for per-line integer rounding; 28pt measures 74.667 exactly).
-		// Landing that here also needs the anchor's block-height law —
-		// a centered two-line box moves by the last line's fractional
-		// excess, and the comparison decks disagree about it — so the
-		// integer advance stays until both are pinned together.
+		if advF > 0 {
+			tl.advanceF = advF
+		}
+		// Round 59 finding, landed in round 61 together with the anchor's
+		// block-height law: PowerPoint accumulates this 1.2 × size pitch as
+		// a float and rounds each drawn baseline once. The draw path
+		// (drawParagraphs) consumes tl.advanceF; the integer lineHeight
+		// above stays for the measure paths and the CJK gate.
 	}
 	if tl.lineHeight < 1 {
 		tl.lineHeight = 14
@@ -7226,8 +7218,16 @@ func (r *renderer) paragraphFontSize(para *Paragraph) float64 {
 // by exactly that line's height. The height comes from the same win metrics
 // the real lines use, through whatever face the default resolution picks.
 func (r *renderer) emptyParagraphLineHeight(para *Paragraph) int {
+	h, _ := r.emptyParagraphLineHeightF(para)
+	return h
+}
+
+// emptyParagraphLineHeightF is the same line box with its unrounded 1.2 ×
+// size advance beside it — the float layout (round 61) accumulates the
+// fraction instead of the rounded pixel height.
+func (r *renderer) emptyParagraphLineHeightF(para *Paragraph) (int, float64) {
 	if para.endParaRPrSize <= 0 {
-		return 14
+		return 14, 14
 	}
 	sizePt := float64(para.endParaRPrSize) / 100.0
 	f := NewFont()
@@ -7236,7 +7236,8 @@ func (r *renderer) emptyParagraphLineHeight(para *Paragraph) int {
 	// metrics (see buildTextLine); the empty line is no exception — the
 	// COM variant that doubled an empty paragraph's endParaRPr size grew
 	// the following gap by exactly the 1.2× line plus its spacing.
-	return int(1.2*r.fontSizePixels(f) + 0.5)
+	adv := 1.2 * r.fontSizePixels(f)
+	return int(adv + 0.5), adv
 }
 
 // measureParagraphsHeight estimates the total pixel height needed to render
@@ -7378,11 +7379,17 @@ func (r *renderer) drawParagraphs(paragraphs []*Paragraph, x, y, w, h int, ancho
 		line        textLine
 		spaceBefore int
 		spaceAfter  int
-		lineSpacing int // 0 means default (single)
-		hAlign      HorizontalAlignment
-		paraIdx     int  // index into paragraphs slice
-		isFirst     bool // first line of paragraph
-		isLast      bool // last line of paragraph
+		// The raw spacing statements in hundredths of a point, kept beside
+		// their rounded pixel forms: the float layout (round 61) quantizes
+		// them to 1/64 px itself, and rounding to whole pixels first would
+		// lose the fraction the accumulation rides on.
+		spaceBeforeH int
+		spaceAfterH  int
+		lineSpacing  int // 0 means default (single)
+		hAlign       HorizontalAlignment
+		paraIdx      int  // index into paragraphs slice
+		isFirst      bool // first line of paragraph
+		isLast       bool // last line of paragraph
 	}
 	var allLines []lineInfo
 	ordinals := bulletOrdinals(paragraphs)
@@ -7433,7 +7440,8 @@ func (r *renderer) drawParagraphs(paragraphs []*Paragraph, x, y, w, h int, ancho
 		}
 		if len(lines) == 0 {
 			// Empty paragraph still takes space
-			lines = []textLine{{lineHeight: r.emptyParagraphLineHeight(para)}}
+			eh, ef := r.emptyParagraphLineHeightF(para)
+			lines = []textLine{{lineHeight: eh, advanceF: ef}}
 		}
 
 		for i, line := range lines {
@@ -7447,10 +7455,12 @@ func (r *renderer) drawParagraphs(paragraphs []*Paragraph, x, y, w, h int, ancho
 			}
 			if i == 0 {
 				// spaceBefore is in hundredths of a point from spcPts
-				li.spaceBefore = r.hundredthPtToPixelY(r.paraSpaceBefore(para, pi == 0))
+				li.spaceBeforeH = r.paraSpaceBefore(para, pi == 0)
+				li.spaceBefore = r.hundredthPtToPixelY(li.spaceBeforeH)
 			}
 			if i == len(lines)-1 {
-				li.spaceAfter = r.hundredthPtToPixelY(para.spaceAfter)
+				li.spaceAfterH = para.spaceAfter
+				li.spaceAfter = r.hundredthPtToPixelY(li.spaceAfterH)
 			}
 			allLines = append(allLines, li)
 		}
@@ -7474,32 +7484,138 @@ func (r *renderer) drawParagraphs(paragraphs []*Paragraph, x, y, w, h int, ancho
 		totalH += li.spaceAfter
 	}
 
-	// Vertical anchor offset
+	// Round 61: PowerPoint lays a Latin text block out in floats — here in
+	// 1/64 px fixed point, the grain GDI's integer metrics live on. The
+	// 1.2 × size pitch, the spacing levers and the paragraph spaces all
+	// accumulate unrounded, the anchor's block height floors, and only the
+	// drawn baseline snaps down to the pixel grid. The probe decks (six
+	// anchor / spacing / empty-paragraph variants, every line top of all
+	// six predicted) pinned each piece. CJK and metric-derived lines keep
+	// the integer accumulation the cjk goldens were tuned against.
+	floatLayout := len(allLines) > 0
+	for _, li := range allLines {
+		if li.line.hasCJK || (li.line.advanceF <= 0 && len(li.line.runs) > 0) {
+			floatLayout = false
+			break
+		}
+	}
+	type lineGeom struct{ pitchQ, ascQ, beforeQ, afterQ int64 }
+	geoms := make([]lineGeom, len(allLines))
+	totalQ := int64(0)
+	// Unrounded float mirror of the per-line advance (space-before + pitch
+	// + space-after). The centred anchor must ride THIS, not the Q6 sum:
+	// thirteen 16pt lines each gain +0.005px from the 1/64 quantization and
+	// the +0.06px drift flips every other first baseline a pixel high (the
+	// staircase probe caught exactly that).
+	advSumF := 0.0
+	lastPitchF, lastAfterF, lastAscF, lastDescF := 0.0, 0.0, 0.0, 0.0
+	for i, li := range allLines {
+		var g lineGeom
+		if floatLayout {
+			g.pitchQ = int64(li.line.advanceF*64 + 0.5)
+			g.ascQ = int64(li.line.ascentF*64 + 0.5)
+			pf, af, df := li.line.advanceF, li.line.ascentF, li.line.descendF
+			if li.lineSpacing < 0 {
+				// A percentage line spacing stretches the ascent with the
+				// box — the round 23 law (the whole line box scales)
+				// extended from lnSpcReduction to spcPct.
+				p := float64(-li.lineSpacing) / 100000.0
+				g.pitchQ = int64(float64(g.pitchQ)*p + 0.5)
+				g.ascQ = int64(float64(g.ascQ)*p + 0.5)
+				pf, af, df = pf*p, af*p, df*p
+			} else if li.lineSpacing > 0 {
+				// spcPts is an absolute line height; the ascent is untouched.
+				g.pitchQ = int64(float64(li.lineSpacing) * 127.0 * r.scaleY * 64)
+				pf = float64(li.lineSpacing) * 127.0 * r.scaleY
+			}
+			if r.lnSpcReduction > 0 {
+				f := 1.0 - r.lnSpcReduction
+				g.pitchQ = int64(float64(g.pitchQ)*f + 0.5)
+				g.ascQ = int64(float64(g.ascQ)*f + 0.5)
+				pf, af, df = pf*f, af*f, df*f
+			}
+			g.beforeQ = int64(float64(li.spaceBeforeH) * 127.0 * r.scaleY * 64)
+			g.afterQ = int64(float64(li.spaceAfterH) * 127.0 * r.scaleY * 64)
+			totalQ += g.pitchQ + g.beforeQ + g.afterQ
+			advSumF += float64(li.spaceBeforeH)*127.0*r.scaleY + pf +
+				float64(li.spaceAfterH)*127.0*r.scaleY
+			lastPitchF, lastAfterF, lastAscF, lastDescF = pf,
+				float64(li.spaceAfterH)*127.0*r.scaleY, af, df
+		}
+		geoms[i] = g
+	}
+
+	// Vertical anchor offset.
+	//
+	// Three laws, one per anchor, all pinned by the round 61 staircase
+	// probes (sixty COM-exported boxes stepping one pixel: a 44pt single
+	// line, a 16pt single line, thirteen 16pt lines — each at twenty box
+	// heights) plus the six-page probe deck:
+	//
+	//   top      baseline_k = floor(y + cumF_k + ascF)          (Q6 below)
+	//   bottom   baseline_k = floor(y + h − totalF + cumF + ascF)
+	//   middle   baseline_0 = y + round((h − blockF)/2) + round(ascF)
+	//            baseline_k = that + the Q6 pitch cycle, blockF =
+	//            (N−1) × pitchF + last line's ascent + descent, all float
+	//
+	// The centred law is the delicate one: the anchor offset and the first
+	// ascent round SEPARATELY (the slide-11 title, a 44pt single line in a
+	// 120px box, floors to 193 where a combined round lands 194), and the
+	// block height is the real last-line font box, not the pitch sum — an
+	// earlier cut used the pitch sum and pushed every centred baseline a
+	// pixel high on the real decks. The offset rides unrounded floats: the
+	// Q6 mirror drifts +0.005px per line and flips half the first baselines.
+	// Everything after the first baseline stays in the 1/64-px fixed point
+	// cycle the six-page probe verified (its rounding happens to reproduce
+	// PowerPoint's ceil-of-cumulative line grid for the common pitches).
 	startY := y
-	switch anchor {
-	case TextAnchorMiddle:
-		startY = y + (h-totalH)/2
-	case TextAnchorBottom:
-		startY = y + h - totalH
-		// Do NOT clamp startY for bottom anchor. PowerPoint allows
-		// bottom-anchored text to overflow upward above the shape
-		// boundary, which is the expected behaviour for shapes like
-		// timeline annotation boxes.
+	centerStartY := -1
+	if floatLayout {
+		switch anchor {
+		case TextAnchorMiddle:
+			// Block = everything above the last line's ascent plus its real
+			// font box: sum of per-line advances minus the last pitch+after,
+			// then + last ascent + descent, all unrounded.
+			blockF := advSumF - lastPitchF - lastAfterF + lastAscF + lastDescF
+			centerStartY = y + int(math.Round((float64(h)-blockF)/2))
+		case TextAnchorBottom:
+			startY = y + h - int(totalQ>>6)
+		}
+	} else {
+		switch anchor {
+		case TextAnchorMiddle:
+			startY = y + (h-totalH)/2
+		case TextAnchorBottom:
+			startY = y + h - totalH
+			// Do NOT clamp startY for bottom anchor. PowerPoint allows
+			// bottom-anchored text to overflow upward above the shape
+			// boundary, which is the expected behaviour for shapes like
+			// timeline annotation boxes.
+		}
 	}
 
 	curY := startY
-	for _, li := range allLines {
-		// Same rule as the height measure above: every paragraph carries its
-		// spaceBefore except the block's first, which PowerPoint ignores.
-		curY += li.spaceBefore
-
-		lh := li.line.lineHeight
-		if li.lineSpacing < 0 {
-			lh = int(float64(lh) * float64(-li.lineSpacing) / 100000.0)
-		} else if li.lineSpacing > 0 {
-			lh = r.hundredthPtToPixelY(li.lineSpacing)
+	curQ := int64(0)
+	for i, li := range allLines {
+		var baseline int
+		if floatLayout {
+			curQ += geoms[i].beforeQ
+			if centerStartY >= 0 {
+				// Centred: the first baseline sits at round(off)+round(asc);
+				// later lines add the Q6 pitch cycle relative to the first
+				// ascent's floor.
+				baseline = centerStartY + int(math.Round(allLines[0].line.ascentF)) +
+					int(((curQ+geoms[i].ascQ)>>6)-(int64(geoms[0].ascQ)>>6))
+			} else {
+				baseline = startY + int((curQ+geoms[i].ascQ)>>6)
+			}
+		} else {
+			// Same rule as the height measure above: every paragraph carries
+			// its spaceBefore except the block's first, which PowerPoint
+			// ignores.
+			curY += li.spaceBefore
+			baseline = curY + r.baselineOffset(li.line)
 		}
-		lh = r.applyLnSpcReduction(lh)
 
 		// Horizontal alignment
 		lineX := x
@@ -7520,11 +7636,6 @@ func (r *renderer) drawParagraphs(paragraphs []*Paragraph, x, y, w, h int, ancho
 				lineX -= r.emuToPixelX(para.alignment.MarginRight)
 			}
 		}
-
-		// The baseline sits ascent-scaled below the line top: lnSpcReduction
-		// shrinks the ascent along with the advance (see applyLnSpcReduction),
-		// which is what lifts the first line's glyphs toward the inset.
-		baseline := curY + r.baselineOffset(li.line)
 
 		// Draw each run
 		drawX := lineX
@@ -7659,8 +7770,19 @@ func (r *renderer) drawParagraphs(paragraphs []*Paragraph, x, y, w, h int, ancho
 			drawX += run.width
 		}
 
-		curY += lh
-		curY += li.spaceAfter
+		if floatLayout {
+			curQ += geoms[i].pitchQ + geoms[i].afterQ
+		} else {
+			lh := li.line.lineHeight
+			if li.lineSpacing < 0 {
+				lh = int(float64(lh) * float64(-li.lineSpacing) / 100000.0)
+			} else if li.lineSpacing > 0 {
+				lh = r.hundredthPtToPixelY(li.lineSpacing)
+			}
+			lh = r.applyLnSpcReduction(lh)
+			curY += lh
+			curY += li.spaceAfter
+		}
 	}
 }
 
@@ -8463,7 +8585,9 @@ func measureStringWithKern(face font.Face, s string) fixed.Int26_6 {
 // removed it; the empty run before it was irrelevant). When the break
 // declares no size the next run in the paragraph speaks for it — an unsized
 // br inherits the paragraph default, which is the size its runs resolve to.
-func (r *renderer) blankBreakLineHeight(brRun textRun, rest []textRun) int {
+// The unrounded advance rides beside the rounded height for the float
+// layout (round 61).
+func (r *renderer) blankBreakLineHeight(brRun textRun, rest []textRun) (int, float64) {
 	f := brRun.font
 	if f == nil || f.Size <= 0 {
 		for _, nxt := range rest {
@@ -8475,9 +8599,10 @@ func (r *renderer) blankBreakLineHeight(brRun textRun, rest []textRun) int {
 		}
 	}
 	if f == nil || f.Size <= 0 {
-		return 0
+		return 0, 0
 	}
-	return int(1.2*r.fontSizePixels(f) + 0.5)
+	adv := 1.2 * r.fontSizePixels(f)
+	return int(adv + 0.5), adv
 }
 
 func (r *renderer) wrapRunLine(runs []textRun, maxWidth int) []textLine {
@@ -8509,8 +8634,9 @@ func (r *renderer) wrapRunLine(runs []textRun, maxWidth int) []textLine {
 				// the break font's 1.2 × size, not the 14px floor
 				// buildTextLine gave it (slide19's leading <a:br/> holds the
 				// paragraph one full 32pt line down).
-				if h := r.blankBreakLineHeight(run, runs[i+1:]); h > 0 {
+				if h, hf := r.blankBreakLineHeight(run, runs[i+1:]); h > 0 {
 					bl.lineHeight = h
+					bl.advanceF = hf
 				}
 			}
 			lines = append(lines, bl)
@@ -8674,8 +8800,9 @@ func (r *renderer) wrapRunLineWithIndent(runs []textRun, firstLineWidth, contLin
 		if run.text == "\n" {
 			bl := r.buildTextLine(currentRuns)
 			if len(currentRuns) == 0 {
-				if h := r.blankBreakLineHeight(run, runs[i+1:]); h > 0 {
+				if h, hf := r.blankBreakLineHeight(run, runs[i+1:]); h > 0 {
 					bl.lineHeight = h
+					bl.advanceF = hf
 				}
 			}
 			lines = append(lines, bl)
