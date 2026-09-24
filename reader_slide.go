@@ -771,6 +771,10 @@ func (r *PPTXReader) parseSlideXML(decoder *xml.Decoder, slide *Slide, rels []xm
 	// Deferred shadow (spPr effectLst outerShdw)
 	var pendingShadow *Shadow
 
+	// Deferred top bevel (p:style effectRef into the theme's sp3d bevelT),
+	// EMU; zeros mean none.
+	var pendingBevelW, pendingBevelH int64
+
 	// duotoneIdx is the slot (0 or 1) the next <a:duotone> colour lands in.
 	// The element is a bare sequence of colour choices; the parser only knows
 	// which one it is reading by counting.
@@ -902,6 +906,7 @@ func (r *PPTXReader) parseSlideXML(decoder *xml.Decoder, slide *Slide, rels []xm
 					pendingTailEnd = nil
 					pendingAdjustValues = nil
 					pendingShadow = nil
+					pendingBevelW, pendingBevelH = 0, 0
 					pendingBlipFillData = nil
 					pendingBlipFillMime = ""
 					pendingCustomPath = nil
@@ -3368,6 +3373,11 @@ func (r *PPTXReader) parseSlideXML(decoder *xml.Decoder, slide *Slide, rels []xm
 							autoShape.shadow = pendingShadow
 							pendingShadow = nil
 						}
+						// Apply deferred theme bevel
+						if pendingBevelW > 0 {
+							autoShape.bevelW, autoShape.bevelH = pendingBevelW, pendingBevelH
+							pendingBevelW, pendingBevelH = 0, 0
+						}
 						// Apply deferred arrow ends
 						if pendingHeadEnd != nil {
 							autoShape.headEnd = pendingHeadEnd
@@ -3471,6 +3481,11 @@ func (r *PPTXReader) parseSlideXML(decoder *xml.Decoder, slide *Slide, rels []xm
 							currentRichText.shadow = pendingShadow
 							pendingShadow = nil
 						}
+						// Apply deferred theme bevel
+						if pendingBevelW > 0 {
+							currentRichText.bevelW, currentRichText.bevelH = pendingBevelW, pendingBevelH
+							pendingBevelW, pendingBevelH = 0, 0
+						}
 						// Apply deferred arrow ends
 						if pendingHeadEnd != nil {
 							currentRichText.headEnd = pendingHeadEnd
@@ -3518,6 +3533,10 @@ func (r *PPTXReader) parseSlideXML(decoder *xml.Decoder, slide *Slide, rels []xm
 							rt.shadow = pendingShadow
 							pendingShadow = nil
 						}
+						if pendingBevelW > 0 {
+							rt.bevelW, rt.bevelH = pendingBevelW, pendingBevelH
+							pendingBevelW, pendingBevelH = 0, 0
+						}
 						if pendingHeadEnd != nil {
 							rt.headEnd = pendingHeadEnd
 							pendingHeadEnd = nil
@@ -3561,6 +3580,10 @@ func (r *PPTXReader) parseSlideXML(decoder *xml.Decoder, slide *Slide, rels []xm
 						if pendingShadow != nil {
 							autoShape.shadow = pendingShadow
 							pendingShadow = nil
+						}
+						if pendingBevelW > 0 {
+							autoShape.bevelW, autoShape.bevelH = pendingBevelW, pendingBevelH
+							pendingBevelW, pendingBevelH = 0, 0
 						}
 						// Apply deferred arrow ends
 						if pendingHeadEnd != nil {
@@ -3967,10 +3990,18 @@ func (r *PPTXReader) parseSlideXML(decoder *xml.Decoder, slide *Slide, rels []xm
 				// theme's effect style supplies the outer shadow. A copy, not
 				// the theme's own pointer — the pending value is handed to
 				// exactly one shape.
-				if state.inSp && pres != nil && pendingShadow == nil && state.styleEffectIdx >= 1 && state.styleEffectIdx <= len(pres.themeEffectStyles) {
-					if ts := pres.themeEffectStyles[state.styleEffectIdx-1].shadow; ts != nil {
-						sh := *ts
-						pendingShadow = &sh
+				if state.inSp && pres != nil && state.styleEffectIdx >= 1 && state.styleEffectIdx <= len(pres.themeEffectStyles) {
+					if pendingShadow == nil {
+						if ts := pres.themeEffectStyles[state.styleEffectIdx-1].shadow; ts != nil {
+							sh := *ts
+							pendingShadow = &sh
+						}
+					}
+					// The style's sp3d bevelT rides along with the same
+					// reference: PowerPoint lights the rim and lifts the face
+					// whenever the resolved effect style carries a bevel.
+					if ts := pres.themeEffectStyles[state.styleEffectIdx-1]; ts.bevelW > 0 {
+						pendingBevelW, pendingBevelH = ts.bevelW, ts.bevelH
 					}
 				}
 				state.styleEffectIdx = 0

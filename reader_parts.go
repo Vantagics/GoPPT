@@ -376,11 +376,14 @@ type themeLnStyle struct {
 
 // themeEffectStyle is one entry of <a:effectStyleLst>: the outer shadow an
 // <a:effectRef idx="N"> resolves to. The Office themes' first two styles carry
-// exactly one outerShdw each (the third adds scene3d/sp3d, which no renderer
-// branch walks); where a style carries no shadow the entry stays nil and the
-// reference resolves to none.
+// exactly one outerShdw each; the third adds scene3d/sp3d whose bevelT the
+// renderer shades as a lit rim (the bevel, not the shadow, is what makes a
+// themed gradient box look puffed). Where a style carries no shadow the
+// shadow field stays nil and the reference resolves to none.
 type themeEffectStyle struct {
 	shadow *Shadow
+	// <a:sp3d><a:bevelT w=" h="> — EMU, zero when the style has no sp3d.
+	bevelW, bevelH int64
 }
 
 // parseThemeFormatScheme reads <a:fmtScheme>'s fill and line style lists.
@@ -475,11 +478,29 @@ func (r *PPTXReader) parseThemeFormatScheme(data []byte, pres *Presentation) {
 				if inEffLst {
 					curEff = &themeEffectStyle{}
 				}
+			case "bevelT":
+				// Lives inside <a:sp3d> in an effect style: the rim bevel
+				// PowerPoint lights with the style's light rig. Width and
+				// height are EMU.
+				if curEff != nil {
+					for _, attr := range t.Attr {
+						switch attr.Name.Local {
+						case "w":
+							if v, err := strconv.ParseInt(attr.Value, 10, 64); err == nil {
+								curEff.bevelW = v
+							}
+						case "h":
+							if v, err := strconv.ParseInt(attr.Value, 10, 64); err == nil {
+								curEff.bevelH = v
+							}
+						}
+					}
+				}
 			case "outerShdw":
 				// The one effect the model can carry. The Office themes give
 				// each style a single outerShdw (black, alpha'd, downward);
-				// scene3d/sp3d that follow in style 3 have no counterpart and
-				// are skipped by never being read.
+				// the scene3d/sp3d that follow in style 3 carry a bevelT read
+				// separately above.
 				if curEff != nil && curEff.shadow == nil {
 					inEffShadow = true
 					effShadowColor = "000000"

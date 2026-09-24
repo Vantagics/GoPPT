@@ -204,7 +204,18 @@ type RichTextShape struct {
 	customPath  *CustomGeomPath // non-nil for freeform/custGeom shapes
 	headEnd     *LineEnd        // arrow at start of custom path (from <a:ln><a:headEnd>)
 	tailEnd     *LineEnd        // arrow at end of custom path (from <a:ln><a:tailEnd>)
+	// Top-bevel shading resolved from the shape's effectRef into the theme's
+	// effectStyleLst entry (<a:sp3d><a:bevelT w= h=>), in EMU — same law as
+	// AutoShape's. Zero means no bevel.
+	bevelW int64
+	bevelH int64
 }
+
+// GetBevelWidth returns the top-bevel width in EMU (0 = no bevel).
+func (rt *RichTextShape) GetBevelWidth() int64 { return rt.bevelW }
+
+// GetBevelHeight returns the top-bevel height in EMU (0 = no bevel).
+func (rt *RichTextShape) GetBevelHeight() int64 { return rt.bevelH }
 
 // TextAnchorType represents the text anchoring type within a shape.
 type TextAnchorType string
@@ -753,6 +764,25 @@ type AutoShape struct {
 	insetsSet   bool
 	headEnd     *LineEnd // arrow at start of arc
 	tailEnd     *LineEnd // arrow at end of arc
+	// Top-bevel shading resolved from the shape's effectRef into the theme's
+	// effectStyleLst entry (<a:sp3d><a:bevelT w= h=>), in EMU. Zero means no
+	// bevel: the face renders with the raw fill. When set, the renderer lifts
+	// the fill face and shades the rim like PowerPoint's threePt-from-top
+	// light rig does.
+	bevelW int64
+	bevelH int64
+}
+
+// GetBevelWidth returns the top-bevel width in EMU (0 = no bevel).
+func (a *AutoShape) GetBevelWidth() int64 { return a.bevelW }
+
+// GetBevelHeight returns the top-bevel height in EMU (0 = no bevel).
+func (a *AutoShape) GetBevelHeight() int64 { return a.bevelH }
+
+// SetBevel sets the top-bevel size in EMU (both zero disables the shading).
+func (a *AutoShape) SetBevel(w, h int64) *AutoShape {
+	a.bevelW, a.bevelH = w, h
+	return a
 }
 
 // AutoShapeType represents the type of auto shape.

@@ -1052,6 +1052,13 @@ func (r *renderer) renderRichText(s *RichTextShape) {
 			}
 		}
 
+		// A theme effect style with <a:sp3d><a:bevelT> lights the face and
+		// shades the rim after the fill/border are down but before the text
+		// (rect faces only — the bands hug the bounding box).
+		if s.bevelW > 0 && s.customPath == nil {
+			tr.applyBevelShading(ox, oy, w, h, s.bevelW, s.bevelH)
+		}
+
 		// Text area with insets applied; use bufH to allow overflow
 		tx := ox + pxL
 		ty := oy + pxT
@@ -1444,6 +1451,137 @@ func hex6(s string) ([3]uint8, bool) {
 	return out, true
 }
 
+// bevelShadeParams are the rim-shading constants calibrated against the
+// PowerPoint COM export of a themed gradient box (deck2 slide10, bevelT
+// w=63500 h=25400): the flat face gains the key light of the threePt-from-top
+// rig (fill × faceGain in linear light), the top rim catches a specular crest
+// (additive white, peaking one bevel-height in, dying out over one bevel
+// width), and the side/bottom rims fall into shade — multiplicative factors
+// over the given fraction of the bevel width, darkest at the edge. The right
+// rim is the darkest: the rig's 20° revolution puts it away from every light.
+const (
+	bevelFaceGain  = 1.19
+	bevelSpecular  = 87.0 / 255.0
+	bevelLeftEdge  = 0.48
+	bevelLeftWidth = 0.55
+	// The right and bottom rims fall in two stages: a gentle wide decline
+	// (the slope turning away from the light) and a narrow steep plunge
+	// hugging the edge line. The product of the two matches the COM profile.
+	bevelRightEdge  = 0.17
+	bevelRightWide  = 0.75
+	bevelRightWidth = 0.90
+	bevelBotEdge    = 0.45
+	bevelBotWidth   = 0.25
+	bevelBotWide    = 0.90
+	bevelBotWideMin = 0.90
+)
+
+// applyBevelShading post-processes a drawn rectangle face with the bevel
+// lighting described above. The fill and border must already be on the canvas
+// and the text must not be yet.
+func (r *renderer) applyBevelShading(x, y, w, h int, bevelWEMU, bevelHEMU int64) {
+	if w < 3 || h < 3 {
+		return
+	}
+	wp := r.emuToPixelX(bevelWEMU)
+	hp := r.emuToPixelY(bevelHEMU)
+	if wp < 1 {
+		wp = 1
+	}
+	if hp < 1 {
+		hp = 1
+	}
+	if wp > w-1 {
+		wp = w - 1
+	}
+	if hp > h-1 {
+		hp = h - 1
+	}
+	lw := maxInt(int(float64(wp)*bevelLeftWidth), 1)
+	rw := maxInt(int(float64(wp)*bevelRightWidth), 1)
+	rwNarrow := maxInt(int(float64(wp)*bevelBotWidth), 1)
+	bw := maxInt(int(float64(wp)*bevelBotWidth), 1)
+	bwWide := maxInt(int(float64(wp)*bevelBotWide), bw)
+	smooth := func(u float64) float64 {
+		if u < 0 {
+			u = 0
+		}
+		if u > 1 {
+			u = 1
+		}
+		return u * u * (3 - 2*u)
+	}
+	for py := y; py < y+h; py++ {
+		dt := py - y
+		db := y + h - 1 - py
+		for px := x; px < x+w; px++ {
+			dl := px - x
+			dr := x + w - 1 - px
+			off := py*r.img.Stride + px*4
+			// Working values in 0..1 sRGB, converted to linear for the
+			// multiplicative parts.
+			var c [3]float64
+			for i := 0; i < 3; i++ {
+				c[i] = float64(r.img.Pix[off+i]) / 255.0
+			}
+			inBand := false
+			// Top rim: additive specular crest (relative to the unlit fill —
+			// the face gain does not stack on top of it).
+			if dt < wp {
+				inBand = true
+				var a float64
+				if dt < hp {
+					a = math.Sin(math.Pi / 2 * (float64(dt)+0.5) / float64(hp)) * bevelSpecular
+				} else {
+					u := ((float64(dt) + 0.5) - float64(hp)) / float64(wp-hp)
+					a = math.Pow(1-u, 1.5) * bevelSpecular
+				}
+				for i := 0; i < 3; i++ {
+					c[i] += a
+				}
+			}
+			// Shaded rims: multiplicative, in linear light.
+			k := 1.0
+			if dl < lw {
+				k *= bevelLeftEdge + (1-bevelLeftEdge)*smooth(float64(dl)/float64(lw))
+				inBand = true
+			}
+			if dr < rw {
+				// Like the bottom rim: a gentle wide decline plus a dark
+				// edge line.
+				kRight := bevelRightEdge + (1-bevelRightEdge)*smooth(float64(dr)/float64(rwNarrow))
+				kRight *= bevelRightWide + (1-bevelRightWide)*smooth(float64(dr)/float64(rw))
+				k *= kRight
+				inBand = true
+			}
+			if db < bw {
+				kBot := bevelBotEdge + (1-bevelBotEdge)*smooth(float64(db)/float64(bw))
+				// Gentle wide decline underneath the narrow plunge.
+				kBot *= bevelBotWideMin + (1-bevelBotWideMin)*smooth(float64(db)/float64(bwWide))
+				k *= kBot
+				inBand = true
+			}
+			if !inBand {
+				k = bevelFaceGain
+			}
+			for i := 0; i < 3; i++ {
+				lin := srgbToLinear(c[i]) * k
+				if lin > 1 {
+					lin = 1
+				}
+				v := int(math.Round(linearToSRGB(lin) * 255.0))
+				if v > 255 {
+					v = 255
+				}
+				if v < 0 {
+					v = 0
+				}
+				r.img.Pix[off+i] = uint8(v)
+			}
+		}
+	}
+}
+
 func (r *renderer) renderAutoShape(s *AutoShape) {
 	x := r.emuToPixelX(s.offsetX)
 	y := r.emuToPixelY(s.offsetY)
@@ -1510,6 +1648,13 @@ func (r *renderer) renderAutoShape(s *AutoShape) {
 		}
 		tr.renderAutoShapeFill(s, ox, oy, w, h)
 		tr.renderAutoShapeBorder(s, ox, oy, w, h)
+		// A theme effect style with <a:sp3d><a:bevelT> lights the face and
+		// shades the rim after the fill/border are down but before the text:
+		// the text stays unlit, exactly as PowerPoint draws it. Straight
+		// rect faces only — the shading bands hug the bounding box.
+		if s.bevelW > 0 && (s.shapeType == AutoShapeRectangle || s.shapeType == "") {
+			tr.applyBevelShading(ox, oy, w, h, s.bevelW, s.bevelH)
+		}
 		// Arc shapes are stroke-only; if no explicit border was set, draw
 		// the arc with a default black stroke so it remains visible.
 		if s.shapeType == AutoShapeArc && (s.border == nil || s.border.Style == BorderNone) {
