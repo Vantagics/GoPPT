@@ -576,6 +576,30 @@ func (r *renderer) renderRotated(x, y, w, h, rotation int, flipH, flipV bool, dr
 	r.renderRotatedExpanded(x, y, w, h, h, rotation, flipH, flipV, drawFn)
 }
 
+// unpremultiply converts a premultiplied RGBA pixel (as stored by image/draw
+// and by blendPixel writing over the transparent tmp canvas) into the
+// straight-alpha form blendPixel expects. Skipping this would apply the alpha
+// twice — a rotated 50%-white fill came out 75% grey (slide39 "Window" bar).
+func unpremultiply(c color.RGBA) color.RGBA {
+	if c.A == 255 || c.A == 0 {
+		return c
+	}
+	a := uint32(c.A)
+	return color.RGBA{
+		R: uint8(uint32(c.R) * 255 / a),
+		G: uint8(uint32(c.G) * 255 / a),
+		B: uint8(uint32(c.B) * 255 / a),
+		A: c.A,
+	}
+}
+
+// tmpPixelAt reads the premultiplied tmp pixel at sOff in straight-alpha form.
+func tmpPixelAt(pix []uint8, sOff int) color.RGBA {
+	return unpremultiply(color.RGBA{
+		R: pix[sOff], G: pix[sOff+1], B: pix[sOff+2], A: pix[sOff+3],
+	})
+}
+
 // renderRotatedExpanded is like renderRotated but uses bufH for the temp buffer
 // height, allowing text to overflow the shape bounds without being clipped.
 // The rotation center remains at the center of the original shape (w × h).
@@ -609,10 +633,7 @@ func (r *renderer) renderRotatedExpanded(x, y, w, h, bufH, rotation int, flipH, 
 				}
 				sOff := sy*tmp.Stride + sx*4
 				if tmp.Pix[sOff+3] > 0 {
-					r.blendPixel(x+px, y+py, color.RGBA{
-						R: tmp.Pix[sOff], G: tmp.Pix[sOff+1],
-						B: tmp.Pix[sOff+2], A: tmp.Pix[sOff+3],
-					})
+					r.blendPixel(x+px, y+py, tmpPixelAt(tmp.Pix, sOff))
 				}
 			}
 		}
@@ -663,10 +684,7 @@ func (r *renderer) renderRotatedExpanded(x, y, w, h, bufH, rotation int, flipH, 
 			if ix >= 0 && ix < w && iy >= 0 && iy < bufH {
 				sOff := iy*tmp.Stride + ix*4
 				if tmp.Pix[sOff+3] > 0 {
-					r.blendPixel(dx, dy, color.RGBA{
-						R: tmp.Pix[sOff], G: tmp.Pix[sOff+1],
-						B: tmp.Pix[sOff+2], A: tmp.Pix[sOff+3],
-					})
+					r.blendPixel(dx, dy, tmpPixelAt(tmp.Pix, sOff))
 				}
 			}
 		}
