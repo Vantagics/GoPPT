@@ -6663,6 +6663,20 @@ func (r *renderer) buildParaTextRuns(elements []ParagraphElement) []textRun {
 			if f == nil {
 				f = NewFont()
 			}
+			// A linked run is always underlined: PowerPoint takes the
+			// underline from the link, not from the run's u attribute —
+			// deck 00022823's slide 7 declares u="none" on the citation
+			// title's hlinkClick runs and the COM export underlines them
+			// anyway (the UI greys the underline control out for linked
+			// text). The copy keeps the model — and with it the writer's
+			// u attribute — exactly as the file declared them. A declared
+			// style other than none (dbl, wavy, …) stays as declared; the
+			// evidence only covers the none case.
+			if e.hyperlink != nil && (f.Underline == UnderlineNone || f.Underline == "") {
+				forced := *f
+				forced.Underline = UnderlineSingle
+				f = &forced
+			}
 			// A baseline-shifted run draws at two thirds of its declared
 			// size: PowerPoint shrinks the glyphs (the COM export's
 			// subscript measures ~0.68x the surrounding run's advance
@@ -7025,6 +7039,15 @@ func (r *renderer) buildTextLine(runs []textRun) textLine {
 		if adv > 0 {
 			tl.lineHeight = adv
 		}
+		// Round 59 finding, parked for the follow-up campaign: PowerPoint
+		// accumulates this 1.2 × size pitch as a float and rounds each
+		// line's position (named-font probe export: 20 lines of 14pt
+		// measure 709px over 19 gaps, against 709.33 predicted and 706.8
+		// for per-line integer rounding; 28pt measures 74.667 exactly).
+		// Landing that here also needs the anchor's block-height law —
+		// a centered two-line box moves by the last line's fractional
+		// excess, and the comparison decks disagree about it — so the
+		// integer advance stays until both are pinned together.
 	}
 	if tl.lineHeight < 1 {
 		tl.lineHeight = 14
