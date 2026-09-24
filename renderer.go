@@ -1644,6 +1644,9 @@ func (r *renderer) renderAutoShape(s *AutoShape) {
 				// For non-rectangular shapes (arrows, triangles, ellipses, etc.),
 				// skip the rectangular shadow — it would fill the entire
 				// bounding box and look like a gray background.
+				if s.shapeType == AutoShapeEllipse {
+					tr.renderShadowEllipse(s.shadow, rect, ellipseShadowRingPx(s, tr))
+				}
 			}
 		}
 		tr.renderAutoShapeFill(s, ox, oy, w, h)
@@ -1857,6 +1860,9 @@ func (r *renderer) renderAutoShape(s *AutoShape) {
 				case AutoShapeRectangle, "":
 					tr.renderShadow(s.shadow, rect)
 				default:
+					if s.shapeType == AutoShapeEllipse {
+						tr.renderShadowEllipse(s.shadow, rect, ellipseShadowRingPx(s, tr))
+					}
 				}
 			}
 			tr.renderAutoShapeFill(s, ox, oy, w, h)
@@ -3745,6 +3751,73 @@ func (r *renderer) renderShadowPolygon(shadow *Shadow, pts []fpoint) {
 	r.compositeShadowMask(shadowColor, mask, int(minX)-pad+dx, int(minY)-pad+dy)
 }
 
+// ellipseShadowRingPx returns the shadow silhouette kind for an ellipse: 0
+// when the shape is filled (the silhouette is the whole disc) or, for a
+// no-fill ellipse, the stroke thickness in pixels — PowerPoint casts the
+// shadow of the outline itself, which is the white glow around a stroked
+// callout oval.
+func ellipseShadowRingPx(s *AutoShape, tr *renderer) int {
+	if s.fill != nil && s.fill.Type != FillNone {
+		return 0
+	}
+	if s.border == nil || s.border.Style == BorderNone {
+		return 1
+	}
+	return maxInt(int(float64(maxInt(s.border.Width, 1))*12700.0*tr.scaleX), 1)
+}
+
+// renderShadowEllipse casts the shadow of an ellipse silhouette through the
+// same rasterise-blur-composite pipeline as renderShadow. ringPx == 0
+// rasterises the filled disc; ringPx > 0 rasterises a ring of that thickness
+// inset from the geometry edge (the stroke of a no-fill ellipse).
+func (r *renderer) renderShadowEllipse(shadow *Shadow, rect image.Rectangle, ringPx int) {
+	if r.draft || shadow == nil || !shadow.Visible {
+		return
+	}
+	rad := float64(shadow.Direction) * math.Pi / 180.0
+	dist := float64(shadow.Distance) * 12700 * r.scaleX
+	dx := int(dist * math.Cos(rad))
+	dy := int(dist * math.Sin(rad))
+	shadowColor := argbToRGBA(shadow.Color)
+	shadowColor.A = uint8(float64(shadow.Alpha) * 255 / 100)
+
+	blurPx := int(float64(shadow.BlurRadius)*12700*r.scaleX + 0.5)
+	radius := maxInt(1, blurPx/2)
+	pad := radius*3 + 2
+	bw := rect.Dx() + 2*pad
+	bh := rect.Dy() + 2*pad
+	if bw <= 0 || bh <= 0 || rect.Dx() <= 0 || rect.Dy() <= 0 {
+		return
+	}
+	cxf := float64(rect.Dx()) / 2
+	cyf := float64(rect.Dy()) / 2
+	rxf := cxf + 0.5
+	ryf := cyf + 0.5
+	inX := rxf - float64(ringPx)
+	inY := ryf - float64(ringPx)
+	ring := ringPx > 0 && inX > 0 && inY > 0
+	mask := image.NewAlpha(image.Rect(0, 0, bw, bh))
+	for py := 0; py < rect.Dy(); py++ {
+		row := mask.Pix[(py+pad)*mask.Stride:]
+		ny := (float64(py) + 0.5 - cyf) / ryf
+		for px := 0; px < rect.Dx(); px++ {
+			nx := (float64(px) + 0.5 - cxf) / rxf
+			if nx*nx+ny*ny > 1 {
+				continue
+			}
+			if ring {
+				nxi := (float64(px) + 0.5 - cxf) / inX
+				nyi := (float64(py) + 0.5 - cyf) / inY
+				if nxi*nxi+nyi*nyi < 1 {
+					continue
+				}
+			}
+			row[px+pad] = 255
+		}
+	}
+	boxBlurAlpha(mask, radius, 3)
+	r.compositeShadowMask(shadowColor, mask, rect.Min.X-pad+dx, rect.Min.Y-pad+dy)
+}
 // compositeShadowMask blends a blurred shadow silhouette at the given offset.
 func (r *renderer) compositeShadowMask(shadowColor color.RGBA, mask *image.Alpha, ox, oy int) {
 	bounds := r.img.Bounds()
@@ -3883,14 +3956,21 @@ func (r *renderer) renderShadowRounded(shadow *Shadow, rect image.Rectangle, rad
 // --- Drawing primitives ---
 
 func (r *renderer) drawRect(rect image.Rectangle, c color.RGBA, width int) {
+	// PowerPoint strokes the geometry edge centred: half the line width lies
+	// inside the rectangle, half outside. Drawing the band fully inset
+	// shifted every border inward by width/2 — invisible at hairline widths,
+	// a glaring 2px jump once a shape inherits the theme's 2pt ring
+	// (lnRef idx=2) that the HDR slide's rectangles carry.
+	half := width / 2
 	for i := 0; i < width; i++ {
+		d := i - half
 		// Top and bottom horizontal lines
-		r.fillRectBlend(image.Rect(rect.Min.X, rect.Min.Y+i, rect.Max.X, rect.Min.Y+i+1), c)
-		r.fillRectBlend(image.Rect(rect.Min.X, rect.Max.Y-1-i, rect.Max.X, rect.Max.Y-i), c)
+		r.fillRectBlend(image.Rect(rect.Min.X, rect.Min.Y+d, rect.Max.X, rect.Min.Y+d+1), c)
+		r.fillRectBlend(image.Rect(rect.Min.X, rect.Max.Y-1-d, rect.Max.X, rect.Max.Y-d), c)
 		// Left and right vertical lines
 		for y := rect.Min.Y; y < rect.Max.Y; y++ {
-			r.blendPixel(rect.Min.X+i, y, c)
-			r.blendPixel(rect.Max.X-1-i, y, c)
+			r.blendPixel(rect.Min.X+d, y, c)
+			r.blendPixel(rect.Max.X-1-d, y, c)
 		}
 	}
 }
@@ -3974,11 +4054,13 @@ func (r *renderer) drawRectBorder(rect image.Rectangle, c color.RGBA, width int,
 	if style == BorderDot {
 		dashLen, gapLen = 2, 2
 	}
+	half := width / 2
 	for i := 0; i < width; i++ {
-		r.drawDashedHLine(rect.Min.X, rect.Max.X, rect.Min.Y+i, c, dashLen, gapLen)
-		r.drawDashedHLine(rect.Min.X, rect.Max.X, rect.Max.Y-1-i, c, dashLen, gapLen)
-		r.drawDashedVLine(rect.Min.X+i, rect.Min.Y, rect.Max.Y, c, dashLen, gapLen)
-		r.drawDashedVLine(rect.Max.X-1-i, rect.Min.Y, rect.Max.Y, c, dashLen, gapLen)
+		d := i - half
+		r.drawDashedHLine(rect.Min.X, rect.Max.X, rect.Min.Y+d, c, dashLen, gapLen)
+		r.drawDashedHLine(rect.Min.X, rect.Max.X, rect.Max.Y-1-d, c, dashLen, gapLen)
+		r.drawDashedVLine(rect.Min.X+d, rect.Min.Y, rect.Max.Y, c, dashLen, gapLen)
+		r.drawDashedVLine(rect.Max.X-1-d, rect.Min.Y, rect.Max.Y, c, dashLen, gapLen)
 	}
 }
 

@@ -681,6 +681,7 @@ func (r *PPTXReader) parseSlideXML(decoder *xml.Decoder, slide *Slide, rels []xm
 		styleLnOps      []themeColorOp  // transforms on the lnRef's schemeClr
 		styleOpsTarget  *[]themeColorOp // which of the two the current colour feeds
 		inStyleScheme   bool            // collecting those transforms
+		lnWidthDeclared bool            // the spPr <a:ln> carried its own w attribute
 
 		// <a:tableStyleId> character data
 		inTableStyleID bool
@@ -2833,9 +2834,11 @@ func (r *PPTXReader) parseSlideXML(decoder *xml.Decoder, slide *Slide, rels []xm
 						}
 					}
 				} else if (state.inSp || state.inPic) && state.inSpPr {
+					state.lnWidthDeclared = false
 					for _, attr := range t.Attr {
 						if attr.Name.Local == "w" {
 							if v, err := strconv.Atoi(attr.Value); err == nil {
+								state.lnWidthDeclared = true
 								if pendingBorder == nil {
 									pendingBorder = &Border{Style: BorderSolid}
 								}
@@ -4035,6 +4038,15 @@ func (r *PPTXReader) parseSlideXML(decoder *xml.Decoder, slide *Slide, rels []xm
 						pendingBorder.Style = BorderSolid
 						pendingBorder.Width = width
 						pendingBorder.Color = lineColor
+					}
+				}
+				// An explicit <a:ln> that omits w inherits its width from the
+				// style's lnRef: the ovals on the HDR slide draw their 2pt
+				// theme ring this way, and the shadow ring glow grows with it.
+				if state.inSp && pendingBorder != nil && pendingBorder.Style != BorderNone &&
+					!state.lnWidthDeclared && state.styleLnIdx >= 1 && state.styleLnIdx <= len(pres.themeLnStyles) {
+					if lnStyle := pres.themeLnStyles[state.styleLnIdx-1]; lnStyle.widthEMU > 0 {
+						pendingBorder.Width = (lnStyle.widthEMU + 6350) / 12700
 					}
 				}
 				// A connector's colour lives on its <a:ln> too, but when the
