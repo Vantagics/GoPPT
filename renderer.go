@@ -1647,6 +1647,15 @@ func (r *renderer) renderAutoShape(s *AutoShape) {
 				if s.shapeType == AutoShapeEllipse {
 					tr.renderShadowEllipse(s.shadow, rect, ellipseShadowRingPx(s, tr))
 				}
+				if s.shapeType == AutoShapeRightBrace || s.shapeType == AutoShapeLeftBrace {
+					// A brace is outline-only, so the silhouette is the pen
+					// trace of its path (slide34's 2pt brace glow).
+					penPx := 1
+					if s.border != nil && s.border.Style != BorderNone {
+						penPx = maxInt(int(float64(maxInt(s.border.Width, 1))*12700.0*tr.scaleX), 1)
+					}
+					tr.renderShadowPolyline(s.shadow, bracePoints(s.shapeType, ox, oy, w, h, s.adjustValues), penPx)
+				}
 			}
 		}
 		tr.renderAutoShapeFill(s, ox, oy, w, h)
@@ -2256,15 +2265,15 @@ func (r *renderer) renderAutoShapeBorder(s *AutoShape, x, y, w, h int) {
 	}
 }
 
-// drawBrace strokes a rightBrace/leftBrace preset along the ECMA-376 preset
-// path. Each endpoint hook is a quarter ellipse (radii w/2 × y1) from the box
-// corner to the centre spine at x=w/2, and the middle apex is a pair of
+// bracePoints returns the brace preset outline: quarter-ellipse hooks from
+// the box corners to the centre spine at x=w/2, and a middle apex of two
 // quarter ellipses meeting in a cusp at the outer edge — (w, y3) for a right
 // brace, (0, y3) for a left brace. y1 = ss·adj1/100000 is the hook radius,
 // pinned to maxAdj1 = min(1−adj2, adj2)/2·h/ss so the spine never inverts;
 // y3 = h·adj2/100000 centres the apex. The OOXML path declares fill none, so
-// a brace is outline-only by default.
-func (r *renderer) drawBrace(t AutoShapeType, x, y, w, h int, c color.RGBA, pw int, adj map[string]int) {
+// a brace is outline-only by default; the same points drive the stroke and
+// the shadow silhouette.
+func bracePoints(t AutoShapeType, x, y, w, h int, adj map[string]int) []fpoint {
 	adj1, adj2 := 8333, 50000
 	if adj != nil {
 		if v, ok := adj["adj1"]; ok {
@@ -2311,6 +2320,11 @@ func (r *renderer) drawBrace(t AutoShapeType, x, y, w, h int, c color.RGBA, pw i
 		pts = append(pts, fpoint{fx + wd2, fy + fh - y1}) // spine down
 		arc(fw, fh-y1, 180, -90, &pts)                    // hook: (wd2,fh-y1) -> (fw,fh)
 	}
+	return pts
+}
+
+func (r *renderer) drawBrace(t AutoShapeType, x, y, w, h int, c color.RGBA, pw int, adj map[string]int) {
+	pts := bracePoints(t, x, y, w, h, adj)
 	for i := 1; i < len(pts); i++ {
 		r.drawLineAA(int(math.Round(pts[i-1].x)), int(math.Round(pts[i-1].y)),
 			int(math.Round(pts[i].x)), int(math.Round(pts[i].y)), c, pw)
@@ -3751,6 +3765,130 @@ func (r *renderer) renderShadowPolygon(shadow *Shadow, pts []fpoint) {
 	r.compositeShadowMask(shadowColor, mask, int(minX)-pad+dx, int(minY)-pad+dy)
 }
 
+// renderShadowPolyline casts the shadow of a STROKED OPEN PATH — the brace
+// presets are pure outline (their OOXML path declares fill none), so the
+// silhouette PowerPoint blurs is the pen trace itself, not an enclosed area:
+// a shadow "polygon" of the brace path would enclose almost nothing. Each
+// segment is stamped into the mask as a perpendicular quad (max-composited,
+// the joints stay uniform), then blurred like every other shadow.
+func (r *renderer) renderShadowPolyline(shadow *Shadow, pts []fpoint, penPx int) {
+	if r.draft || shadow == nil || !shadow.Visible || len(pts) < 2 {
+		return
+	}
+	rad := float64(shadow.Direction) * math.Pi / 180.0
+	dist := float64(shadow.Distance) * 12700 * r.scaleX
+	dx := int(dist * math.Cos(rad))
+	dy := int(dist * math.Sin(rad))
+	shadowColor := argbToRGBA(shadow.Color)
+	shadowColor.A = uint8(float64(shadow.Alpha) * 255 / 100)
+
+	blurPx := int(float64(shadow.BlurRadius)*12700*r.scaleX + 0.5)
+	if blurPx <= 0 {
+		// Unblurred: stamp the pen trace directly, offset.
+		hw := float64(maxInt(penPx, 1)) / 2
+		for i := 1; i < len(pts); i++ {
+			p1, p2 := pts[i-1], pts[i]
+			segLen := math.Hypot(p2.x-p1.x, p2.y-p1.y)
+			if segLen < 1e-6 {
+				continue
+			}
+			nx := -(p2.y - p1.y) / segLen
+			ny := (p2.x - p1.x) / segLen
+			r.fillPolygon([]fpoint{
+				{p1.x + nx*hw, p1.y + ny*hw},
+				{p2.x + nx*hw, p2.y + ny*hw},
+				{p2.x - nx*hw, p2.y - ny*hw},
+				{p1.x - nx*hw, p1.y - ny*hw},
+			}, shadowColor)
+		}
+		return
+	}
+	radius := maxInt(1, blurPx/2)
+	hw := float64(maxInt(penPx, 1)) / 2
+	pad := radius*3 + 2 + int(hw) + 2
+
+	minX, minY := pts[0].x, pts[0].y
+	maxX, maxY := minX, minY
+	for _, p := range pts[1:] {
+		minX = math.Min(minX, p.x)
+		minY = math.Min(minY, p.y)
+		maxX = math.Max(maxX, p.x)
+		maxY = math.Max(maxY, p.y)
+	}
+	bw := int(maxX-minX) + 2*pad + 2
+	bh := int(maxY-minY) + 2*pad + 2
+	if bw <= 0 || bh <= 0 {
+		return
+	}
+	mask := image.NewAlpha(image.Rect(0, 0, bw, bh))
+	for i := 1; i < len(pts); i++ {
+		p1 := fpoint{pts[i-1].x - minX + float64(pad), pts[i-1].y - minY + float64(pad)}
+		p2 := fpoint{pts[i].x - minX + float64(pad), pts[i].y - minY + float64(pad)}
+		segLen := math.Hypot(p2.x-p1.x, p2.y-p1.y)
+		if segLen < 1e-6 {
+			continue
+		}
+		nx := -(p2.y - p1.y) / segLen
+		ny := (p2.x - p1.x) / segLen
+		fillQuadMax(mask, bw, bh, []fpoint{
+			{p1.x + nx*hw, p1.y + ny*hw},
+			{p2.x + nx*hw, p2.y + ny*hw},
+			{p2.x - nx*hw, p2.y - ny*hw},
+			{p1.x - nx*hw, p1.y - ny*hw},
+		})
+	}
+	boxBlurAlpha(mask, radius, 3)
+	r.compositeShadowMask(shadowColor, mask, int(minX)-pad+dx, int(minY)-pad+dy)
+}
+
+// fillQuadMax stamps a convex quad into an alpha mask with MAX compositing —
+// overlapping quads at polyline joints must not double-darken the silhouette
+// the blur will spread.
+func fillQuadMax(mask *image.Alpha, w, h int, quad []fpoint) {
+	loX, hiX := quad[0].x, quad[0].x
+	loY, hiY := quad[0].y, quad[0].y
+	for _, p := range quad[1:] {
+		loX = math.Min(loX, p.x)
+		hiX = math.Max(hiX, p.x)
+		loY = math.Min(loY, p.y)
+		hiY = math.Max(hiY, p.y)
+	}
+	y1 := maxInt(int(math.Floor(loY)), 0)
+	y2 := minInt(int(math.Ceil(hiY)), h-1)
+	for y := y1; y <= y2; y++ {
+		fy := float64(y) + 0.5
+		xs := make([]float64, 0, 4)
+		for i := 0; i < 4; i++ {
+			j := (i + 1) % 4
+			e1, e2 := quad[i].y, quad[j].y
+			if e1 > e2 {
+				e1, e2 = e2, e1
+			}
+			if fy < e1 || fy >= e2 {
+				continue
+			}
+			dy := quad[j].y - quad[i].y
+			if dy == 0 {
+				continue
+			}
+			t := (fy - quad[i].y) / dy
+			xs = append(xs, quad[i].x+t*(quad[j].x-quad[i].x))
+		}
+		if len(xs) < 2 {
+			continue
+		}
+		lo, hi := xs[0], xs[0]
+		for _, v := range xs[1:] {
+			lo = math.Min(lo, v)
+			hi = math.Max(hi, v)
+		}
+		row := mask.Pix[y*mask.Stride:]
+		for x := maxInt(int(math.Ceil(lo)), 0); x <= minInt(int(math.Floor(hi)), w-1); x++ {
+			row[x] = 255
+		}
+	}
+}
+
 // ellipseShadowRingPx returns the shadow silhouette kind for an ellipse: 0
 // when the shape is filled (the silhouette is the whole disc) or, for a
 // no-fill ellipse, the stroke thickness in pixels — PowerPoint casts the
@@ -4236,26 +4374,35 @@ func (r *renderer) drawLineAA(x1, y1, x2, y2 int, c color.RGBA, width int) {
 		// The parallel-Wu passes below composite per-pass, and on diagonals
 		// the passes leave gaps that read as hatching — slide23's 6pt
 		// connector arrows rendered as stripes where PowerPoint drew solid
-		// blue. (Below ~5px the pass overlap hides it; ink strokes at
-		// 2.25pt stay on the legacy path.)
-		hwf := hw
+		// blue. The edge Wu lines ride the quad boundary: on a wide bar the
+		// half-column spill matches PowerPoint's edge coverage (slide37).
 		quad := []fpoint{
-			{float64(x1) + nx*hwf, float64(y1) + ny*hwf},
-			{float64(x2) + nx*hwf, float64(y2) + ny*hwf},
-			{float64(x2) - nx*hwf, float64(y2) - ny*hwf},
-			{float64(x1) - nx*hwf, float64(y1) - ny*hwf},
+			{float64(x1) + nx*hw, float64(y1) + ny*hw},
+			{float64(x2) + nx*hw, float64(y2) + ny*hw},
+			{float64(x2) - nx*hw, float64(y2) - ny*hw},
+			{float64(x1) - nx*hw, float64(y1) - ny*hw},
 		}
 		r.fillPolygon(quad, c)
-		r.drawLineWu(float64(x1)+nx*hwf, float64(y1)+ny*hwf, float64(x2)+nx*hwf, float64(y2)+ny*hwf, c)
-		r.drawLineWu(float64(x1)-nx*hwf, float64(y1)-ny*hwf, float64(x2)-nx*hwf, float64(y2)-ny*hwf, c)
+		r.drawLineWu(float64(x1)+nx*hw, float64(y1)+ny*hw, float64(x2)+nx*hw, float64(y2)+ny*hw, c)
+		r.drawLineWu(float64(x1)-nx*hw, float64(y1)-ny*hw, float64(x2)-nx*hw, float64(y2)-ny*hw, c)
 		return
 	}
-	for i := 0; i < width; i++ {
-		offset := -hw + float64(i) + 0.5
-		ox := offset * nx
-		oy := offset * ny
-		r.drawLineWu(float64(x1)+ox, float64(y1)+oy, float64(x2)+ox, float64(y2)+oy, c)
+	// 2-5px strokes go solid too, but with the quad pulled in half a column:
+	// the parallel-Wu passes this width band used before took two 50% passes
+	// in the middle columns and over-composited to 75% ink — slide34's 2pt
+	// brace spine read as washed-out orange instead of solid accent. Stamping
+	// the edges at the full ±hw here would fatten a 2pt line by a whole
+	// pixel against the COM gold; ±(hw-0.5) keeps the total ink ~width px.
+	hwe := hw - 0.5
+	quad := []fpoint{
+		{float64(x1) + nx*hwe, float64(y1) + ny*hwe},
+		{float64(x2) + nx*hwe, float64(y2) + ny*hwe},
+		{float64(x2) - nx*hwe, float64(y2) - ny*hwe},
+		{float64(x1) - nx*hwe, float64(y1) - ny*hwe},
 	}
+	r.fillPolygon(quad, c)
+	r.drawLineWu(float64(x1)+nx*hwe, float64(y1)+ny*hwe, float64(x2)+nx*hwe, float64(y2)+ny*hwe, c)
+	r.drawLineWu(float64(x1)-nx*hwe, float64(y1)-ny*hwe, float64(x2)-nx*hwe, float64(y2)-ny*hwe, c)
 }
 
 // drawDashedLineAA draws a dashed or dotted anti-aliased line.
@@ -7272,7 +7419,11 @@ func (r *renderer) drawTextShadow(text string, face font.Face, x, y int, sh *Sha
 		Dot:  fixed.P(pad, pad+asc),
 	}
 	d.DrawString(text)
-	boxBlurAlpha(mask, blurPx, 3)
+	// Same blur law as the shape shadows: blurRad is a diameter-ish measure,
+	// sigma ≈ blurPx/2, so the box radius is half the blurred distance. The
+	// text path used to blur with the full blurPx — slide34's run shadows
+	// spread twice as wide as PowerPoint's and read as a faint haze.
+	boxBlurAlpha(mask, maxInt(1, blurPx/2), 3)
 
 	bounds := r.img.Bounds()
 	for py := 0; py < bh; py++ {
