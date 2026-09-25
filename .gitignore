@@ -14,6 +14,10 @@ cmd/debug_*/
 .workbuddy/
 out_deck/
 
+# Git Bash does not map NUL to the Windows null device, so a cmd-style
+# "2>NUL" redirect creates a literal zero-byte file named NUL here.
+NUL
+
 # Golden images for the rendering regression tests are deliberately tracked.
 !testdata/render/*.png
 # ...but freshly rendered output that failed a golden comparison is not.
