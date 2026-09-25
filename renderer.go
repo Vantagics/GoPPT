@@ -6780,12 +6780,15 @@ func (r *renderer) buildParaTextRuns(elements []ParagraphElement) []textRun {
 			} else {
 				face := r.getFace(faceFont)
 				mf := r.getMeasureFace(faceFont)
+				if mf == nil {
+					mf = face
+				}
 				tr := textRun{
 					text:        text,
 					font:        f,
 					face:        face,
 					measureFace: mf,
-					width:       measureStringWithKern(face, text).Ceil(),
+					width:       measureStringWithKern(mf, text).Ceil(),
 				}
 				if r.fontCache != nil {
 					if a, d, ok := r.fontCache.WinVerticalMetrics(faceFont.Name, r.fontSizePixels(faceFont), faceFont.Bold, faceFont.Italic); ok {
@@ -6856,7 +6859,7 @@ func (r *renderer) splitRunByClass(text string, f *Font, faces, measures [numTex
 			font:        f,
 			face:        face,
 			measureFace: measures[class],
-			width:       measureStringWithKern(face, seg).Ceil(),
+			width:       measureStringWithKern(measures[class], seg).Ceil(),
 			winAsc:      wins[class].asc,
 			winDesc:     wins[class].desc,
 			winAscF:     wins[class].ascF,
@@ -7686,10 +7689,10 @@ func (r *renderer) drawParagraphs(paragraphs []*Paragraph, x, y, w, h int, ancho
 							Face: run.face,
 							Dot:  fixed.P(drawX, runBaseline),
 						}
-						sd.DrawString(seg)
+						drawNatural(sd, run.mface(), seg)
 						if run.font != nil && run.font.Bold {
 							sd.Dot = fixed.P(drawX+1, runBaseline)
-							sd.DrawString(seg)
+							drawNatural(sd, run.mface(), seg)
 						}
 						if run.font != nil && run.font.Underline != UnderlineNone {
 							uo, ut := r.underlineGeometry(run.font)
@@ -7739,7 +7742,7 @@ func (r *renderer) drawParagraphs(paragraphs []*Paragraph, x, y, w, h int, ancho
 				Face: run.face,
 				Dot:  fixed.P(drawX, runBaseline),
 			}
-			d.DrawString(run.text)
+			drawNatural(d, run.mface(), run.text)
 
 			// Synthetic bold: if bold was requested but the font face is the
 			// regular weight (no bold variant found), re-draw with a 1px
@@ -7751,7 +7754,7 @@ func (r *renderer) drawParagraphs(paragraphs []*Paragraph, x, y, w, h int, ancho
 					Face: run.face,
 					Dot:  fixed.P(drawX+1, runBaseline),
 				}
-				d2.DrawString(run.text)
+				drawNatural(d2, run.mface(), run.text)
 			}
 
 			// Underline
@@ -8577,6 +8580,39 @@ func measureStringWithKern(face font.Face, s string) fixed.Int26_6 {
 	return advance
 }
 
+// drawNatural advances the pen with the measure face's unhinted advances
+// while the glyph shapes still come from the Drawer's render face.
+//
+// PowerPoint's layout engine accumulates natural (unhinted) advances as a
+// float and places each glyph at the fractional pen — probe 61E put a COM
+// export's word starts on the unhinted float sum for regular, bold and
+// bold-italic Calibri alike. A HintingFull face rounds every advance to
+// whole pixels; on the 84-character citation line of deck 00022823 slide 7
+// that drifted the second half of the line 6px high, and the hyperlink run
+// 13px, and the per-line diff count tripled. Kerning pairs ride the measure
+// face the same way they ride the wrap measurement.
+func drawNatural(d *font.Drawer, mface font.Face, text string) {
+	if mface == nil {
+		mface = d.Face
+	}
+	prev := rune(-1)
+	for _, rr := range text {
+		if prev >= 0 {
+			d.Dot.X += mface.Kern(prev, rr)
+		}
+		dr, mask, maskp, _, ok := d.Face.Glyph(d.Dot, rr)
+		if ok {
+			draw.DrawMask(d.Dst, dr, d.Src, image.Point{}, mask, maskp, draw.Over)
+		}
+		adv, ok2 := mface.GlyphAdvance(rr)
+		if !ok2 {
+			adv, _ = d.Face.GlyphAdvance(rr)
+		}
+		d.Dot.X += adv
+		prev = rr
+	}
+}
+
 // wrapRunLine wraps text runs into multiple lines that fit within maxWidth.
 // blankBreakLineHeight returns the advance PowerPoint gives a blank line —
 // one formed by an <a:br> with no runs before it. The break's own <a:rPr>
@@ -8709,7 +8745,7 @@ func (r *renderer) wrapRunLine(runs []textRun, maxWidth int) []textLine {
 						font:        run.font,
 						face:        run.face,
 						measureFace: run.measureFace,
-						width:       measureStringWithKern(run.face, pText).Ceil(),
+						width:       measureStringWithKern(run.mface(), pText).Ceil(),
 						isBullet:    run.isBullet,
 						winAsc:      run.winAsc,
 						winDesc:     run.winDesc,
@@ -8748,7 +8784,7 @@ func (r *renderer) wrapRunLine(runs []textRun, maxWidth int) []textLine {
 				font:        run.font,
 				face:        run.face,
 				measureFace: run.measureFace,
-				width:       measureStringWithKern(run.face, pText).Ceil(),
+				width:       measureStringWithKern(run.mface(), pText).Ceil(),
 				isBullet:    run.isBullet,
 				winAsc:      run.winAsc,
 				winDesc:     run.winDesc,
@@ -8869,7 +8905,7 @@ func (r *renderer) wrapRunLineWithIndent(runs []textRun, firstLineWidth, contLin
 						font:        run.font,
 						face:        run.face,
 						measureFace: run.measureFace,
-						width:       measureStringWithKern(run.face, pText).Ceil(),
+						width:       measureStringWithKern(run.mface(), pText).Ceil(),
 						isBullet:    run.isBullet,
 						winAsc:      run.winAsc,
 						winDesc:     run.winDesc,
@@ -8906,7 +8942,7 @@ func (r *renderer) wrapRunLineWithIndent(runs []textRun, firstLineWidth, contLin
 				font:        run.font,
 				face:        run.face,
 				measureFace: run.measureFace,
-				width:       measureStringWithKern(run.face, pText).Ceil(),
+				width:       measureStringWithKern(run.mface(), pText).Ceil(),
 				winAsc:      run.winAsc,
 				winDesc:     run.winDesc,
 			})

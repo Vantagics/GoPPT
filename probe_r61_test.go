@@ -296,3 +296,49 @@ func TestZZProbe61B(t *testing.T) {
 	}
 	t.Logf("probe deck written to %s", out)
 }
+
+// TestZZProbe61E pins the horizontal advance law. Each slide places one long
+// string at 14pt in a known style (regular / bold / bold-italic) plus word
+// markers, so the COM export's per-word pen positions can be read off the
+// gold bitmaps and compared against candidate advance models.
+func TestZZProbe61E(t *testing.T) {
+	const pxEMU = 5715
+	px := func(v int64) int64 { return v * pxEMU }
+
+	pres := New()
+	s := pres.CreateSlide()
+	box := s.AddTextBox()
+	box.SetOffsetX(px(60)).SetOffsetY(px(100)).SetWidth(px(1480)).SetHeight(px(300))
+	p := box.GetParagraphs()[0]
+	r := p.CreateTextRun("Human Genome Sequencing Using Unchained Base Reads on Self-Assembling DNA Nanoarrays")
+	f := NewFont()
+	f.SetName("Calibri").SetSize(14)
+	r.SetFont(f)
+
+	s2 := pres.CreateSlide()
+	box2 := s2.AddTextBox()
+	box2.SetOffsetX(px(60)).SetOffsetY(px(100)).SetWidth(px(1480)).SetHeight(px(300))
+	p2 := box2.GetParagraphs()[0]
+	r2 := p2.CreateTextRun("Human Genome Sequencing Using Unchained Base Reads on Self-Assembling DNA Nanoarrays")
+	f2 := NewFont()
+	f2.SetName("Calibri").SetSize(14).SetBold(true)
+	r2.SetFont(f2)
+
+	s3 := pres.CreateSlide()
+	box3 := s3.AddTextBox()
+	box3.SetOffsetX(px(60)).SetOffsetY(px(100)).SetWidth(px(1480)).SetHeight(px(300))
+	p3 := box3.GetParagraphs()[0]
+	r3 := p3.CreateTextRun("Human Genome Sequencing Using Unchained Base Reads on Self-Assembling DNA Nanoarrays")
+	f3 := NewFont()
+	f3.SetName("Calibri").SetSize(14).SetBold(true).SetItalic(true)
+	r3.SetFont(f3)
+
+	out := os.Getenv("ZZ_PROBE61E_OUT")
+	if out == "" {
+		t.Skip("set ZZ_PROBE61E_OUT to build the probe deck")
+	}
+	if err := pres.Save(out); err != nil {
+		t.Fatalf("save: %v", err)
+	}
+	t.Logf("probe deck written to %s", out)
+}
