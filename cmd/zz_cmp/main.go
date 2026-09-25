@@ -86,7 +86,7 @@ func main() {
 
 		heatPath := filepath.Join(outDir, "heat_"+base)
 		writeHeat(heatPath, a, b, tol)
-		writeHTMLRow(&html, base, r)
+		writeHTMLRow(&html, base, r, dirA, dirB, outDir)
 	}
 
 	// Summary, worst first: the slide to look at is the one that disagrees most.
@@ -258,14 +258,33 @@ func writeHeat(path string, a, b image.Image, tol float64) {
 	_ = png.Encode(f, out)
 }
 
-func writeHTMLRow(h *strings.Builder, name string, r result) {
+func writeHTMLRow(h *strings.Builder, name string, r result, dirA, dirB, outDir string) {
 	fmt.Fprintf(h, "<h2>%s &nbsp; diff %.2f%% &nbsp; mean %.2f</h2>\n", name, r.diffPct, r.meanDiff)
 	fmt.Fprintf(h, "<table><tr><th>%s (render under test)</th><th>%s (PowerPoint)</th><th>disagreement</th></tr>\n", name, name)
 	fmt.Fprintf(h, "<tr><td><img src=%q width=520></td><td><img src=%q width=520></td><td><img src=%q width=520></td></tr>\n",
-		filepath.ToSlash(filepath.Join("..", "go", name)),
-		filepath.ToSlash(filepath.Join("..", "ppt", name)),
+		relSrc(outDir, dirA, name),
+		relSrc(outDir, dirB, name),
 		"heat_"+name)
 	fmt.Fprintf(h, "<tr><td colspan=3 class=g>%s</td></tr></table>\n", gridText(r.grid))
+}
+
+// relSrc returns the src attribute for an image living in dir, written from a
+// page stored in outDir, so the report works no matter where the two input
+// directories sit relative to it.
+func relSrc(outDir, dir, name string) string {
+	absOut, err := filepath.Abs(outDir)
+	if err != nil {
+		absOut = outDir
+	}
+	absDir, err := filepath.Abs(dir)
+	if err != nil {
+		absDir = dir
+	}
+	rel, err := filepath.Rel(absOut, filepath.Join(absDir, name))
+	if err != nil {
+		return filepath.ToSlash(filepath.Join(absDir, name))
+	}
+	return filepath.ToSlash(rel)
 }
 
 func gridText(g [gridY][gridX]float64) string {
