@@ -62,7 +62,7 @@ func TestKinsokuCharacterClasses(t *testing.T) {
 // result does not depend on installed fonts.
 func wrapRunsForTest(runs []textRun, maxWidth int) []string {
 	r := &renderer{}
-	lines := r.wrapRunLine(runs, maxWidth)
+	lines := r.wrapRunLine(runs, maxWidth, 0)
 	out := make([]string, 0, len(lines))
 	for _, ln := range lines {
 		var sb strings.Builder
@@ -183,7 +183,7 @@ func TestCJKWrapNoLineStartsByPunctuation(t *testing.T) {
 	}
 	maxWidth := charWidth * 16
 
-	lines := r.wrapRunLine(runs, maxWidth)
+	lines := r.wrapRunLine(runs, maxWidth, 0)
 	if len(lines) < 2 {
 		t.Fatalf("expected the paragraph to wrap into several lines at %dpx, got %d", maxWidth, len(lines))
 	}

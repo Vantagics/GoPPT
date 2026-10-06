@@ -7285,9 +7285,9 @@ func (r *renderer) measureParagraphsHeight(paragraphs []*Paragraph, w, h int, an
 			firstLineW = 999999
 			baseW = 999999
 		}
-		lines := r.wrapRunLine(paraRuns, baseW)
+		lines := r.wrapRunLine(paraRuns, baseW, para.endParaRPrSize)
 		if indent != 0 && len(lines) > 0 && wordWrap {
-			lines = r.wrapRunLineWithIndent(paraRuns, firstLineW, baseW)
+			lines = r.wrapRunLineWithIndent(paraRuns, firstLineW, baseW, para.endParaRPrSize)
 		}
 		if len(lines) == 0 {
 			lines = []textLine{{lineHeight: r.emptyParagraphLineHeight(para)}}
@@ -7358,9 +7358,9 @@ func (r *renderer) measureMaxLineWidth(paragraphs []*Paragraph, w int, wordWrap 
 			firstLineW = 999999
 			baseW = 999999
 		}
-		lines := r.wrapRunLine(paraRuns, baseW)
+		lines := r.wrapRunLine(paraRuns, baseW, para.endParaRPrSize)
 		if indent != 0 && len(lines) > 0 && wordWrap {
-			lines = r.wrapRunLineWithIndent(paraRuns, firstLineW, baseW)
+			lines = r.wrapRunLineWithIndent(paraRuns, firstLineW, baseW, para.endParaRPrSize)
 		}
 		for _, line := range lines {
 			if line.width > maxW {
@@ -7436,10 +7436,10 @@ func (r *renderer) drawParagraphs(paragraphs []*Paragraph, x, y, w, h int, ancho
 		}
 		// First, wrap using the continuation-line width (wider), then check
 		// if the first line exceeds the first-line width and re-wrap if needed.
-		lines := r.wrapRunLine(paraRuns, baseW)
+		lines := r.wrapRunLine(paraRuns, baseW, para.endParaRPrSize)
 		if indent != 0 && len(lines) > 0 && wordWrap {
 			// Re-wrap with first-line width to handle indent correctly
-			lines = r.wrapRunLineWithIndent(paraRuns, firstLineW, baseW)
+			lines = r.wrapRunLineWithIndent(paraRuns, firstLineW, baseW, para.endParaRPrSize)
 		}
 		if len(lines) == 0 {
 			// Empty paragraph still takes space
@@ -8615,18 +8615,29 @@ func drawNatural(d *font.Drawer, mface font.Face, text string) {
 
 // wrapRunLine wraps text runs into multiple lines that fit within maxWidth.
 // blankBreakLineHeight returns the advance PowerPoint gives a blank line —
-// one formed by an <a:br> with no runs before it. The break's own <a:rPr>
+// one terminated by an <a:br> with nothing on it. The break's own <a:rPr>
 // sz drives it at the usual 1.2 × size (COM slide19 variants: sz=6000 on
 // the br grew the blank by exactly the 1.2 × 60pt line, and deleting the br
 // removed it; the empty run before it was irrelevant). When the break
-// declares no size the next run in the paragraph speaks for it — an unsized
-// br inherits the paragraph default, which is the size its runs resolve to.
-// The unrounded advance rides beside the rounded height for the float
-// layout (round 61).
-func (r *renderer) blankBreakLineHeight(brRun textRun, rest []textRun) (int, float64) {
+// declares no size, the run BEFORE it speaks first — the line inherits the
+// text it follows (slide09 COM variants: an unsized br after 32pt text
+// advances a full 1.2 × 32pt line, and pinning the br to sz=1600 shrinks
+// it to the 16pt line). Only a paragraph-LEADING break — nothing before
+// it — falls through to the next run (slide19). The unrounded advance
+// rides beside the rounded height for the float layout (round 61).
+func (r *renderer) blankBreakLineHeight(brRun textRun, runs []textRun, i int) (int, float64) {
 	f := brRun.font
 	if f == nil || f.Size <= 0 {
-		for _, nxt := range rest {
+		for j := i - 1; j >= 0; j-- {
+			if runs[j].text == "\n" || runs[j].font == nil || runs[j].font.Size <= 0 {
+				continue
+			}
+			f = runs[j].font
+			break
+		}
+	}
+	if (f == nil || f.Size <= 0) && i+1 < len(runs) {
+		for _, nxt := range runs[i+1:] {
 			if nxt.text == "\n" || nxt.font == nil || nxt.font.Size <= 0 {
 				continue
 			}
@@ -8641,7 +8652,55 @@ func (r *renderer) blankBreakLineHeight(brRun textRun, rest []textRun) (int, flo
 	return int(adv + 0.5), adv
 }
 
-func (r *renderer) wrapRunLine(runs []textRun, maxWidth int) []textLine {
+// markLineHeight returns the advance of the final line a paragraph whose
+// last element is an <a:br> leaves the paragraph mark on. PowerPoint puts
+// the mark on a line of its own after a trailing break (slide09 COM
+// variants: "text br" draws the text line plus a mark-sized line; deleting
+// the break deletes that line; and growing the endParaRPr sz moves every
+// line below by exactly the line's growth). The size is the endParaRPr's
+// sz when the file declares one, otherwise a sized trailing break's own sz
+// (slide09 vB), otherwise the previous text run's size. The unrounded
+// advance rides beside the rounded height, same as the other
+// empty-line paths.
+func (r *renderer) markLineHeight(runs []textRun, markSize int) (int, float64) {
+	if markSize > 0 {
+		f := NewFont()
+		f.Size = markSize / 100
+		adv := 1.2 * r.fontSizePixels(f)
+		return int(adv + 0.5), adv
+	}
+	// The trailing break itself speaks first: a sized <a:br> pins the mark
+	// line to its own sz (slide09 vB — pinning the br to sz=1600 shrinks
+	// the line it leaves behind to the 16pt line).
+	if last := runs[len(runs)-1]; last.text == "\n" && last.font != nil && last.font.Size > 0 {
+		adv := 1.2 * r.fontSizePixels(last.font)
+		return int(adv + 0.5), adv
+	}
+	for j := len(runs) - 2; j >= 0; j-- {
+		if runs[j].text == "\n" || runs[j].font == nil || runs[j].font.Size <= 0 {
+			continue
+		}
+		adv := 1.2 * r.fontSizePixels(runs[j].font)
+		return int(adv + 0.5), adv
+	}
+	return 0, 0
+}
+
+// appendMarkLine appends the paragraph-mark line when the run sequence ends
+// with a break: the mark sits on its own final line. With no size anywhere
+// (a paragraph of nothing but breaks) the buildTextLine empty fallback
+// covers it.
+func (r *renderer) appendMarkLine(lines []textLine, runs []textRun, markSize int) []textLine {
+	if len(runs) == 0 || runs[len(runs)-1].text != "\n" {
+		return lines
+	}
+	if h, hf := r.markLineHeight(runs, markSize); h > 0 {
+		return append(lines, textLine{lineHeight: h, advanceF: hf})
+	}
+	return append(lines, r.buildTextLine(nil))
+}
+
+func (r *renderer) wrapRunLine(runs []textRun, maxWidth int, markSize int) []textLine {
 	if len(runs) == 0 {
 		return nil
 	}
@@ -8670,7 +8729,7 @@ func (r *renderer) wrapRunLine(runs []textRun, maxWidth int) []textLine {
 				// the break font's 1.2 × size, not the 14px floor
 				// buildTextLine gave it (slide19's leading <a:br/> holds the
 				// paragraph one full 32pt line down).
-				if h, hf := r.blankBreakLineHeight(run, runs[i+1:]); h > 0 {
+				if h, hf := r.blankBreakLineHeight(run, runs, i); h > 0 {
 					bl.lineHeight = h
 					bl.advanceF = hf
 				}
@@ -8798,12 +8857,12 @@ func (r *renderer) wrapRunLine(runs []textRun, maxWidth int) []textLine {
 		lines = append(lines, r.buildTextLine(currentRuns))
 	}
 
-	return lines
+	return r.appendMarkLine(lines, runs, markSize)
 }
 
 // wrapRunLineWithIndent wraps text runs using different widths for the first
 // line (which includes the paragraph indent) and continuation lines.
-func (r *renderer) wrapRunLineWithIndent(runs []textRun, firstLineWidth, contLineWidth int) []textLine {
+func (r *renderer) wrapRunLineWithIndent(runs []textRun, firstLineWidth, contLineWidth int, markSize int) []textLine {
 	if len(runs) == 0 {
 		return nil
 	}
@@ -8836,7 +8895,7 @@ func (r *renderer) wrapRunLineWithIndent(runs []textRun, firstLineWidth, contLin
 		if run.text == "\n" {
 			bl := r.buildTextLine(currentRuns)
 			if len(currentRuns) == 0 {
-				if h, hf := r.blankBreakLineHeight(run, runs[i+1:]); h > 0 {
+				if h, hf := r.blankBreakLineHeight(run, runs, i); h > 0 {
 					bl.lineHeight = h
 					bl.advanceF = hf
 				}
@@ -8954,7 +9013,7 @@ func (r *renderer) wrapRunLineWithIndent(runs []textRun, firstLineWidth, contLin
 		lines = append(lines, r.buildTextLine(currentRuns))
 	}
 
-	return lines
+	return r.appendMarkLine(lines, runs, markSize)
 }
 
 // drawStringCentered draws a string centered in the given rectangle.
