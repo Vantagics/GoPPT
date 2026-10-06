@@ -4414,6 +4414,25 @@ type layoutPlaceholder struct {
 	// empty.
 	anchorSet bool
 	anchor    TextAnchorType
+	// lvlBullet is the bullet declaration of the placeholder's own
+	// <a:lstStyle> lvlNpPr, the rung between the slide's own <a:pPr> and
+	// the master's <p:txStyles>. set distinguishes any declaration from
+	// none; none marks an explicit <a:buNone/>, which suppresses the
+	// master's bullet for this level instead of inheriting it — the
+	// corpus's "Title and Content" layouts silence every level this way
+	// while their master's bodyStyle carries a buChar for each.
+	lvlBullet [10]layoutLvlBullet
+}
+
+// layoutLvlBullet is one lvlNpPr's bullet declaration inside a placeholder's
+// <a:lstStyle>.
+type layoutLvlBullet struct {
+	set     bool // any of buChar/buAutoNum/buNone appeared at this level
+	none    bool
+	char    string
+	font    string
+	autoNum string
+	startAt int
 }
 
 // applyLayoutInheritance reads the slide layout and applies inherited properties
@@ -4463,12 +4482,22 @@ func (r *PPTXReader) applyLayoutInheritance(zr *zip.Reader, slide *Slide, rels [
 	// Also parse layout background
 	layoutBg, bgImage := r.parseLayoutBackground(data, layoutRels, zr, layoutPath, pres)
 
-	// Apply layout background if slide has no background
-	if slide.background == nil && layoutBg != nil {
-		slide.background = layoutBg
+	// Apply layout background if slide has no background; otherwise fall to
+	// the master rung, which PowerPoint also shows through when neither the
+	// slide nor the layout declares a <p:bg>.
+	if slide.background == nil {
+		if layoutBg != nil {
+			slide.background = layoutBg
+		} else {
+			slide.background = pres.masterBackground
+		}
 	}
-	// If layout has a blipFill background image, prepend as full-slide drawing.
-	// Skip if slide already has a background image (first shape is a full-slide DrawingShape).
+	// A blipFill background image (layout first, then master) is prepended as
+	// a full-slide drawing. Skip if slide already has a background image
+	// (first shape is a full-slide DrawingShape).
+	if slide.background == nil && bgImage == nil {
+		bgImage = pres.masterBgImage
+	}
 	if bgImage != nil && slide.background == nil {
 		hasSlideBgImage := false
 		if len(slide.shapes) > 0 {
@@ -4534,7 +4563,15 @@ func (r *PPTXReader) applyLayoutInheritance(zr *zip.Reader, slide *Slide, rels [
 		applyPlaceholderAnchor(ph, match)
 		applyPlaceholderAnchor(ph, masterMatch)
 
-		// Fonts, farthest first so that each nearer rung can still override.
+		// Bullets: the layout placeholder's own <a:lstStyle> rung, then the
+		// master placeholder's, then the master's <p:txStyles> table. Each
+		// rung only fills paragraphs that declared nothing; a layout's
+		// explicit <a:buNone/> bakes a None bullet that stops the master
+		// body's buChar from reaching the paragraph. (The master's txStyles
+		// rung also carries the fonts, applied farthest-first so each nearer
+		// rung can still override.)
+		applyPlaceholderBullet(ph, match)
+		applyPlaceholderBullet(ph, masterMatch)
 		applyMasterTextStyles(ph, pres.masterTextStyles)
 		applyPlaceholderFont(ph, masterMatch)
 		applyPlaceholderFont(ph, match)
@@ -4801,6 +4838,11 @@ func (r *PPTXReader) readMaster(zr *zip.Reader, layoutRels []xmlRelForRead, pres
 	}
 	pres.masterPlaceholders = r.parsePlaceholderDefs(data, pres)
 	pres.masterTextStyles = parseMasterTextStyles(data, pres)
+	// The background rung below the layout: picture relationships resolve
+	// against the master's own rels, not the layout's that got passed in.
+	masterRelsPath := strings.Replace(path, "slideMasters/", "slideMasters/_rels/", 1) + ".rels"
+	masterRels, _ := r.readRelationships(zr, masterRelsPath)
+	pres.masterBackground, pres.masterBgImage = r.parseLayoutBackground(data, masterRels, zr, path, pres)
 }
 
 // parseMasterTextStyles reads <p:txStyles> out of a slide master.
@@ -5000,6 +5042,70 @@ func parseMasterTextStyles(data []byte, pres *Presentation) *masterTextStyles {
 	return m
 }
 
+// applyPlaceholderBullet bakes the bullet declaration of a layout (or
+// master) placeholder's own <a:lstStyle> into the paragraphs that declared
+// nothing — the rung of the bullet ladder that sits between the slide's own
+// <a:pPr> and the master's <p:txStyles> table. An explicit <a:buNone/> bakes
+// a non-nil bullet of type None, which both marks the paragraph as spoken
+// for and silences every farther rung; no declaration at all leaves the
+// paragraph nil so the next rung still answers.
+func applyPlaceholderBullet(ph *PlaceholderShape, d *layoutPlaceholder) {
+	if ph == nil || d == nil {
+		return
+	}
+	for _, para := range ph.paragraphs {
+		if para.bullet != nil {
+			continue
+		}
+		level := 0
+		if para.alignment != nil {
+			level = para.alignment.Level
+		}
+		// level is 0-based; lvlBullet is 1-based on the markup.
+		if level < 0 || level+1 >= len(d.lvlBullet) {
+			continue
+		}
+		decl := d.lvlBullet[level+1]
+		if !decl.set {
+			continue
+		}
+		hasText := false
+		for _, elem := range para.elements {
+			if _, ok := elem.(*TextRun); ok {
+				hasText = true
+				break
+			}
+		}
+		if !hasText {
+			continue
+		}
+		switch {
+		case decl.none:
+			para.bullet = NewBullet()
+			para.bullet.Type = BulletTypeNone
+		case decl.char != "":
+			b := NewBullet()
+			b.Type = BulletTypeChar
+			b.Style = decl.char
+			if decl.font != "" {
+				b.Font = decl.font
+			}
+			para.bullet = b
+		case decl.autoNum != "":
+			b := NewBullet()
+			b.Type = BulletTypeNumeric
+			b.NumFormat = decl.autoNum
+			if decl.startAt > 0 {
+				b.StartAt = decl.startAt
+			}
+			if decl.font != "" {
+				b.Font = decl.font
+			}
+			para.bullet = b
+		}
+	}
+}
+
 // applyMasterTextStyles is the master rung of the inheritance ladder: it fills
 // in what neither the slide nor the layout said. Everything here is a fallback
 // — a paragraph or run that already carries a value keeps it, because the
@@ -5176,6 +5282,8 @@ func (r *PPTXReader) parsePlaceholderDefs(data []byte, pres *Presentation) []lay
 	var phAnchorSet bool
 	var phAlign string
 	var phAlignSet bool
+	var curLvl int
+	var lvlBullet [10]layoutLvlBullet
 
 	for {
 		token, err := decoder.Token()
@@ -5205,6 +5313,8 @@ func (r *PPTXReader) parsePlaceholderDefs(data []byte, pres *Presentation) []lay
 				phAnchorSet = false
 				phAlign = ""
 				phAlignSet = false
+				curLvl = 0
+				lvlBullet = [10]layoutLvlBullet{}
 			case "nvSpPr":
 				if inSp {
 					inNvSpPr = true
@@ -5308,16 +5418,60 @@ func (r *PPTXReader) parsePlaceholderDefs(data []byte, pres *Presentation) []lay
 				if inTxBody {
 					inLstStyle = true
 				}
-			case "lvl1pPr":
-				// The placeholder's own level-1 paragraph properties. The
+			case "lvl1pPr", "lvl2pPr", "lvl3pPr", "lvl4pPr", "lvl5pPr",
+				"lvl6pPr", "lvl7pPr", "lvl8pPr", "lvl9pPr":
+				// The placeholder's own level paragraph properties. The
 				// alignment here is the one a slide's placeholder inherits —
 				// the master's sldNum placeholder carries algn="r" exactly
-				// here — and none of the <p:txStyles> tables say it.
+				// here — and none of the <p:txStyles> tables say it. The
+				// same lvlNpPr carries the level's bullet declaration, the
+				// layout rung of the bullet ladder.
 				if inLstStyle {
+					curLvl = int(t.Name.Local[3] - '0')
+					if curLvl == 1 {
+						for _, attr := range t.Attr {
+							if attr.Name.Local == "algn" {
+								phAlign = attr.Value
+								phAlignSet = true
+							}
+						}
+					}
+				}
+			case "buNone":
+				if inLstStyle && curLvl > 0 && curLvl < len(lvlBullet) {
+					lvlBullet[curLvl].set = true
+					lvlBullet[curLvl].none = true
+				}
+			case "buChar":
+				if inLstStyle && curLvl > 0 && curLvl < len(lvlBullet) {
+					lvlBullet[curLvl].set = true
+					lvlBullet[curLvl].none = false
 					for _, attr := range t.Attr {
-						if attr.Name.Local == "algn" {
-							phAlign = attr.Value
-							phAlignSet = true
+						if attr.Name.Local == "char" {
+							lvlBullet[curLvl].char = attr.Value
+						}
+					}
+				}
+			case "buFont":
+				if inLstStyle && curLvl > 0 && curLvl < len(lvlBullet) {
+					for _, attr := range t.Attr {
+						if attr.Name.Local == "typeface" {
+							lvlBullet[curLvl].font = attr.Value
+						}
+					}
+				}
+			case "buAutoNum":
+				if inLstStyle && curLvl > 0 && curLvl < len(lvlBullet) {
+					lvlBullet[curLvl].set = true
+					lvlBullet[curLvl].none = false
+					for _, attr := range t.Attr {
+						switch attr.Name.Local {
+						case "type":
+							lvlBullet[curLvl].autoNum = attr.Value
+						case "startAt":
+							if v, err := strconv.Atoi(attr.Value); err == nil {
+								lvlBullet[curLvl].startAt = v
+							}
 						}
 					}
 				}
@@ -5410,6 +5564,11 @@ func (r *PPTXReader) parsePlaceholderDefs(data []byte, pres *Presentation) []lay
 
 		case xml.EndElement:
 			switch t.Name.Local {
+			case "lvl1pPr", "lvl2pPr", "lvl3pPr", "lvl4pPr", "lvl5pPr",
+				"lvl6pPr", "lvl7pPr", "lvl8pPr", "lvl9pPr":
+				if inLstStyle {
+					curLvl = 0
+				}
 			case "sp":
 				if inSp && isPH {
 					phs = append(phs, layoutPlaceholder{
@@ -5433,6 +5592,7 @@ func (r *PPTXReader) parsePlaceholderDefs(data []byte, pres *Presentation) []lay
 						anchor:      phAnchor,
 						alignH:      phAlign,
 						alignSet:    phAlignSet,
+						lvlBullet:   lvlBullet,
 					})
 				}
 				inSp = false
@@ -5469,6 +5629,10 @@ func (r *PPTXReader) parseLayoutBackground(data []byte, rels []xmlRelForRead, zr
 	inBgPr := false
 	inSolidFill := false
 	inBlipFill := false
+	inBgRef := false
+	bgRefIndex := 0
+	bgRefScheme := ""
+	var bgRefOps []themeColorOp
 
 	// The background picture is not returned the moment its <a:blip> is seen:
 	// <a:srcRect> and <a:alphaModFix> are siblings that follow it, so bailing
@@ -5489,6 +5653,25 @@ func (r *PPTXReader) parseLayoutBackground(data []byte, rels []xmlRelForRead, zr
 			case "bgPr":
 				if inBg {
 					inBgPr = true
+				}
+			case "bgRef":
+				// idx 1001..1003 name entries of the theme's fillStyleLst,
+				// resolved exactly like a <p:style> fillRef; the schemeClr
+				// inside is the phClr those bodies are built around. Office
+				// masters carry bgRef idx="1001" (solid bg1) almost always,
+				// which degrades to white, but themed decks pick real
+				// gradients here.
+				if inBg {
+					inBgRef = true
+					bgRefIndex, _ = intAttrValue(t, "idx")
+					bgRefScheme = ""
+					bgRefOps = nil
+				}
+			case "tint", "shade", "lumMod", "lumOff", "satMod":
+				if inBgRef {
+					if v, ok := intAttrValue(t, "val"); ok {
+						bgRefOps = append(bgRefOps, themeColorOp{op: t.Name.Local, val: float64(v) / 100000.0})
+					}
 				}
 			case "solidFill":
 				if inBgPr {
@@ -5531,6 +5714,13 @@ func (r *PPTXReader) parseLayoutBackground(data []byte, rels []xmlRelForRead, zr
 					}
 				}
 			case "schemeClr":
+				if inBgRef {
+					for _, attr := range t.Attr {
+						if attr.Name.Local == "val" {
+							bgRefScheme = attr.Value
+						}
+					}
+				}
 				if inSolidFill {
 					var schemeName string
 					for _, attr := range t.Attr {
@@ -5557,6 +5747,15 @@ func (r *PPTXReader) parseLayoutBackground(data []byte, rels []xmlRelForRead, zr
 			switch t.Name.Local {
 			case "bg":
 				return nil, nil // bg found but no recognized fill
+			case "bgRef":
+				if inBgRef {
+					inBgRef = false
+					// fillStyleLst entries are 1-based; a bgRef idx of 1001
+					// is the FIRST body.
+					if f := resolveThemeFillStyle(pres, bgRefIndex-1000, bgRefScheme, bgRefOps); f != nil {
+						return f, nil
+					}
+				}
 			case "bgPr":
 				inBgPr = false
 			case "solidFill":

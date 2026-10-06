@@ -57,6 +57,12 @@ type Presentation struct {
 	// counterpart, and a reference without a modelled effect falls back to
 	// no shadow, which is what shapes without effectRef draw anyway.
 	themeEffectStyles []themeEffectStyle
+	// masterBackground / masterBgImage are the slide master's <p:bg>: the
+	// rung below the layout in the background ladder. A deck that paints its
+	// background only on the master (PowerPoint's own themed templates do)
+	// used to render white here, because only the layout rung was read.
+	masterBackground *Fill
+	masterBgImage    *DrawingShape
 	// masterRead records that the master was looked for, so a master without
 	// placeholders is not re-read for every slide.
 	masterRead bool
