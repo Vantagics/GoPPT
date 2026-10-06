@@ -3516,7 +3516,8 @@ func gradientStopsRGBA(fill *Fill) ([]float64, [][4]uint8) {
 }
 
 // gradStopColor evaluates an N-stop piecewise-linear ramp at t (sRGB space,
-// the same space the two-stop paths have always interpolated in).
+// which is how PowerPoint blends gradients with three or more stops; the
+// two-stop linear path is eased separately — see gradEasedRamp).
 func gradStopColor(pos []float64, cols [][4]uint8, t float64) [4]uint8 {
 	if t <= pos[0] {
 		return cols[0]
@@ -3542,10 +3543,52 @@ func gradStopColor(pos []float64, cols [][4]uint8, t float64) [4]uint8 {
 	return cols[n-1]
 }
 
+// gradEasedRamp builds a quantised colour ramp for a two-stop linear gradient
+// the way PowerPoint renders it (r64 COM probe, neutral + stops variant decks
+// out_deck/r64_*): the position is eased with a symmetric sigmoid
+// t^1.6/(t^1.6+(1-t)^1.6) and the colours interpolate in a gamma-2.2
+// linearised space. Measured residuals against the COM exports are 0.7-5.4
+// sRGB units per box versus 36-44 for plain sRGB interpolation. Gradients
+// with three or more stops do NOT get this treatment — PowerPoint renders
+// those in plain sRGB space (measured rmse 0.4-1.8), so callers only use the
+// ramp for exactly two stops.
+func gradEasedRamp(a, b [4]uint8) [][4]uint8 {
+	const steps = 4096
+	out := make([][4]uint8, steps+1)
+	l0 := [3]float64{
+		math.Pow(float64(a[0])/255.0, 2.2),
+		math.Pow(float64(a[1])/255.0, 2.2),
+		math.Pow(float64(a[2])/255.0, 2.2),
+	}
+	l1 := [3]float64{
+		math.Pow(float64(b[0])/255.0, 2.2),
+		math.Pow(float64(b[1])/255.0, 2.2),
+		math.Pow(float64(b[2])/255.0, 2.2),
+	}
+	for i := 0; i <= steps; i++ {
+		seg := float64(i) / steps
+		pa := math.Pow(seg, 1.6)
+		pb := math.Pow(1-seg, 1.6)
+		e := pa / (pa + pb)
+		for k := 0; k < 3; k++ {
+			v := l0[k] + (l1[k]-l0[k])*e
+			out[i][k] = uint8(math.Pow(v, 1/2.2)*255.0 + 0.5)
+		}
+		out[i][3] = uint8(float64(a[3])*(1-e) + float64(b[3])*e + 0.5)
+	}
+	return out
+}
+
 func (r *renderer) fillGradientLinear(rect image.Rectangle, fill *Fill) {
 	pos, cols := gradientStopsRGBA(fill)
 	if pos == nil {
 		return
+	}
+	// Two-stop gradients take PowerPoint's eased gamma-2.2 path; three or
+	// more stops stay in plain sRGB space (see gradEasedRamp).
+	var ramp [][4]uint8
+	if len(pos) == 2 && pos[1] > pos[0] {
+		ramp = gradEasedRamp(cols[0], cols[1])
 	}
 	w := rect.Dx()
 	h := rect.Dy()
@@ -3584,6 +3627,15 @@ func (r *renderer) fillGradientLinear(rect image.Rectangle, fill *Fill) {
 				t = 1
 			}
 			outC := gradStopColor(pos, cols, t)
+			if ramp != nil {
+				seg := (t - pos[0]) / (pos[1] - pos[0])
+				if seg < 0 {
+					seg = 0
+				} else if seg > 1 {
+					seg = 1
+				}
+				outC = ramp[int(seg*4096.0+0.5)]
+			}
 			pix[off] = outC[0]
 			pix[off+1] = outC[1]
 			pix[off+2] = outC[2]
