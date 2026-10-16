@@ -454,33 +454,41 @@ func (s *Slide) GetShapeCount() int {
 func (s *Slide) ExtractText() string {
 	var parts []string
 	for _, shape := range s.shapes {
-		switch sh := shape.(type) {
-		case *RichTextShape:
-			parts = append(parts, extractParagraphsText(sh.paragraphs)...)
-		case *PlaceholderShape:
-			parts = append(parts, extractParagraphsText(sh.paragraphs)...)
-		case *AutoShape:
-			if sh.text != "" {
-				parts = append(parts, sh.text)
-			}
-		case *TableShape:
-			for _, row := range sh.rows {
-				for _, cell := range row {
-					parts = append(parts, extractParagraphsText(cell.paragraphs)...)
-				}
-			}
-		case *GroupShape:
-			for _, gs := range sh.shapes {
-				switch gsh := gs.(type) {
-				case *RichTextShape:
-					parts = append(parts, extractParagraphsText(gsh.paragraphs)...)
-				case *PlaceholderShape:
-					parts = append(parts, extractParagraphsText(gsh.paragraphs)...)
-				}
-			}
-		}
+		parts = appendShapeText(parts, shape)
 	}
 	return joinNonEmpty(parts, "\n")
+}
+
+// appendShapeText appends every text string a shape carries, descending into
+// groups.
+//
+// The group branch used to be a hand-written switch that recognised only
+// RichTextShape and PlaceholderShape, so an AutoShape or a table inside a
+// group contributed nothing — and neither did a group inside a group — while
+// the very same shape at the top level did. The switch is now the shared one
+// and it recurses, so extraction no longer depends on a shape's nesting depth.
+func appendShapeText(parts []string, shape Shape) []string {
+	switch sh := shape.(type) {
+	case *RichTextShape:
+		parts = append(parts, extractParagraphsText(sh.paragraphs)...)
+	case *PlaceholderShape:
+		parts = append(parts, extractParagraphsText(sh.paragraphs)...)
+	case *AutoShape:
+		if sh.text != "" {
+			parts = append(parts, sh.text)
+		}
+	case *TableShape:
+		for _, row := range sh.rows {
+			for _, cell := range row {
+				parts = append(parts, extractParagraphsText(cell.paragraphs)...)
+			}
+		}
+	case *GroupShape:
+		for _, child := range sh.shapes {
+			parts = appendShapeText(parts, child)
+		}
+	}
+	return parts
 }
 
 // GetTextBoxes returns all RichTextShape (text box) shapes on the slide.

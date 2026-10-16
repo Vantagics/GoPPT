@@ -3815,12 +3815,38 @@ func (r *PPTXReader) parseSlideXML(decoder *xml.Decoder, slide *Slide, rels []xm
 						}
 					}
 
+					// A SmartArt graphicFrame carries its resolved geometry in a
+					// cached ppt/diagrams/drawingN.xml part, hung off the slide's
+					// own relationship list. Rendering that is exact, so the
+					// stand-in below is only for a diagram that never cached one.
+					diagramResolved := false
+					if isDiagramGraphicData(graphicDataURI) && pres != nil {
+						if dg := r.readDiagramDrawing(zr, rels, slidePath, pres, extCX, extCY); dg != nil {
+							dg.name = shapeName
+							if dg.name == "" {
+								dg.name = "Diagram"
+							}
+							dg.hidden = shapeHidden
+							dg.offsetX = offX
+							dg.offsetY = offY
+							dg.rotation = ((shapeRotation % 360) + 360) % 360
+							dg.flipHorizontal = flipH
+							dg.flipVertical = flipV
+							if state.inGrpSp && currentGroup != nil {
+								currentGroup.AddShape(dg)
+							} else {
+								slide.shapes = append(slide.shapes, dg)
+							}
+							diagramResolved = true
+						}
+					}
+
 					// Anything else — SmartArt, an OLE object, a chart whose part
 					// could not be read — used to be dropped here, which left a
 					// blank region in the preview that nobody could tell apart
 					// from a correctly rendered empty shape. Keep a visible
 					// stand-in so the gap is obvious and reportable.
-					if !isTable && !isChart && !oleResolved {
+					if !isTable && !isChart && !oleResolved && !diagramResolved {
 						reason := classifyGraphicData(graphicDataURI)
 						if hadChartRef {
 							reason = "chart (its part could not be read)"
