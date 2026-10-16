@@ -8847,11 +8847,12 @@ func (r *renderer) wrapRunLine(runs []textRun, maxWidth int, markSize int) []tex
 		maxWidth = 1
 	}
 
-	// Reserve 1px safety margin. HintingFull glyph bitmaps can be slightly
-	// wider than the advance width reported by GlyphAdvance, causing the
-	// last character on a line to overshoot the text box edge by a fraction
-	// of a pixel. Subtracting 1px from the wrap limit prevents this.
-	maxW26_6 := fixed.I(maxWidth - 1)
+	// No reservation: PowerPoint compares the line advance against the
+	// available width directly. An old 1px safety margin here wrapped
+	// slide47's "model curricula" — 239.6px on a 240px continuation line —
+	// into a phantom third line where the COM export keeps two; the golden
+	// export is the sentinel that no reservation exists on PowerPoint's side.
+	maxW26_6 := fixed.I(maxWidth)
 	if maxW26_6 < fixed.I(1) {
 		maxW26_6 = fixed.I(1)
 	}
@@ -8883,16 +8884,15 @@ func (r *renderer) wrapRunLine(runs []textRun, maxWidth int, markSize int) []tex
 		}
 
 		mf := run.mface()
-		// Use the larger of measure-face and render-face widths for wrapping.
-		// Measure face (HintingNone) matches PowerPoint's layout but can be
-		// narrower than the render face (HintingFull). Using the max prevents
-		// fitting more characters than the render face can actually display.
-		runMW := measureStringWithKern(mf, run.text)
-		runRW := measureStringWithKern(run.face, run.text)
-		runW := runMW
-		if runRW > runW {
-			runW = runRW
-		}
+		// Wrap width rides the measure face only. The render face's
+		// per-glyph hinted advances quantize each glyph to whole pixels and
+		// read up to ~1.6px wider over a short phrase; taking the larger of
+		// the two (the pre-precision heuristic) over-wraps boundary lines
+		// PowerPoint keeps on one — customGeo slide47's "model curricula"
+		// measures 239.4px unhinted against a 240px continuation line and
+		// the COM export keeps it on one line, while the hinted 241px
+		// wrapped it into a phantom third.
+		runW := measureStringWithKern(mf, run.text)
 
 		// If the run fits, add it whole
 		if currentWidth+runW <= maxW26_6 {
@@ -8929,12 +8929,8 @@ func (r *renderer) wrapRunLine(runs []textRun, maxWidth int, markSize int) []tex
 		var partial strings.Builder
 		for _, seg := range segments {
 			test := partial.String() + seg
-			twM := measureStringWithKern(mf, test)
-			twR := measureStringWithKern(run.face, test)
-			tw := twM
-			if twR > tw {
-				tw = twR
-			}
+			// Measure-face width only — same law as the whole-run check.
+			tw := measureStringWithKern(mf, test)
 			if currentWidth+tw > maxW26_6 && (len(currentRuns) > 0 || partial.Len() > 0) {
 				if partial.Len() > 0 {
 					pText := partial.String()
@@ -9018,10 +9014,10 @@ func (r *renderer) wrapRunLineWithIndent(runs []textRun, firstLineWidth, contLin
 		if lineIdx == 0 {
 			w = firstLineWidth
 		}
-		// 1px safety margin, same as wrapRunLine.
-		if w > 1 {
-			w--
-		}
+		// No reservation — same as wrapRunLine: PowerPoint compares the
+		// advance against the available width directly (slide47's
+		// "model curricula", 239.6px on a 240px continuation line, is the
+		// COM-pinned boundary case).
 		mw := fixed.I(w)
 		return mw
 	}
@@ -9051,14 +9047,10 @@ func (r *renderer) wrapRunLineWithIndent(runs []textRun, firstLineWidth, contLin
 
 		mf := run.mface()
 		maxW := getMaxW()
-		// Use the larger of measure-face and render-face widths for wrapping,
-		// same logic as wrapRunLine.
-		runMW := measureStringWithKern(mf, run.text)
-		runRW := measureStringWithKern(run.face, run.text)
-		runW := runMW
-		if runRW > runW {
-			runW = runRW
-		}
+		// Measure-face width only — same law as wrapRunLine (the hinted
+		// render face reads up to ~1.6px wider and over-wraps boundary
+		// lines PowerPoint keeps on one).
+		runW := measureStringWithKern(mf, run.text)
 
 		if currentWidth+runW <= maxW {
 			currentRuns = append(currentRuns, run)
@@ -9088,12 +9080,8 @@ func (r *renderer) wrapRunLineWithIndent(runs []textRun, firstLineWidth, contLin
 		var partial strings.Builder
 		for _, seg := range segments {
 			test := partial.String() + seg
-			twM := measureStringWithKern(mf, test)
-			twR := measureStringWithKern(run.face, test)
-			tw := twM
-			if twR > tw {
-				tw = twR
-			}
+			// Measure-face width only — same law as wrapRunLine.
+			tw := measureStringWithKern(mf, test)
 			maxW = getMaxW()
 			if currentWidth+tw > maxW && (len(currentRuns) > 0 || partial.Len() > 0) {
 				if partial.Len() > 0 {
