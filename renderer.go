@@ -7681,8 +7681,19 @@ func (r *renderer) drawParagraphs(paragraphs []*Paragraph, x, y, w, h int, ancho
 			if centerStartY >= 0 {
 				// Centred: the first baseline sits at round(off)+round(asc);
 				// later lines add the Q6 pitch cycle relative to the first
-				// ascent's floor.
-				baseline = centerStartY + int(math.Round(allLines[0].line.ascentF)) +
+				// ascent's floor. The first ascent rides lnSpcReduction like
+				// every other box quantity: the autofit ladder (8-slide probe,
+				// single-line F/G/H + two-line A/B, COM-exported) showed the
+				// unreduced ascent dropping centred blocks a full reduction/2
+				// (18px on slide47's 44pt title, +20 on the 44pt single-line
+				// probe) while PowerPoint keeps G≈H — reduction only pulls
+				// lines together. fontScale must NOT ride here a second time:
+				// ascentF is already measured at the scaled size.
+				asc0 := allLines[0].line.ascentF
+				if r.lnSpcReduction > 0 {
+					asc0 *= 1.0 - r.lnSpcReduction
+				}
+				baseline = centerStartY + int(math.Round(asc0)) +
 					int(((curQ+geoms[i].ascQ)>>6)-(int64(geoms[0].ascQ)>>6))
 			} else {
 				baseline = startY + int((curQ+geoms[i].ascQ)>>6)
