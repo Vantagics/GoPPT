@@ -8096,6 +8096,19 @@ func (r *renderer) bulletRunFor(para *Paragraph, ordinal, indent int) textRun {
 	if para.bullet == nil || para.bullet.Type == BulletTypeNone {
 		return textRun{}
 	}
+	// A paragraph with no elements is an empty line. PowerPoint still gives it
+	// its line box — sized by endParaRPr, which is why the height path calls
+	// emptyParagraphLineHeight rather than reading the bullet — but it draws no
+	// bullet on it. customGeo slide47 carries exactly such a paragraph in its
+	// cached SmartArt drawing, and the COM export shows no orphan dot where we
+	// drew one.
+	//
+	// A break is content: the probe paragraph whose only elements were a break
+	// and a run did get its bullet in the COM export, so the test is the
+	// element list being empty, not the text being empty.
+	if len(para.elements) == 0 {
+		return textRun{}
+	}
 	bRun := r.buildBulletRun(para.bullet, para, ordinal)
 	if bRun.text == "" {
 		return textRun{}
@@ -8161,7 +8174,15 @@ func (r *renderer) buildBulletRun(b *Bullet, para *Paragraph, ordinal int) textR
 		if char == "" {
 			char = defaultBulletChar
 		}
-		text = char + " "
+		// PowerPoint draws exactly one bullet glyph: <a:buChar> holds a single
+		// character in its model and anything past the first is dropped. The
+		// COM probe settled which half — char="•••" exported as one dot, and
+		// char="○•" exported as the circle, so the survivor is the first
+		// character and not a de-duplication. customGeo slide47 declares
+		// buChar char="••" on every list paragraph of its cached SmartArt
+		// drawing, which is where this showed up: two dots against PowerPoint's
+		// one, on every bulleted line of the shape.
+		text = firstRune(char) + " "
 	case BulletTypeNumeric, BulletTypeAutoNum:
 		num := ordinal
 		if num < defaultBulletStart {
@@ -8246,6 +8267,16 @@ func isSymbolFont(name string) bool {
 	n := strings.ToLower(name)
 	return n == "wingdings" || n == "wingdings 2" || n == "wingdings 3" ||
 		n == "symbol" || n == "webdings"
+}
+
+// firstRune returns the first character of s as a string. It is the shape of
+// "PowerPoint keeps one bullet glyph" that the callers below need, and spelling
+// it out once keeps the []rune(s)[0] panic on an empty string out of them.
+func firstRune(s string) string {
+	if s == "" {
+		return ""
+	}
+	return string([]rune(s)[0])
 }
 
 // symbolToPUA maps a symbol font character to the Unicode Private Use Area.
