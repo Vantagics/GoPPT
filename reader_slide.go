@@ -741,6 +741,12 @@ func (r *PPTXReader) parseSlideXML(decoder *xml.Decoder, slide *Slide, rels []xm
 	// read. It classifies the frame when it turns out to be neither a table nor
 	// a chart, so the stand-in can name what it replaced.
 	var graphicDataURI string
+	// frameDataRelID is the <dgm:relIds r:dm> of the diagram graphicFrame being
+	// read: the relationship id of the diagram's data part. A slide can carry
+	// several diagrams, and the cached drawingN.xml pairs with its frame
+	// through the dataN.xml this id names — without it every frame would
+	// render the first slide diagram.
+	var frameDataRelID string
 	var textAnchor TextAnchorType
 	var textDir string
 
@@ -974,6 +980,7 @@ func (r *PPTXReader) parseSlideXML(decoder *xml.Decoder, slide *Slide, rels []xm
 					graphicDataIsChart = false
 					oleSPID, oleProgID, oleRelID = "", "", ""
 					graphicDataURI = ""
+					frameDataRelID = ""
 				}
 			case "graphicData":
 				if state.inGraphicFrame {
@@ -981,6 +988,17 @@ func (r *PPTXReader) parseSlideXML(decoder *xml.Decoder, slide *Slide, rels []xm
 						if attr.Name.Local == "uri" {
 							graphicDataURI = attr.Value
 							graphicDataIsChart = strings.Contains(attr.Value, "/chart")
+						}
+					}
+				}
+			case "relIds":
+				// <dgm:relIds r:dm r:lo r:qs r:cs> inside a diagram
+				// graphicData: r:dm names the data part that pairs this
+				// frame with its cached drawingN.xml.
+				if state.inGraphicFrame {
+					for _, attr := range t.Attr {
+						if attr.Name.Local == "dm" {
+							frameDataRelID = attr.Value
 						}
 					}
 				}
@@ -3963,7 +3981,7 @@ func (r *PPTXReader) parseSlideXML(decoder *xml.Decoder, slide *Slide, rels []xm
 					// stand-in below is only for a diagram that never cached one.
 					diagramResolved := false
 					if isDiagramGraphicData(graphicDataURI) && pres != nil {
-						if dg := r.readDiagramDrawing(zr, rels, slidePath, pres, extCX, extCY); dg != nil {
+						if dg := r.readDiagramDrawing(zr, rels, slidePath, pres, extCX, extCY, frameDataRelID); dg != nil {
 							dg.name = shapeName
 							if dg.name == "" {
 								dg.name = "Diagram"

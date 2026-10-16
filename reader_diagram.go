@@ -24,8 +24,8 @@ import (
 // is NOT reachable through the <dgm:relIds> element, which lists only
 // r:dm/r:lo/r:qs/r:cs. The drawing is hung off the *slide's* relationship
 // list instead, as a relationship whose type ends in "/diagramDrawing". A
-// slide can carry several diagrams, and the frame's own xfrm is what says
-// which one it is, so callers pass the frame geometry in.
+// slide can carry several diagrams, and each frame is paired with its own
+// drawing through the data part its r:dm names — see readDiagramDrawing.
 const relTypeDiagramDrawing = "http://schemas.microsoft.com/office/2007/relationships/diagramDrawing"
 
 // isDiagramGraphicData reports whether a graphicFrame's <a:graphicData uri>
@@ -39,30 +39,77 @@ func isDiagramGraphicData(uri string) bool {
 	return strings.Contains(uri, "/diagram")
 }
 
-// readDiagramDrawing resolves the slide's diagramDrawing relationship and
-// parses the cached drawing into a GroupShape sized to the graphic frame.
+// readDiagramDrawing resolves the diagramDrawing relationship that belongs to
+// THIS graphic frame and parses the cached drawing into a GroupShape sized to
+// the frame.
+//
+// dataRelID is the frame's <dgm:relIds r:dm> — the relationship id of the
+// diagram's data part. A slide can carry several diagrams (customGeo's
+// slide14 has two side by side), and each frame must render its own cached
+// drawing: PowerPoint numbers the drawing to match the data part it resolves
+// (data8.xml's diagram is cached as drawing8.xml), so the pairing walks
+// frame r:dm → data part name → same-numbered drawing part. When the frame
+// declares no data part or the numbers do not line up, the historical
+// first-diagramDrawing behaviour stands (correct for the single-diagram
+// slides it was written against).
 //
 // It returns nil when there is no such relationship or the part cannot be
 // read, so the caller falls back to the visible UnsupportedShape stand-in: a
 // deck whose diagrams were never cached still reports the gap rather than
 // drawing an empty box that reads like a correct render.
-func (r *PPTXReader) readDiagramDrawing(zr *zip.Reader, rels []xmlRelForRead, slidePath string, pres *Presentation, frameCX, frameCY int64) *GroupShape {
+func (r *PPTXReader) readDiagramDrawing(zr *zip.Reader, rels []xmlRelForRead, slidePath string, pres *Presentation, frameCX, frameCY int64, dataRelID string) *GroupShape {
+	var candidates []xmlRelForRead
 	for _, rel := range rels {
-		if rel.Type != relTypeDiagramDrawing && !strings.HasSuffix(rel.Type, "/diagramDrawing") {
+		if rel.Type == relTypeDiagramDrawing || strings.HasSuffix(rel.Type, "/diagramDrawing") {
+			candidates = append(candidates, rel)
+		}
+	}
+	if len(candidates) == 0 {
+		return nil
+	}
+	if want := drawingPartForDataRel(rels, dataRelID); want != "" {
+		for _, rel := range candidates {
+			if strings.EqualFold(lastPathComponent(rel.Target), want) {
+				return r.loadDiagramDrawing(zr, rels, slidePath, pres, frameCX, frameCY, rel)
+			}
+		}
+	}
+	return r.loadDiagramDrawing(zr, rels, slidePath, pres, frameCX, frameCY, candidates[0])
+}
+
+// drawingPartForDataRel maps a frame's data-part relationship id to the name
+// of the drawing part PowerPoint caches for it: the drawing carries the same
+// number as the data part it resolves (rId3 → data8.xml → drawing8.xml).
+// The dsp root may also carry an explicit <dsp:dataModelRel r:dm> back-link,
+// but customGeo's ten diagrams all omit it, and the numbering has held on
+// every deck measured — so the number is the link that earns the code.
+func drawingPartForDataRel(rels []xmlRelForRead, dataRelID string) string {
+	if dataRelID == "" {
+		return ""
+	}
+	for _, rel := range rels {
+		if rel.ID != dataRelID {
 			continue
 		}
-		target := rel.Target
-		if !strings.HasPrefix(target, "ppt/") {
-			dir := strings.TrimSuffix(slidePath, "/"+lastPathComponent(slidePath))
-			target = resolveRelativePath(dir, target)
+		base := lastPathComponent(rel.Target)
+		if strings.HasPrefix(base, "data") && strings.HasSuffix(base, ".xml") {
+			return "drawing" + base[len("data"):len(base)-len(".xml")] + ".xml"
 		}
-		data, err := readFileFromZip(zr, target)
-		if err != nil {
-			return nil
-		}
-		return r.parseDiagramDrawing(data, rels, zr, target, pres, frameCX, frameCY)
 	}
-	return nil
+	return ""
+}
+
+func (r *PPTXReader) loadDiagramDrawing(zr *zip.Reader, rels []xmlRelForRead, slidePath string, pres *Presentation, frameCX, frameCY int64, rel xmlRelForRead) *GroupShape {
+	target := rel.Target
+	if !strings.HasPrefix(target, "ppt/") {
+		dir := strings.TrimSuffix(slidePath, "/"+lastPathComponent(slidePath))
+		target = resolveRelativePath(dir, target)
+	}
+	data, err := readFileFromZip(zr, target)
+	if err != nil {
+		return nil
+	}
+	return r.parseDiagramDrawing(data, rels, zr, target, pres, frameCX, frameCY)
 }
 
 // parseDiagramDrawing runs the ordinary slide scanner over a dsp:drawing part.
