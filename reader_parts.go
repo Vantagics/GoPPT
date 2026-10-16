@@ -5,6 +5,7 @@ import (
 	"bytes"
 	"encoding/xml"
 	"fmt"
+	"math"
 	"strconv"
 	"strings"
 	"time"
@@ -665,6 +666,47 @@ func applyColorOps(c Color, ops []themeColorOp) Color {
 			g = clamp01(g)
 			b = clamp01(b)
 			c = Color{ARGB: fmtARGB(uint8(r*255+0.5), uint8(g*255+0.5), uint8(b*255+0.5))}
+		case "hueOff":
+			// val is degrees (val/60000). rgbToHLS returns h as a 0..1
+			// fraction of the circle, so the offset is val/360.
+			h, l, s := rgbToHLS(float64(c.GetRed())/255, float64(c.GetGreen())/255, float64(c.GetBlue())/255)
+			h = math.Mod(h+o.val/360.0, 1.0)
+			if h < 0 {
+				h += 1
+			}
+			r, g, b := hlsToRGB(h, l, s)
+			c = Color{ARGB: fmtARGB(uint8(clamp01(r)*255+0.5), uint8(clamp01(g)*255+0.5), uint8(clamp01(b)*255+0.5))}
+		case "hueMod":
+			h, l, s := rgbToHLS(float64(c.GetRed())/255, float64(c.GetGreen())/255, float64(c.GetBlue())/255)
+			h = math.Mod(h*o.val, 1.0)
+			if h < 0 {
+				h += 1
+			}
+			r, g, b := hlsToRGB(h, l, s)
+			c = Color{ARGB: fmtARGB(uint8(clamp01(r)*255+0.5), uint8(clamp01(g)*255+0.5), uint8(clamp01(b)*255+0.5))}
+		case "satOff":
+			h, l, s := rgbToHLS(float64(c.GetRed())/255, float64(c.GetGreen())/255, float64(c.GetBlue())/255)
+			s += o.val
+			if s < 0 {
+				s = 0
+			} else if s > 1 {
+				s = 1
+			}
+			r, g, b := hlsToRGB(h, l, s)
+			c = Color{ARGB: fmtARGB(uint8(clamp01(r)*255+0.5), uint8(clamp01(g)*255+0.5), uint8(clamp01(b)*255+0.5))}
+		case "alphaOff", "alphaMod":
+			a := float64(c.GetAlpha()) / 255.0
+			if o.op == "alphaOff" {
+				a += o.val
+			} else {
+				a *= o.val
+			}
+			if a < 0 {
+				a = 0
+			} else if a > 1 {
+				a = 1
+			}
+			c = Color{ARGB: colorHex(uint8(a*255+0.5)) + c.ARGB[2:]}
 		}
 	}
 	return c

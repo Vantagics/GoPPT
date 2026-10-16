@@ -1039,7 +1039,7 @@ func (r *renderer) renderRichText(s *RichTextShape) {
 		// shades the rim after the fill/border are down but before the text
 		// (rect faces only — the bands hug the bounding box).
 		if s.bevelW > 0 && s.customPath == nil {
-			tr.applyBevelShading(ox, oy, w, h, s.bevelW, s.bevelH)
+			tr.applyBevelShading(ox, oy, w, h, s.bevelW, s.bevelH, s.prstMaterial)
 		}
 
 		// Text area with insets applied; use bufH to allow overflow
@@ -1459,10 +1459,28 @@ const (
 	bevelBotWideMin = 0.90
 )
 
+// bevelFaceGainForMaterial returns the flat-face brightening the light rig
+// applies, keyed by the <a:sp3d prstMaterial="..."> surface. The matte/metal
+// default keeps the full rig gain (1.19, calibrated off PowerPoint's export);
+// "dkEdge" is lit flat (no gain) and "translucentPowder" only mildly. The two
+// non-default values were pinned with an isolated single-swatch COM probe
+// (r68): dkEdge's centre matched the un-bevelled fill exactly, translucentPowder
+// sat at ≈1.10 of it.
+func bevelFaceGainForMaterial(material string) float64 {
+	switch material {
+	case "dkEdge":
+		return 1.0
+	case "translucentPowder":
+		return 1.10
+	default:
+		return bevelFaceGain
+	}
+}
+
 // applyBevelShading post-processes a drawn rectangle face with the bevel
 // lighting described above. The fill and border must already be on the canvas
 // and the text must not be yet.
-func (r *renderer) applyBevelShading(x, y, w, h int, bevelWEMU, bevelHEMU int64) {
+func (r *renderer) applyBevelShading(x, y, w, h int, bevelWEMU, bevelHEMU int64, material string) {
 	if w < 3 || h < 3 {
 		return
 	}
@@ -1545,7 +1563,12 @@ func (r *renderer) applyBevelShading(x, y, w, h int, bevelWEMU, bevelHEMU int64)
 				inBand = true
 			}
 			if !inBand {
-				k = bevelFaceGain
+				// The flat face is lifted by the rig — but only for the
+				// matte/metal default. A "dkEdge" face is lit flat (no gain;
+				// measured identical to the un-bevelled fill), and a
+				// "translucentPowder" face only mildly (≈1.10, measured off
+				// PowerPoint's own export of a single bevelled swatch).
+				k = bevelFaceGainForMaterial(material)
 			}
 			for i := 0; i < 3; i++ {
 				lin := srgbToLinear(c[i]) * k
@@ -1658,7 +1681,7 @@ func (r *renderer) renderAutoShape(s *AutoShape) {
 		// the text stays unlit, exactly as PowerPoint draws it. Straight
 		// rect faces only — the shading bands hug the bounding box.
 		if s.bevelW > 0 && (s.shapeType == AutoShapeRectangle || s.shapeType == "") {
-			tr.applyBevelShading(ox, oy, w, h, s.bevelW, s.bevelH)
+			tr.applyBevelShading(ox, oy, w, h, s.bevelW, s.bevelH, s.prstMaterial)
 		}
 		// Arc shapes are stroke-only; if no explicit border was set, draw
 		// the arc with a default black stroke so it remains visible.

@@ -727,6 +727,71 @@ func colorHex(v uint8) string {
 	return string([]byte{hex[v>>4], hex[v&0x0f]})
 }
 
+// applyHueOff rotates the hue by `deg` degrees (OOXML <a:hueOff> stores the
+// angle as val/60000 degrees and may be negative). A hue rotation is just an
+// HSL hue add; PowerPoint applies colour transforms in document order, so it
+// composes with whatever tint/shade/alpha already ran.
+func applyHueOff(c *Color, deg float64) {
+	h, s, l := rgbToHSL(c.GetRed(), c.GetGreen(), c.GetBlue())
+	h += deg
+	h = math.Mod(h, 360)
+	if h < 0 {
+		h += 360
+	}
+	nr, ng, nb := hslToRGB(h, s, l)
+	c.ARGB = c.ARGB[:2] + colorHex(nr) + colorHex(ng) + colorHex(nb)
+}
+
+// applyHueMod scales the hue angle by `factor` (OOXML <a:hueMod>: val/100000,
+// 1.0 = identity), applied mod 360.
+func applyHueMod(c *Color, factor float64) {
+	h, s, l := rgbToHSL(c.GetRed(), c.GetGreen(), c.GetBlue())
+	h = math.Mod(h*factor, 360)
+	if h < 0 {
+		h += 360
+	}
+	nr, ng, nb := hslToRGB(h, s, l)
+	c.ARGB = c.ARGB[:2] + colorHex(nr) + colorHex(ng) + colorHex(nb)
+}
+
+// applySatOff adds `offset` (val/100000) to saturation and clamps it to 0..1,
+// exactly as lumOff clamps luminance.
+func applySatOff(c *Color, offset float64) {
+	h, s, l := rgbToHSL(c.GetRed(), c.GetGreen(), c.GetBlue())
+	s += offset
+	if s < 0 {
+		s = 0
+	} else if s > 1 {
+		s = 1
+	}
+	nr, ng, nb := hslToRGB(h, s, l)
+	c.ARGB = c.ARGB[:2] + colorHex(nr) + colorHex(ng) + colorHex(nb)
+}
+
+// applyAlphaOff adds `offset` (a 0..1 fraction, val/100000) to the alpha
+// channel, clamped to 0..1.
+func applyAlphaOff(c *Color, offset float64) {
+	a := float64(c.GetAlpha())/255.0 + offset
+	if a < 0 {
+		a = 0
+	} else if a > 1 {
+		a = 1
+	}
+	c.ARGB = colorHex(uint8(a*255+0.5)) + c.ARGB[2:]
+}
+
+// applyAlphaMod multiplies the alpha channel by `factor` (OOXML <a:alphaMod>:
+// val/100000, 1.0 = identity).
+func applyAlphaMod(c *Color, factor float64) {
+	a := float64(c.GetAlpha()) / 255.0 * factor
+	if a < 0 {
+		a = 0
+	} else if a > 1 {
+		a = 1
+	}
+	c.ARGB = colorHex(uint8(a*255+0.5)) + c.ARGB[2:]
+}
+
 // presetColorToColor converts an OOXML preset color name to a Color.
 // See ECMA-376 §20.1.10.47 for the full list.
 func presetColorToColor(name string) Color {

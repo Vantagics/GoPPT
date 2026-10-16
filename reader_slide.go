@@ -781,6 +781,8 @@ func (r *PPTXReader) parseSlideXML(decoder *xml.Decoder, slide *Slide, rels []xm
 	// Deferred top bevel (p:style effectRef into the theme's sp3d bevelT),
 	// EMU; zeros mean none.
 	var pendingBevelW, pendingBevelH int64
+	// Deferred 3D surface material from an explicit <a:sp3d prstMaterial="..">.
+	var pendingPrstMaterial string
 
 	// duotoneIdx is the slot (0 or 1) the next <a:duotone> colour lands in.
 	// The element is a bare sequence of colour choices; the parser only knows
@@ -914,6 +916,7 @@ func (r *PPTXReader) parseSlideXML(decoder *xml.Decoder, slide *Slide, rels []xm
 					pendingAdjustValues = nil
 					pendingShadow = nil
 					pendingBevelW, pendingBevelH = 0, 0
+					pendingPrstMaterial = ""
 					pendingBlipFillData = nil
 					pendingBlipFillMime = ""
 					pendingCustomPath = nil
@@ -2591,6 +2594,109 @@ func (r *PPTXReader) parseSlideXML(decoder *xml.Decoder, slide *Slide, rels []xm
 						}
 					}
 				}
+			case "hueOff":
+				// Hue rotation by val/60000 degrees (negative allowed). Slides
+				// 47's SmartArt columns carry a hueOff that rotates each column's
+				// accent5 fill blue→green→peach; without it every column renders
+				// identical blue.
+				if state.inStyleScheme {
+					for _, attr := range t.Attr {
+						if attr.Name.Local == "val" {
+							if v, err := strconv.Atoi(attr.Value); err == nil {
+								*state.styleOpsTarget = append(*state.styleOpsTarget, themeColorOp{op: "hueOff", val: float64(v) / 60000.0})
+							}
+						}
+					}
+				}
+				if state.inSrgbClr && lastColor != nil {
+					for _, attr := range t.Attr {
+						if attr.Name.Local == "val" {
+							if v, err := strconv.Atoi(attr.Value); err == nil {
+								applyHueOff(lastColor, float64(v)/60000.0)
+							}
+						}
+					}
+				}
+			case "hueMod":
+				// Hue scale by val/100000 (1 = identity).
+				if state.inStyleScheme {
+					for _, attr := range t.Attr {
+						if attr.Name.Local == "val" {
+							if v, err := strconv.Atoi(attr.Value); err == nil {
+								*state.styleOpsTarget = append(*state.styleOpsTarget, themeColorOp{op: "hueMod", val: float64(v) / 100000.0})
+							}
+						}
+					}
+				}
+				if state.inSrgbClr && lastColor != nil {
+					for _, attr := range t.Attr {
+						if attr.Name.Local == "val" {
+							if v, err := strconv.Atoi(attr.Value); err == nil {
+								applyHueMod(lastColor, float64(v)/100000.0)
+							}
+						}
+					}
+				}
+			case "satOff":
+				// Saturation offset by val/100000, clamped 0..1.
+				if state.inStyleScheme {
+					for _, attr := range t.Attr {
+						if attr.Name.Local == "val" {
+							if v, err := strconv.Atoi(attr.Value); err == nil {
+								*state.styleOpsTarget = append(*state.styleOpsTarget, themeColorOp{op: "satOff", val: float64(v) / 100000.0})
+							}
+						}
+					}
+				}
+				if state.inSrgbClr && lastColor != nil {
+					for _, attr := range t.Attr {
+						if attr.Name.Local == "val" {
+							if v, err := strconv.Atoi(attr.Value); err == nil {
+								applySatOff(lastColor, float64(v)/100000.0)
+							}
+						}
+					}
+				}
+			case "alphaOff":
+				// Alpha offset by val/100000 (a 0..1 fraction).
+				if state.inStyleScheme {
+					for _, attr := range t.Attr {
+						if attr.Name.Local == "val" {
+							if v, err := strconv.Atoi(attr.Value); err == nil {
+								*state.styleOpsTarget = append(*state.styleOpsTarget, themeColorOp{op: "alphaOff", val: float64(v) / 100000.0})
+							}
+						}
+					}
+				}
+				if state.inSrgbClr && lastColor != nil {
+					for _, attr := range t.Attr {
+						if attr.Name.Local == "val" {
+							if v, err := strconv.Atoi(attr.Value); err == nil {
+								applyAlphaOff(lastColor, float64(v)/100000.0)
+							}
+						}
+					}
+				}
+			case "alphaMod":
+				// Alpha scale by val/100000 (1 = identity).
+				if state.inStyleScheme {
+					for _, attr := range t.Attr {
+						if attr.Name.Local == "val" {
+							if v, err := strconv.Atoi(attr.Value); err == nil {
+								*state.styleOpsTarget = append(*state.styleOpsTarget, themeColorOp{op: "alphaMod", val: float64(v) / 100000.0})
+							}
+						}
+					}
+				}
+				if state.inSrgbClr && lastColor != nil {
+					for _, attr := range t.Attr {
+						if attr.Name.Local == "val" {
+							if v, err := strconv.Atoi(attr.Value); err == nil {
+								applyAlphaMod(lastColor, float64(v)/100000.0)
+							}
+						}
+					}
+				}
 			case "latin":
 				if state.inRunProps && currentFont != nil {
 					if n := typefaceOf(pres, t.Attr); n != "" {
@@ -2875,6 +2981,11 @@ func (r *PPTXReader) parseSlideXML(decoder *xml.Decoder, slide *Slide, rels []xm
 			case "sp3d":
 				if state.inSpPr {
 					state.inSp3d = true
+					for _, attr := range t.Attr {
+						if attr.Name.Local == "prstMaterial" && attr.Value != "" {
+							pendingPrstMaterial = attr.Value
+						}
+					}
 				}
 			case "bevelT":
 				if state.inSp3d && state.inCxnSp && currentLine != nil {
@@ -3436,6 +3547,7 @@ func (r *PPTXReader) parseSlideXML(decoder *xml.Decoder, slide *Slide, rels []xm
 						// Apply deferred theme bevel
 						if pendingBevelW > 0 {
 							autoShape.bevelW, autoShape.bevelH = pendingBevelW, pendingBevelH
+							autoShape.prstMaterial = pendingPrstMaterial
 							pendingBevelW, pendingBevelH = 0, 0
 						}
 						// Apply deferred arrow ends
@@ -3544,6 +3656,7 @@ func (r *PPTXReader) parseSlideXML(decoder *xml.Decoder, slide *Slide, rels []xm
 						// Apply deferred theme bevel
 						if pendingBevelW > 0 {
 							currentRichText.bevelW, currentRichText.bevelH = pendingBevelW, pendingBevelH
+							currentRichText.prstMaterial = pendingPrstMaterial
 							pendingBevelW, pendingBevelH = 0, 0
 						}
 						// Apply deferred arrow ends
@@ -3595,6 +3708,7 @@ func (r *PPTXReader) parseSlideXML(decoder *xml.Decoder, slide *Slide, rels []xm
 						}
 						if pendingBevelW > 0 {
 							rt.bevelW, rt.bevelH = pendingBevelW, pendingBevelH
+							rt.prstMaterial = pendingPrstMaterial
 							pendingBevelW, pendingBevelH = 0, 0
 						}
 						if pendingHeadEnd != nil {
@@ -3643,6 +3757,7 @@ func (r *PPTXReader) parseSlideXML(decoder *xml.Decoder, slide *Slide, rels []xm
 						}
 						if pendingBevelW > 0 {
 							autoShape.bevelW, autoShape.bevelH = pendingBevelW, pendingBevelH
+							autoShape.prstMaterial = pendingPrstMaterial
 							pendingBevelW, pendingBevelH = 0, 0
 						}
 						// Apply deferred arrow ends

@@ -209,6 +209,11 @@ type RichTextShape struct {
 	// AutoShape's. Zero means no bevel.
 	bevelW int64
 	bevelH int64
+	// prstMaterial is the <a:sp3d prstMaterial="..."> surface the bevel is
+	// lit over. It gates the flat-face brightening (see applyBevelShading):
+	// PowerPoint lights a "dkEdge" face flat (no gain) and a "translucentPowder"
+	// face only mildly, where a matte/metal face gets the full rig gain.
+	prstMaterial string
 }
 
 // GetBevelWidth returns the top-bevel width in EMU (0 = no bevel).
@@ -216,6 +221,9 @@ func (rt *RichTextShape) GetBevelWidth() int64 { return rt.bevelW }
 
 // GetBevelHeight returns the top-bevel height in EMU (0 = no bevel).
 func (rt *RichTextShape) GetBevelHeight() int64 { return rt.bevelH }
+
+// GetPrstMaterial returns the 3D surface material ("" = matte default).
+func (rt *RichTextShape) GetPrstMaterial() string { return rt.prstMaterial }
 
 // TextAnchorType represents the text anchoring type within a shape.
 type TextAnchorType string
@@ -771,6 +779,11 @@ type AutoShape struct {
 	// light rig does.
 	bevelW int64
 	bevelH int64
+	// prstMaterial is the <a:sp3d prstMaterial="..."> surface the bevel is
+	// lit over. It gates the flat-face brightening (see applyBevelShading):
+	// "dkEdge" renders flat (no gain) and "translucentPowder" only mildly,
+	// while the matte/metal default gets the full rig gain.
+	prstMaterial string
 }
 
 // GetBevelWidth returns the top-bevel width in EMU (0 = no bevel).
@@ -779,9 +792,18 @@ func (a *AutoShape) GetBevelWidth() int64 { return a.bevelW }
 // GetBevelHeight returns the top-bevel height in EMU (0 = no bevel).
 func (a *AutoShape) GetBevelHeight() int64 { return a.bevelH }
 
+// GetPrstMaterial returns the 3D surface material ("" = matte default).
+func (a *AutoShape) GetPrstMaterial() string { return a.prstMaterial }
+
 // SetBevel sets the top-bevel size in EMU (both zero disables the shading).
 func (a *AutoShape) SetBevel(w, h int64) *AutoShape {
 	a.bevelW, a.bevelH = w, h
+	return a
+}
+
+// SetPrstMaterial sets the 3D surface material used by the bevel shading.
+func (a *AutoShape) SetPrstMaterial(m string) *AutoShape {
+	a.prstMaterial = m
 	return a
 }
 
