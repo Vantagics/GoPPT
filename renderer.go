@@ -7273,6 +7273,28 @@ func (r *renderer) paraSpaceBefore(para *Paragraph, firstPara bool) int {
 	return para.spaceBefore
 }
 
+// paraSpaceAfter resolves a paragraph's space-after to hundredths of a
+// point. A declared spcPts is already stored; a declared spcPct resolves
+// against the full 1.2× line — NOT the bare font size the declared spcBef
+// percentage uses. Slide47's SmartArt body pinned this: twelve paragraph
+// boundaries of 17pt runs at lnSpc 90% measured the declared 15% as 6.79px
+// (= 15% × 1.2 × 17pt = 3.06pt) against PowerPoint's export; the bare-size
+// model predicts 5.67px and the lnSpc-scaled line 6.11px, both outside the
+// boundary spread. Like the inherited spcBef percentage it does not ride
+// the normAutofit levers (the corpus text here is noAutofit, so the levers'
+// effect is untested — the inherited-spacing precedent from round 27 is
+// kept). It applies after the block's last paragraph too, same as spcPts.
+func (r *renderer) paraSpaceAfter(para *Paragraph) int {
+	if para.spaceAfter > 0 {
+		return para.spaceAfter
+	}
+	if para.spaceAfterPct > 0 {
+		v := r.paragraphFontSize(para) * 1.2 * float64(para.spaceAfterPct) / 100000.0 * 100
+		return int(v + 0.5)
+	}
+	return para.spaceAfter
+}
+
 // paragraphFontSize is the size a paragraph's spacing percentages resolve
 // against: the first sized run; for a runless paragraph the endParaRPr size
 // (slide34's empty paragraph resolves its 20% against the 18pt endParaRPr —
@@ -7376,7 +7398,7 @@ func (r *renderer) measureParagraphsHeight(paragraphs []*Paragraph, w, h int, an
 				li.spaceBefore = r.hundredthPtToPixelY(r.paraSpaceBefore(para, pi == 0))
 			}
 			if i == len(lines)-1 {
-				li.spaceAfter = r.hundredthPtToPixelY(para.spaceAfter)
+				li.spaceAfter = r.hundredthPtToPixelY(r.paraSpaceAfter(para))
 			}
 			allLines = append(allLines, li)
 		}
@@ -7537,7 +7559,7 @@ func (r *renderer) drawParagraphs(paragraphs []*Paragraph, x, y, w, h int, ancho
 				li.spaceBefore = r.hundredthPtToPixelY(li.spaceBeforeH)
 			}
 			if i == len(lines)-1 {
-				li.spaceAfterH = para.spaceAfter
+				li.spaceAfterH = r.paraSpaceAfter(para)
 				li.spaceAfter = r.hundredthPtToPixelY(li.spaceAfterH)
 			}
 			allLines = append(allLines, li)

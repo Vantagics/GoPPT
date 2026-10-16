@@ -1588,10 +1588,15 @@ func (r *PPTXReader) parseSlideXML(decoder *xml.Decoder, slide *Slide, rels []xm
 									// paragraph's own font size, because that
 									// size is not known until the runs close.
 									currentParagraph.spaceBeforePct = v
+								} else if state.inSpcAft {
+									// spcPct inside spcAft with val=0 means no
+									// spacing; a non-zero percentage rides the
+									// paragraph raw like spcBef's does — the
+									// renderer resolves it against the line
+									// (1.2× the paragraph's font size), which
+									// the reader cannot know yet.
+									currentParagraph.spaceAfterPct = v
 								}
-								// spcPct inside spcAft with val=0 means no spacing;
-								// non-zero percentage spacing after is rare and
-								// would need line-height-relative calculation at render time.
 							}
 						}
 					}

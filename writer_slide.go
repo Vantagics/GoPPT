@@ -681,6 +681,8 @@ func (w *PPTXWriter) writeParagraphXMLAt(para *Paragraph, indent string) string 
 	}
 	if para.spaceAfter > 0 {
 		line(fmt.Sprintf(`<a:spcAft><a:spcPts val="%d"/></a:spcAft>`, para.spaceAfter))
+	} else if para.spaceAfterPct > 0 {
+		line(fmt.Sprintf(`<a:spcAft><a:spcPct val="%d"/></a:spcAft>`, para.spaceAfterPct))
 	}
 
 	// Bullet XML

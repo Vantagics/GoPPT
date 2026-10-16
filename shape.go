@@ -396,6 +396,11 @@ type Paragraph struct {
 	// paragraph's own font size. Declared spacing — pts or pct — applies to
 	// the first paragraph too; only the master-inherited value does not.
 	spaceBeforePct int
+	// spaceAfterPct holds a declared <a:spcAft><a:spcPct val="..."> the same
+	// way. The renderer resolves it against the full 1.2× line — slide47's
+	// SmartArt body measured 15% as 3.06pt on 17pt runs across twelve
+	// paragraph boundaries, the bare font size would give 2.55pt.
+	spaceAfterPct int
 	// inheritedSpaceBeforePct holds a master <a:spcPct> deferred to layout
 	// time. The percentage rides the line (1.2 × the font size) and the size
 	// it follows is the run's, not the master level's defRPr — slide34's COM
