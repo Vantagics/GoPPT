@@ -2884,6 +2884,28 @@ func (r *PPTXReader) parseSlideXML(decoder *xml.Decoder, slide *Slide, rels []xm
 						}
 					}
 				}
+				if state.inSp3d && state.inSp {
+					// A shape's own <a:sp3d><a:bevelT> — not a theme style
+					// reference. SmartArt cached drawings light every node
+					// this way (customGeo drawing10's column bodies carry
+					// bevelT softRound w=25400), and the lit rim is what
+					// PowerPoint's export shows as a soft vertical sheen; a
+					// flat unlit fill reads visibly darker and flatter.
+					// The pending values ride the same finalize path the
+					// theme-reference bevel uses.
+					for _, attr := range t.Attr {
+						switch attr.Name.Local {
+						case "w":
+							if v, err := strconv.ParseInt(attr.Value, 10, 64); err == nil {
+								pendingBevelW = v
+							}
+						case "h":
+							if v, err := strconv.ParseInt(attr.Value, 10, 64); err == nil {
+								pendingBevelH = v
+							}
+						}
+					}
+				}
 			case "headEnd":
 				if state.inLn && state.inCxnSp && currentLine != nil {
 					le := &LineEnd{Type: ArrowNone, Width: ArrowSizeMed, Length: ArrowSizeMed}
@@ -4096,9 +4118,13 @@ func (r *PPTXReader) parseSlideXML(decoder *xml.Decoder, slide *Slide, rels []xm
 					}
 					// The style's sp3d bevelT rides along with the same
 					// reference: PowerPoint lights the rim and lifts the face
-					// whenever the resolved effect style carries a bevel.
-					if ts := pres.themeEffectStyles[state.styleEffectIdx-1]; ts.bevelW > 0 {
-						pendingBevelW, pendingBevelH = ts.bevelW, ts.bevelH
+					// whenever the resolved effect style carries a bevel. An
+					// explicit <a:sp3d> in the shape's own spPr wins — it parsed
+					// earlier (spPr precedes style) and already claimed the slot.
+					if pendingBevelW == 0 {
+						if ts := pres.themeEffectStyles[state.styleEffectIdx-1]; ts.bevelW > 0 {
+							pendingBevelW, pendingBevelH = ts.bevelW, ts.bevelH
+						}
 					}
 				}
 				state.styleEffectIdx = 0
