@@ -1634,13 +1634,18 @@ func (r *renderer) renderAutoShape(s *AutoShape) {
 		if s.shadow != nil && s.shadow.Visible {
 			switch s.shapeType {
 			case AutoShapeRoundedRect, AutoShapeCallout1:
-				sRadius := minInt(w, h) * 16667 / 100000
-				if s.adjustValues != nil {
-					if adj, ok := s.adjustValues["adj"]; ok {
-						sRadius = minInt(w, h) * adj / 200000
-					}
-					if adj, ok := s.adjustValues["adj3"]; ok && s.shapeType == AutoShapeCallout1 {
-						sRadius = int(math.Min(float64(w), float64(h)) * float64(adj) / 100000.0)
+				sRadius := roundedRectRadius(w, h, s.adjustValues)
+				if s.shapeType == AutoShapeCallout1 {
+					// callout1 corner radius is governed by adj3, not adj;
+					// preserve the prior (roundRect-independent) behaviour.
+					sRadius = minInt(w, h) * 16667 / 100000
+					if s.adjustValues != nil {
+						if adj, ok := s.adjustValues["adj"]; ok {
+							sRadius = minInt(w, h) * adj / 200000
+						}
+						if adj, ok := s.adjustValues["adj3"]; ok {
+							sRadius = int(math.Min(float64(w), float64(h)) * float64(adj) / 100000.0)
+						}
 					}
 				}
 				if s.shapeType == AutoShapeRoundedRect && (s.fill == nil || s.fill.Type == FillNone) {
@@ -1872,13 +1877,18 @@ func (r *renderer) renderAutoShape(s *AutoShape) {
 			if s.shadow != nil && s.shadow.Visible {
 				switch s.shapeType {
 				case AutoShapeRoundedRect, AutoShapeCallout1:
-					sRadius := minInt(w, h) * 16667 / 100000
-					if s.adjustValues != nil {
-						if adj, ok := s.adjustValues["adj"]; ok {
-							sRadius = minInt(w, h) * adj / 200000
-						}
-						if adj, ok := s.adjustValues["adj3"]; ok && s.shapeType == AutoShapeCallout1 {
-							sRadius = int(math.Min(float64(w), float64(h)) * float64(adj) / 100000.0)
+					sRadius := roundedRectRadius(w, h, s.adjustValues)
+					if s.shapeType == AutoShapeCallout1 {
+						// callout1 corner radius is governed by adj3, not adj;
+						// preserve the prior (roundRect-independent) behaviour.
+						sRadius = minInt(w, h) * 16667 / 100000
+						if s.adjustValues != nil {
+							if adj, ok := s.adjustValues["adj"]; ok {
+								sRadius = minInt(w, h) * adj / 200000
+							}
+							if adj, ok := s.adjustValues["adj3"]; ok {
+								sRadius = int(math.Min(float64(w), float64(h)) * float64(adj) / 100000.0)
+							}
 						}
 					}
 					if s.shapeType == AutoShapeRoundedRect && (s.fill == nil || s.fill.Type == FillNone) {
@@ -2044,6 +2054,21 @@ func (r *renderer) renderAutoShape(s *AutoShape) {
 	}
 }
 
+// roundedRectRadius returns the corner radius (in px) for a roundRect preset
+// given its adjustValues. OOXML: x1 = ss*a/100000 with a = pin(0, adj, 50000),
+// so the radius is min(w,h)*adj/100000. With no adj override the default is
+// 16667 (min*0.16667). The radius is bounded by half the short side by the
+// preset's arc geometry.
+func roundedRectRadius(w, h int, adjustValues map[string]int) int {
+	radius := minInt(w, h) * 16667 / 100000
+	if adjustValues != nil {
+		if adj, ok := adjustValues["adj"]; ok {
+			radius = minInt(w, h) * adj / 100000
+		}
+	}
+	return radius
+}
+
 func (r *renderer) renderAutoShapeFill(s *AutoShape, x, y, w, h int) {
 	if s.fill == nil || s.fill.Type == FillNone {
 		return
@@ -2060,12 +2085,7 @@ func (r *renderer) renderAutoShapeFill(s *AutoShape, x, y, w, h int) {
 			r.fillGradientLinear(rect, s.fill)
 		}
 	case AutoShapeRoundedRect:
-		radius := minInt(w, h) * 16667 / 100000
-		if s.adjustValues != nil {
-			if adj, ok := s.adjustValues["adj"]; ok {
-				radius = minInt(w, h) * adj / 200000
-			}
-		}
+		radius := roundedRectRadius(w, h, s.adjustValues)
 		if s.fill.Type == FillSolid {
 			r.fillRoundedRect(x, y, w, h, radius, fc)
 		} else {
@@ -2213,12 +2233,7 @@ func (r *renderer) renderAutoShapeBorder(s *AutoShape, x, y, w, h int) {
 	case AutoShapeEllipse:
 		r.drawEllipseAA(x, y, w, h, bc, pw)
 	case AutoShapeRoundedRect:
-		radius := minInt(w, h) * 16667 / 100000
-		if s.adjustValues != nil {
-			if adj, ok := s.adjustValues["adj"]; ok {
-				radius = minInt(w, h) * adj / 200000
-			}
-		}
+		radius := roundedRectRadius(w, h, s.adjustValues)
 		r.drawRoundedRect(x, y, w, h, radius, bc, pw)
 	case AutoShapeTriangle:
 		r.drawTriangle(x, y, w, h, bc, pw)
