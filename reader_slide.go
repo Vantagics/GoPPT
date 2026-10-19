@@ -588,6 +588,7 @@ func (r *PPTXReader) parseSlideXML(decoder *xml.Decoder, slide *Slide, rels []xm
 		inNvSpPr        bool
 		inSolidFill     bool
 		inSpPr          bool
+		inTxXfrm        bool // inside <dsp:txXfrm> — a SmartArt node's text rect
 		inLn            bool
 		inDuotone       bool // inside <a:duotone> under a pic's <a:blip>
 		inPPr           bool
@@ -883,6 +884,19 @@ func (r *PPTXReader) parseSlideXML(decoder *xml.Decoder, slide *Slide, rels []xm
 				}
 			case "spTree":
 				state.inSpTree = true
+			case "txXfrm":
+				// A SmartArt drawing node (dsp:sp) carries a second transform,
+				// dsp:txXfrm, giving the *text* rectangle — inset from the
+				// shape by the preset's text-rect formulas (roundRect insets
+				// by a*29289/100000 per side). The generic "off"/"ext" cases
+				// below match on local name alone, so without this flag the
+				// text rect overwrote the shape geometry: every diagram node
+				// shrank by that inset and drifted inward (customGeo slides
+				// 10/11/13: node 2 measured 376x369px against PowerPoint's
+				// 400x393). The text rect is symmetric about the shape's
+				// centre, so ignoring it leaves centred node text where it
+				// was; the bodyPr insets still govern the text box.
+				state.inTxXfrm = true
 			case "grpSp":
 				if state.inSpTree {
 					state.inGrpSp = true
@@ -2801,6 +2815,10 @@ func (r *PPTXReader) parseSlideXML(decoder *xml.Decoder, slide *Slide, rels []xm
 					}
 				}
 			case "off":
+				if state.inTxXfrm {
+					// Text-rect coordinates, not shape geometry — see txXfrm.
+					continue
+				}
 				for _, attr := range t.Attr {
 					switch attr.Name.Local {
 					case "x":
@@ -2814,6 +2832,9 @@ func (r *PPTXReader) parseSlideXML(decoder *xml.Decoder, slide *Slide, rels []xm
 					}
 				}
 			case "ext":
+				if state.inTxXfrm {
+					continue
+				}
 				for _, attr := range t.Attr {
 					switch attr.Name.Local {
 					case "cx":
@@ -3447,6 +3468,8 @@ func (r *PPTXReader) parseSlideXML(decoder *xml.Decoder, slide *Slide, rels []xm
 				state.inBgBlipFill = false
 			case "spTree":
 				state.inSpTree = false
+			case "txXfrm":
+				state.inTxXfrm = false
 			case "grpSp":
 				if state.inGrpSp {
 					grpDepth--
