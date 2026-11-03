@@ -24,6 +24,11 @@ func (r *PPTXReader) readSlide(zr *zip.Reader, path string, pres *Presentation, 
 	relsPath := strings.Replace(path, "slides/", "slides/_rels/", 1) + ".rels"
 	slideRels, _ := r.readRelationships(zr, relsPath)
 
+	// The master rung and its theme activate first: a schemeClr or fillRef in
+	// the slide's own markup resolves against the theme of the master the
+	// slide reaches, not against whichever master was parsed previously.
+	r.activateSlideRungs(zr, slideRels, path, pres)
+
 	if err := r.parseSlideXML(decoder, slide, slideRels, zr, path, pres); err != nil {
 		return nil, err
 	}
@@ -560,6 +565,7 @@ func (r *PPTXReader) readTransition(decoder *xml.Decoder, start xml.StartElement
 
 func (r *PPTXReader) parseSlideXML(decoder *xml.Decoder, slide *Slide, rels []xmlRelForRead, zr *zip.Reader, slidePath string, pres *Presentation) error {
 	type parseState struct {
+		rootChecked     bool // whether the part's root element attrs were read
 		inSpTree        bool
 		inSp            bool
 		inPic           bool
@@ -848,6 +854,21 @@ func (r *PPTXReader) parseSlideXML(decoder *xml.Decoder, slide *Slide, rels []xm
 
 		switch t := token.(type) {
 		case xml.StartElement:
+			if !state.rootChecked {
+				state.rootChecked = true
+				// A slide or layout whose root sets showMasterSp="0" asks for
+				// the graphics above it to stay off the canvas: a slide's
+				// flag silences both the master's and its own layout's
+				// decoration, a layout's only the master's — PowerPoint's
+				// own exports draw it exactly that way.
+				if t.Name.Local == "sld" || t.Name.Local == "sldLayout" {
+					for _, attr := range t.Attr {
+						if attr.Name.Local == "showMasterSp" && (attr.Value == "0" || attr.Value == "false") {
+							slide.hideMasterSp = true
+						}
+					}
+				}
+			}
 			switch t.Name.Local {
 			case "AlternateContent":
 				if !state.inSpTree && !state.inGrpSp {
@@ -4678,12 +4699,6 @@ func (r *PPTXReader) applyLayoutInheritance(zr *zip.Reader, slide *Slide, rels [
 	layoutRelsPath := strings.Replace(layoutPath, "slideLayouts/", "slideLayouts/_rels/", 1) + ".rels"
 	layoutRels, _ := r.readRelationships(zr, layoutRelsPath)
 
-	// The master sits one rung above the layout and is the same for every slide
-	// that shares it, so it is read once and cached on the presentation.
-	if !pres.masterRead {
-		r.readMaster(zr, layoutRels, pres)
-	}
-
 	// The layout's decoration shapes, with the master's beneath them, are the
 	// deck's shared furniture — bands, logos, footers — drawn on every slide
 	// that uses the layout, behind the slide's own shapes. They are read
@@ -4691,17 +4706,30 @@ func (r *PPTXReader) applyLayoutInheritance(zr *zip.Reader, slide *Slide, rels [
 	// keeps its fill, and cached per layout part: the deck's slides share a
 	// handful of layouts, and each slide would otherwise reparse the same XML.
 	if pres.layoutDecoCache == nil {
-		pres.layoutDecoCache = make(map[string][]Shape)
+		pres.layoutDecoCache = make(map[string]layoutDeco)
 	}
 	deco, cached := pres.layoutDecoCache[layoutPath]
 	if !cached {
-		deco = r.parseDecorationShapes(data, layoutRels, zr, layoutPath, pres)
+		var shapes []Shape
+		shapes, hideMaster := r.parseDecorationShapes(data, layoutRels, zr, layoutPath, pres)
+		deco = layoutDeco{shapes: shapes, hideMasterSp: hideMaster}
 		pres.layoutDecoCache[layoutPath] = deco
 	}
-	if len(pres.masterDecoShapes) > 0 || len(deco) > 0 {
-		merged := make([]Shape, 0, len(pres.masterDecoShapes)+len(deco)+len(slide.shapes))
-		merged = append(merged, pres.masterDecoShapes...)
-		merged = append(merged, deco...)
+	// Suppression: a layout whose root sets showMasterSp="0" keeps the
+	// master's graphics off; a slide with the same flag silences its
+	// layout's graphics as well.
+	masterDeco := pres.masterDecoShapes
+	if deco.hideMasterSp || slide.hideMasterSp {
+		masterDeco = nil
+	}
+	layoutDecoShapes := deco.shapes
+	if slide.hideMasterSp {
+		layoutDecoShapes = nil
+	}
+	if len(masterDeco) > 0 || len(layoutDecoShapes) > 0 {
+		merged := make([]Shape, 0, len(masterDeco)+len(layoutDecoShapes)+len(slide.shapes))
+		merged = append(merged, masterDeco...)
+		merged = append(merged, layoutDecoShapes...)
 		merged = append(merged, slide.shapes...)
 		slide.shapes = merged
 	}
@@ -5047,35 +5075,103 @@ func (m *masterTextStyles) styleFor(phType string, level int) *masterLevelStyle 
 //
 // Both are read together and once, because they come from the same part and are
 // the same for every slide that shares the master.
-func (r *PPTXReader) readMaster(zr *zip.Reader, layoutRels []xmlRelForRead, pres *Presentation) {
-	pres.masterRead = true
-	path := ""
-	for _, rel := range layoutRels {
-		if rel.Type == relTypeSlideMaster {
-			path = rel.Target
+// masterStateFor returns the parsed rung of one slide master, reading and
+// caching it on the presentation the first time a slide reaches it. The cache
+// is keyed by part path because a deck carries one master per theme — Office
+// writes seven of each without blinking — and every slide that shares a
+// master shares everything the master contributes.
+func (r *PPTXReader) masterStateFor(zr *zip.Reader, masterPath string, pres *Presentation) *masterState {
+	if pres.masterStates == nil {
+		pres.masterStates = make(map[string]*masterState)
+	}
+	if st, ok := pres.masterStates[masterPath]; ok {
+		return st
+	}
+	data, err := readFileFromZip(zr, masterPath)
+	if err != nil {
+		return nil
+	}
+	masterRelsPath := strings.Replace(masterPath, "slideMasters/", "slideMasters/_rels/", 1) + ".rels"
+	masterRels, _ := r.readRelationships(zr, masterRelsPath)
+
+	st := &masterState{}
+	st.placeholders = r.parsePlaceholderDefs(data, pres)
+	st.textStyles = parseMasterTextStyles(data, pres)
+	st.background, st.bgImage = r.parseLayoutBackground(data, masterRels, zr, masterPath, pres)
+
+	// The master's own theme, named in its rels. It activates before the
+	// decorations parse so their schemeClr references resolve against their
+	// own theme rather than whichever slide ran last.
+	for _, rel := range masterRels {
+		if !strings.Contains(rel.Type, "theme") {
+			continue
+		}
+		target := rel.Target
+		if !strings.HasPrefix(target, "ppt/") {
+			target = resolveRelativePath("ppt/slideMasters", target)
+		}
+		if b, err := readFileFromZip(zr, target); err == nil {
+			ts := &themeState{}
+			r.parseThemeColors(b, ts)
+			r.parseThemeFonts(b, ts)
+			r.parseThemeFormatScheme(b, ts)
+			st.theme = ts
 			break
 		}
 	}
-	if path == "" {
-		path = "ppt/slideMasters/slideMaster1.xml"
-	} else if !strings.HasPrefix(path, "ppt/") {
-		path = resolveRelativePath("ppt/slideLayouts", path)
+	if st.theme != nil {
+		pres.applyThemeState(st.theme)
 	}
-	data, err := readFileFromZip(zr, path)
-	if err != nil {
-		pres.masterTextStyles = &masterTextStyles{}
+	st.decoShapes, _ = r.parseDecorationShapes(data, masterRels, zr, masterPath, pres)
+
+	pres.masterStates[masterPath] = st
+	pres.masterRead = true
+	return st
+}
+
+// activateSlideRungs points the presentation's active master and theme fields
+// at the rungs this slide reaches, before any of its markup is parsed: a
+// schemeClr in the slide resolves against the theme of the master the slide's
+// layout belongs to, and a placeholder inherits from that master's geometry.
+func (r *PPTXReader) activateSlideRungs(zr *zip.Reader, slideRels []xmlRelForRead, slidePath string, pres *Presentation) {
+	layoutPath := ""
+	for _, rel := range slideRels {
+		if rel.Type == relTypeSlideLayout {
+			target := rel.Target
+			if !strings.HasPrefix(target, "ppt/") {
+				dir := strings.TrimSuffix(slidePath, "/"+lastPathComponent(slidePath))
+				target = resolveRelativePath(dir, target)
+			}
+			layoutPath = target
+			break
+		}
+	}
+	if layoutPath == "" {
+		pres.applyThemeState(pres.defaultTheme)
 		return
 	}
-	pres.masterPlaceholders = r.parsePlaceholderDefs(data, pres)
-	pres.masterTextStyles = parseMasterTextStyles(data, pres)
-	// The background rung below the layout: picture relationships resolve
-	// against the master's own rels, not the layout's that got passed in.
-	masterRelsPath := strings.Replace(path, "slideMasters/", "slideMasters/_rels/", 1) + ".rels"
-	masterRels, _ := r.readRelationships(zr, masterRelsPath)
-	pres.masterBackground, pres.masterBgImage = r.parseLayoutBackground(data, masterRels, zr, path, pres)
-	// The master's decoration shapes — the bands and logos drawn on every
-	// slide — read once here, since every slide shares the master.
-	pres.masterDecoShapes = r.parseDecorationShapes(data, masterRels, zr, path, pres)
+	layoutRelsPath := strings.Replace(layoutPath, "slideLayouts/", "slideLayouts/_rels/", 1) + ".rels"
+	layoutRels, _ := r.readRelationships(zr, layoutRelsPath)
+	masterPath := ""
+	for _, rel := range layoutRels {
+		if rel.Type == relTypeSlideMaster {
+			target := rel.Target
+			if !strings.HasPrefix(target, "ppt/") {
+				target = resolveRelativePath("ppt/slideLayouts", target)
+			}
+			masterPath = target
+			break
+		}
+	}
+	if masterPath == "" {
+		pres.applyThemeState(pres.defaultTheme)
+		return
+	}
+	if st := r.masterStateFor(zr, masterPath, pres); st != nil {
+		pres.applyMasterState(st)
+	} else {
+		pres.applyThemeState(pres.defaultTheme)
+	}
 }
 
 // parseDecorationShapes reads a master or layout part's shapes through the
@@ -5088,11 +5184,11 @@ func (r *PPTXReader) readMaster(zr *zip.Reader, layoutRels []xmlRelForRead, pres
 // Placeholders are excluded deliberately: an export does not draw a layout's
 // empty title or body prompt, and a slide's own placeholder replaces the
 // inherited one rather than stacking on it.
-func (r *PPTXReader) parseDecorationShapes(data []byte, rels []xmlRelForRead, zr *zip.Reader, partPath string, pres *Presentation) []Shape {
+func (r *PPTXReader) parseDecorationShapes(data []byte, rels []xmlRelForRead, zr *zip.Reader, partPath string, pres *Presentation) ([]Shape, bool) {
 	deco := newSlide()
 	decoder := xml.NewDecoder(bytes.NewReader(data))
 	if err := r.parseSlideXML(decoder, deco, rels, zr, partPath, pres); err != nil {
-		return nil
+		return nil, false
 	}
 	var out []Shape
 	for _, s := range deco.shapes {
@@ -5101,7 +5197,7 @@ func (r *PPTXReader) parseDecorationShapes(data []byte, rels []xmlRelForRead, zr
 		}
 		out = append(out, s)
 	}
-	return out
+	return out, deco.hideMasterSp
 }
 
 // parseMasterTextStyles reads <p:txStyles> out of a slide master.

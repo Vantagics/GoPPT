@@ -91,7 +91,7 @@ func (r *PPTXReader) ReadFromReader(reader io.ReaderAt, size int64) (pres *Prese
 		slides:                 make([]*Slide, 0),
 		slideMasters:           make([]*SlideMaster, 0),
 		layout:                 NewDocumentLayout(),
-		layoutDecoCache:        make(map[string][]Shape),
+		layoutDecoCache:        make(map[string]layoutDeco),
 	}
 
 	// Read core properties (non-fatal: missing properties are acceptable)

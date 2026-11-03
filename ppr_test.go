@@ -113,7 +113,7 @@ func pprLayoutDoc(pPr, body string) string {
 // applyLayoutInheritance reads decorations out of a real layout part.
 func layoutShape(t *testing.T, pPr, body string) *RichTextShape {
 	t.Helper()
-	shapes := (&PPTXReader{}).parseDecorationShapes(
+	shapes, _ := (&PPTXReader{}).parseDecorationShapes(
 		[]byte(pprLayoutDoc(pPr, body)), nil, nil, "ppt/slideLayouts/slideLayout1.xml", New())
 	if len(shapes) != 1 {
 		t.Fatalf("the layout produced %d shapes, want 1", len(shapes))

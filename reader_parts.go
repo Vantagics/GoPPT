@@ -327,20 +327,23 @@ func (r *PPTXReader) readPresentation(zr *zip.Reader, pres *Presentation) ([]str
 // and a deck that uses either without the other renders in the wrong face or
 // the wrong colour.
 func (r *PPTXReader) readTheme(zr *zip.Reader, pres *Presentation) {
-	var data []byte
+	// The default theme covers the deck until a slide's own master names a
+	// theme of its: masters after the first carry their own theme parts, and
+	// a deck can hold seven of each. The flat active fields start here so a
+	// master-less deck still resolves schemeClr references.
 	for _, path := range []string{"ppt/theme/theme1.xml", "ppt/theme/theme2.xml"} {
 		b, err := readFileFromZip(zr, path)
-		if err == nil {
-			data = b
-			break
+		if err != nil {
+			continue
 		}
-	}
-	if data == nil {
+		ts := &themeState{}
+		r.parseThemeColors(b, ts)
+		r.parseThemeFonts(b, ts)
+		r.parseThemeFormatScheme(b, ts)
+		pres.defaultTheme = ts
+		pres.applyThemeState(ts)
 		return
 	}
-	r.parseThemeColors(data, pres)
-	r.parseThemeFonts(data, pres)
-	r.parseThemeFormatScheme(data, pres)
 }
 
 // themeColorOp is a single colour transform from a theme style body — the
@@ -390,7 +393,7 @@ type themeEffectStyle struct {
 // parseThemeFormatScheme reads <a:fmtScheme>'s fill and line style lists.
 // parseThemeColors stops at </a:clrScheme> — deliberately, because everything
 // after it is per-index style bodies, which only a style reference consumes.
-func (r *PPTXReader) parseThemeFormatScheme(data []byte, pres *Presentation) {
+func (r *PPTXReader) parseThemeFormatScheme(data []byte, ts *themeState) {
 	decoder := xml.NewDecoder(bytes.NewReader(data))
 
 	var (
@@ -546,7 +549,7 @@ func (r *PPTXReader) parseThemeFormatScheme(data []byte, pres *Presentation) {
 					// slide scanner resolves one.
 					for _, attr := range t.Attr {
 						if attr.Name.Local == "val" {
-							if argb, ok := pres.themeColors[attr.Value]; ok && argb != "" {
+							if argb, ok := ts.colors[attr.Value]; ok && argb != "" {
 								effShadowColor = argb
 							} else if len(attr.Value) == 6 {
 								effShadowColor = attr.Value
@@ -574,18 +577,18 @@ func (r *PPTXReader) parseThemeFormatScheme(data []byte, pres *Presentation) {
 				}
 			case "gradFill":
 				if inGrad {
-					pres.themeFillStyles = append(pres.themeFillStyles, *curFill)
+					ts.fillStyles = append(ts.fillStyles, *curFill)
 					inGrad = false
 					curFill = nil
 				}
 			case "solidFill":
 				if inFillLst && !inGrad && curFill != nil {
-					pres.themeFillStyles = append(pres.themeFillStyles, *curFill)
+					ts.fillStyles = append(ts.fillStyles, *curFill)
 					curFill = nil
 				}
 			case "ln":
 				if inLnLst && curLn != nil {
-					pres.themeLnStyles = append(pres.themeLnStyles, *curLn)
+					ts.lnStyles = append(ts.lnStyles, *curLn)
 					curLn = nil
 				}
 			case "schemeClr", "srgbClr":
@@ -600,7 +603,7 @@ func (r *PPTXReader) parseThemeFormatScheme(data []byte, pres *Presentation) {
 				}
 			case "effectStyle":
 				if curEff != nil {
-					pres.themeEffectStyles = append(pres.themeEffectStyles, *curEff)
+					ts.effectStyles = append(ts.effectStyles, *curEff)
 					curEff = nil
 				}
 			case "effectStyleLst":
@@ -753,9 +756,9 @@ func resolveThemeFillStyle(pres *Presentation, idx int, scheme string, slideOps 
 	return f
 }
 
-// parseThemeColors populates pres.themeColors with mappings like "dk1" → "FF000000".
-func (r *PPTXReader) parseThemeColors(data []byte, pres *Presentation) {
-	pres.themeColors = make(map[string]string)
+// parseThemeColors populates ts.colors with mappings like "dk1" → "FF000000".
+func (r *PPTXReader) parseThemeColors(data []byte, ts *themeState) {
+	ts.colors = make(map[string]string)
 	decoder := xml.NewDecoder(bytes.NewReader(data))
 
 	// Track which scheme color element we're inside
@@ -778,7 +781,7 @@ func (r *PPTXReader) parseThemeColors(data []byte, pres *Presentation) {
 				if currentSchemeColor != "" {
 					for _, attr := range t.Attr {
 						if attr.Name.Local == "val" {
-							pres.themeColors[currentSchemeColor] = "FF" + strings.ToUpper(attr.Value)
+							ts.colors[currentSchemeColor] = "FF" + strings.ToUpper(attr.Value)
 						}
 					}
 				}
@@ -786,7 +789,7 @@ func (r *PPTXReader) parseThemeColors(data []byte, pres *Presentation) {
 				if currentSchemeColor != "" {
 					for _, attr := range t.Attr {
 						if attr.Name.Local == "lastClr" {
-							pres.themeColors[currentSchemeColor] = "FF" + strings.ToUpper(attr.Value)
+							ts.colors[currentSchemeColor] = "FF" + strings.ToUpper(attr.Value)
 						}
 					}
 				}
@@ -799,17 +802,17 @@ func (r *PPTXReader) parseThemeColors(data []byte, pres *Presentation) {
 				currentSchemeColor = ""
 			case "clrScheme":
 				// Also add common aliases
-				if c, ok := pres.themeColors["dk1"]; ok {
-					pres.themeColors["tx1"] = c
+				if c, ok := ts.colors["dk1"]; ok {
+					ts.colors["tx1"] = c
 				}
-				if c, ok := pres.themeColors["lt1"]; ok {
-					pres.themeColors["bg1"] = c
+				if c, ok := ts.colors["lt1"]; ok {
+					ts.colors["bg1"] = c
 				}
-				if c, ok := pres.themeColors["dk2"]; ok {
-					pres.themeColors["tx2"] = c
+				if c, ok := ts.colors["dk2"]; ok {
+					ts.colors["tx2"] = c
 				}
-				if c, ok := pres.themeColors["lt2"]; ok {
-					pres.themeColors["bg2"] = c
+				if c, ok := ts.colors["lt2"]; ok {
+					ts.colors["bg2"] = c
 				}
 				return // done
 			}
@@ -817,7 +820,7 @@ func (r *PPTXReader) parseThemeColors(data []byte, pres *Presentation) {
 	}
 }
 
-// parseThemeFonts populates pres.themeFonts from the theme's <a:fontScheme>:
+// parseThemeFonts populates ts.fonts from the theme's <a:fontScheme>:
 //
 //	<a:fontScheme><a:majorFont><a:latin typeface="Calibri Light"/>…
 //
@@ -827,8 +830,8 @@ func (r *PPTXReader) parseThemeColors(data []byte, pres *Presentation) {
 // no font of its own is drawn in the theme's major or minor face, so without
 // this map every such run is drawn in whatever the font cache falls back to,
 // and because the fallback measures differently, lines wrap in the wrong place.
-func (r *PPTXReader) parseThemeFonts(data []byte, pres *Presentation) {
-	pres.themeFonts = make(map[string]string)
+func (r *PPTXReader) parseThemeFonts(data []byte, ts *themeState) {
+	ts.fonts = make(map[string]string)
 	decoder := xml.NewDecoder(bytes.NewReader(data))
 
 	var scope string // "majorFont" or "minorFont" while inside one
@@ -863,7 +866,7 @@ func (r *PPTXReader) parseThemeFonts(data []byte, pres *Presentation) {
 					if attr.Name.Local != "typeface" || attr.Value == "" {
 						continue
 					}
-					pres.themeFonts[prefix+"-"+themeFontScriptSuffix(t.Name.Local)] = attr.Value
+					ts.fonts[prefix+"-"+themeFontScriptSuffix(t.Name.Local)] = attr.Value
 				}
 			}
 		case xml.EndElement:

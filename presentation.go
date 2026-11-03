@@ -67,12 +67,88 @@ type Presentation struct {
 	// bands, logos and footers PowerPoint draws on every slide of the deck,
 	// beneath anything the layout or the slide adds. Layouts are cached per
 	// part path in layoutDecoCache, since a deck's slides share a handful of
-	// layouts and each would otherwise reparse the same decoration XML.
+	// layouts and each would otherwise reparse the same decoration XML. The
+	// cache also keeps the layout's own showMasterSp flag, which decides
+	// whether the master's decoration shows through it.
 	masterDecoShapes []Shape
-	layoutDecoCache  map[string][]Shape
-	// masterRead records that the master was looked for, so a master without
-	// placeholders is not re-read for every slide.
+	layoutDecoCache  map[string]layoutDeco
+	// masterStates holds one masterState per master part path, and
+	// defaultTheme is the fallback theme parsed from theme1.xml/theme2.xml
+	// for slides that reach no master with a readable theme. A deck carries
+	// one theme per master — Office writes seven of each without blinking —
+	// so the flat fields above are the ACTIVE rung's values, re-pointed as
+	// each slide is read; by the time the renderer runs, every reference has
+	// already resolved to concrete colours and fonts.
+	masterStates map[string]*masterState
+	defaultTheme *themeState
+	// masterRead records that at least one master was looked for, so a deck
+	// whose masters carry no placeholders is not treated as master-less.
 	masterRead bool
+}
+
+// themeState is one theme part's parsed content: the colour scheme, the font
+// scheme and the fill/line/effect style lists a shape's <p:style> references
+// resolve against.
+type themeState struct {
+	colors       map[string]string
+	fonts        map[string]string
+	fillStyles   []themeFillStyle
+	lnStyles     []themeLnStyle
+	effectStyles []themeEffectStyle
+}
+
+// layoutDeco is one slide layout's cached decoration: its non-placeholder
+// shapes and whether its root sets showMasterSp="0" — a layout's flag keeps
+// only the master's graphics off, while a slide's silences its layout's too.
+type layoutDeco struct {
+	shapes       []Shape
+	hideMasterSp bool
+}
+
+// masterState is one slide master's parsed contribution: its placeholder
+// geometry, its text styles, its background rung, its decoration shapes and
+// the theme part its rels name.
+type masterState struct {
+	placeholders []layoutPlaceholder
+	textStyles   *masterTextStyles
+	background   *Fill
+	bgImage      *DrawingShape
+	decoShapes   []Shape
+	theme        *themeState
+}
+
+// applyThemeState re-points the active theme fields. All consumers read them
+// while a slide is being parsed, never at render time, so swapping the
+// pointers between slides is safe.
+func (p *Presentation) applyThemeState(ts *themeState) {
+	if ts == nil {
+		return
+	}
+	p.themeColors = ts.colors
+	p.themeFonts = ts.fonts
+	p.themeFillStyles = ts.fillStyles
+	p.themeLnStyles = ts.lnStyles
+	p.themeEffectStyles = ts.effectStyles
+}
+
+// applyMasterState re-points the active master rung, and with it the theme
+// that master names. A master without a readable theme falls back to the
+// default one: carrying the previous slide's theme across would tint the
+// deck in whichever master happened to parse last.
+func (p *Presentation) applyMasterState(st *masterState) {
+	if st == nil {
+		return
+	}
+	p.masterPlaceholders = st.placeholders
+	p.masterTextStyles = st.textStyles
+	p.masterBackground = st.background
+	p.masterBgImage = st.bgImage
+	p.masterDecoShapes = st.decoShapes
+	if st.theme != nil {
+		p.applyThemeState(st.theme)
+	} else {
+		p.applyThemeState(p.defaultTheme)
+	}
 }
 
 // New creates a new Presentation with one default blank slide.

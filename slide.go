@@ -201,6 +201,10 @@ type Slide struct {
 	comments   []*Comment
 	animations []*Animation
 	background *Fill
+	// hideMasterSp records a root showMasterSp="0": the slide asked for the
+	// graphics above it — the master's decoration and its own layout's — to
+	// stay off the canvas.
+	hideMasterSp bool
 }
 
 // newSlide creates a new empty slide.
