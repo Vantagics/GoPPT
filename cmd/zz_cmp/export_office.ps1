@@ -23,7 +23,14 @@ param(
     [Parameter(Mandatory = $true)][string]$Deck,
     [Parameter(Mandatory = $true)][string]$OutDir,
     [int]$Width = 1600,
-    [string]$Log = ""
+    [string]$Log = "",
+    # Coexistence: PowerPoint's COM is a single shared instance, so Quit or a
+    # process kill here would tear down whatever another automation client —
+    # or the user — still has open. -KeepAlive closes only this deck's
+    # presentation and leaves the application to the next client; without it
+    # the script quits and cleans up as before, for a run that owns the
+    # machine.
+    [switch]$KeepAlive
 )
 
 $ErrorActionPreference = "Stop"
@@ -61,11 +68,13 @@ catch {
     L ("TRACE: " + $_.ScriptStackTrace)
 }
 finally {
-    if ($app -ne $null) { try { $app.Quit() } catch { L ("quit-err: " + $_.Exception.Message) } }
-    Start-Sleep -Seconds 1
-    Get-Process POWERPNT -ErrorAction SilentlyContinue | ForEach-Object {
-        L ("killing left-over pid=" + $_.Id)
-        Stop-Process -Id $_.Id -Force -ErrorAction SilentlyContinue
+    if (-not $KeepAlive) {
+        if ($app -ne $null) { try { $app.Quit() } catch { L ("quit-err: " + $_.Exception.Message) } }
+        Start-Sleep -Seconds 1
+        Get-Process POWERPNT -ErrorAction SilentlyContinue | ForEach-Object {
+            L ("killing left-over pid=" + $_.Id)
+            Stop-Process -Id $_.Id -Force -ErrorAction SilentlyContinue
+        }
     }
 }
 

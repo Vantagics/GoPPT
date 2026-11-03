@@ -83,8 +83,7 @@ func pprTableCell(pPr, body string) string {
 </p:graphicFrame>`
 }
 
-// pprLayoutDoc is a slide layout carrying one non-placeholder text shape, which
-// is the only kind parseLayoutImages builds a shape from.
+// pprLayoutDoc is a slide layout carrying one non-placeholder text shape.
 func pprLayoutDoc(pPr, body string) string {
 	return `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
 <p:sldLayout xmlns:a="` + nsDrawingML + `" xmlns:r="` + nsOfficeDocRels + `" xmlns:p="` + nsPresentationML + `">
@@ -111,10 +110,10 @@ func pprLayoutDoc(pPr, body string) string {
 }
 
 // layoutShape reads the single text shape pprLayoutDoc describes, the way
-// applyLayoutInheritance reads one out of a real layout part.
+// applyLayoutInheritance reads decorations out of a real layout part.
 func layoutShape(t *testing.T, pPr, body string) *RichTextShape {
 	t.Helper()
-	shapes := (&PPTXReader{}).parseLayoutImages(
+	shapes := (&PPTXReader{}).parseDecorationShapes(
 		[]byte(pprLayoutDoc(pPr, body)), nil, nil, "ppt/slideLayouts/slideLayout1.xml", New())
 	if len(shapes) != 1 {
 		t.Fatalf("the layout produced %d shapes, want 1", len(shapes))
@@ -314,10 +313,10 @@ func TestTableCellKeepsALineBreakTheModelHolds(t *testing.T) {
 
 // TestLayoutTextShapeKeepsItsParagraphProperties covers the second slide reader.
 //
-// parseLayoutImages walks the same markup as parseSlideXML for the
-// non-placeholder shapes a layout contributes, and applyLayoutInheritance
-// prepends what it returns to the slide — so those shapes are drawn. Its
-// paragraph handling understood one attribute of the set.
+// parseDecorationShapes walks the same markup as parseSlideXML — it goes
+// through parseSlideXML — for the non-placeholder shapes a layout
+// contributes, and applyLayoutInheritance prepends what it returns to the
+// slide, so those shapes are drawn.
 func TestLayoutTextShapeKeepsItsParagraphProperties(t *testing.T) {
 	rt := layoutShape(t,
 		`<a:pPr marL="342900" marR="12700" indent="-342900" lvl="1"/>`,

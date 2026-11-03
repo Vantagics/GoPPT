@@ -63,6 +63,13 @@ type Presentation struct {
 	// used to render white here, because only the layout rung was read.
 	masterBackground *Fill
 	masterBgImage    *DrawingShape
+	// masterDecoShapes are the master's non-placeholder shapes — the colour
+	// bands, logos and footers PowerPoint draws on every slide of the deck,
+	// beneath anything the layout or the slide adds. Layouts are cached per
+	// part path in layoutDecoCache, since a deck's slides share a handful of
+	// layouts and each would otherwise reparse the same decoration XML.
+	masterDecoShapes []Shape
+	layoutDecoCache  map[string][]Shape
 	// masterRead records that the master was looked for, so a master without
 	// placeholders is not re-read for every slide.
 	masterRead bool
