@@ -5097,13 +5097,9 @@ func (r *PPTXReader) masterStateFor(zr *zip.Reader, masterPath string, pres *Pre
 	masterRels, _ := r.readRelationships(zr, masterRelsPath)
 
 	st := &masterState{}
-	st.placeholders = r.parsePlaceholderDefs(data, pres)
-	st.textStyles = parseMasterTextStyles(data, pres)
-	st.background, st.bgImage = r.parseLayoutBackground(data, masterRels, zr, masterPath, pres)
 
-	// The master's own theme, named in its rels. It activates before the
-	// decorations parse so their schemeClr references resolve against their
-	// own theme rather than whichever slide ran last.
+	// The master's own theme, named in its rels, activates first: everything
+	// the master contributes below resolves schemeClr references against it.
 	for _, rel := range masterRels {
 		if !strings.Contains(rel.Type, "theme") {
 			continue
@@ -5123,12 +5119,53 @@ func (r *PPTXReader) masterStateFor(zr *zip.Reader, masterPath string, pres *Pre
 	}
 	if st.theme != nil {
 		pres.applyThemeState(st.theme)
+	} else {
+		pres.applyThemeState(pres.defaultTheme)
 	}
+
+	// The master's <p:clrMap> redefines the mapped colour names: bg1, tx1,
+	// bg2, tx2 and friends are not theme slots, they are names a master can
+	// point at any slot — master-bg-color sends bg1 at dk2 and the deck's
+	// whole background turns dark. Nothing downstream reads a mapping gene,
+	// so the map folds straight into the colour table here: the static
+	// aliases the theme parser installed were the default map.
+	remapClrMap(data, st.theme)
+
+	st.placeholders = r.parsePlaceholderDefs(data, pres)
+	st.textStyles = parseMasterTextStyles(data, pres)
+	st.background, st.bgImage = r.parseLayoutBackground(data, masterRels, zr, masterPath, pres)
 	st.decoShapes, _ = r.parseDecorationShapes(data, masterRels, zr, masterPath, pres)
 
 	pres.masterStates[masterPath] = st
 	pres.masterRead = true
 	return st
+}
+
+// remapClrMap overlays a master's <p:clrMap> onto the theme colour table.
+// A mapped name resolves to whatever slot the master sent it at.
+func remapClrMap(data []byte, ts *themeState) {
+	if ts == nil || ts.colors == nil {
+		return
+	}
+	decoder := xml.NewDecoder(bytes.NewReader(data))
+	for {
+		token, err := decoder.Token()
+		if err != nil {
+			return
+		}
+		if t, ok := token.(xml.StartElement); ok && t.Name.Local == "clrMap" {
+			for _, attr := range t.Attr {
+				switch attr.Name.Local {
+				case "bg1", "tx1", "bg2", "tx2", "hlink", "folHlink",
+					"accent1", "accent2", "accent3", "accent4", "accent5", "accent6":
+					if argb, ok := ts.colors[attr.Value]; ok {
+						ts.colors[attr.Name.Local] = argb
+					}
+				}
+			}
+			return
+		}
+	}
 }
 
 // activateSlideRungs points the presentation's active master and theme fields
