@@ -34,6 +34,8 @@ function L($m) { [void]$lines.Add([string]$m) }
 $app = $null
 try {
     New-Item -ItemType Directory -Path $OutDir -Force | Out-Null
+    # Export rejects mixed-separator paths ("F:/dir"): normalise to backslashes.
+    $OutDir = (Resolve-Path $OutDir).Path
 
     $app = New-Object -ComObject PowerPoint.Application
     $app.DisplayAlerts = 1

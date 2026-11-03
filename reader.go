@@ -70,7 +70,15 @@ func (r *PPTXReader) ReadFromReader(reader io.ReaderAt, size int64) (pres *Prese
 
 	zr, err := zip.NewReader(reader, size)
 	if err != nil {
-		return nil, fmt.Errorf("failed to open zip: %w", err)
+		// Office repairs a package whose central directory is missing — a
+		// truncated download still opens in PowerPoint — so the same salvage
+		// runs here before the read is declared failed. The rebuilt bytes
+		// stay reachable through zr, so no explicit lifetime tracking is
+		// needed.
+		zr, err = repairTruncatedZip(reader, size)
+		if err != nil {
+			return nil, fmt.Errorf("failed to open zip: %w", err)
+		}
 	}
 
 	if len(zr.File) > maxZipEntries {
