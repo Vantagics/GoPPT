@@ -210,6 +210,13 @@ func parseChartXML(data []byte, themeColors map[string]string) *ChartShape {
 	var (
 		chartTitleText string
 
+		// autoTitleDeleted records <c:autoTitleDeleted val="1">: the author
+		// turned the automatic title off. When absent or 0 and no explicit
+		// title text exists, a single-series chart shows that series' name
+		// as its title — PowerPoint's own export does, and the reader used
+		// to drop the label entirely.
+		autoTitleDeleted bool
+
 		// Typefaces declared by the title run currently being scanned. Chart
 		// text declares them on <a:rPr><a:latin>/<a:ea>, exactly as slide text
 		// does, so they are collected while the title is open and applied when
@@ -949,6 +956,9 @@ func parseChartXML(data []byte, themeColors map[string]string) *ChartShape {
 					chart.displayBlankAs = val
 				}
 
+			case "autoTitleDeleted":
+				autoTitleDeleted = val == "1"
+
 			case "t":
 				if titleTarget != "" || valueCtx == "serTitle" {
 					inT = true
@@ -1290,6 +1300,12 @@ func parseChartXML(data []byte, themeColors map[string]string) *ChartShape {
 
 	if chartTitleText != "" {
 		chart.title.Text = chartTitleText
+		chart.title.Visible = true
+	} else if !autoTitleDeleted && len(series) == 1 && series[0].Title != "" {
+		// An empty <c:title> (or none at all) with the auto title still
+		// enabled shows a single series' own name — the "Sales" caption above
+		// the pie that the renderer used to leave off the canvas.
+		chart.title.Text = series[0].Title
 		chart.title.Visible = true
 	}
 

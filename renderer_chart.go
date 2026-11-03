@@ -542,10 +542,12 @@ func (r *renderer) renderChart(s *ChartShape) {
 	// frame. Measured against COM exports the placement is exact (deck
 	// 00022823 slide22: layout right edge 1449.5 vs measured 1449), so it is
 	// applied after the title/legend strips, on frame-relative coordinates.
+	autoPlotLayout := true
 	if L := s.plotArea.layout; L != nil && L.w > 0 && L.h > 0 {
 		nx, ny := x+int(L.x*float64(w)), y+int(L.y*float64(h))
 		nx2, ny2 := x+int((L.x+L.w)*float64(w)), y+int((L.y+L.h)*float64(h))
 		innerX, innerY, innerW, innerH = nx, ny, nx2-nx, ny2-ny
+		autoPlotLayout = false
 	}
 
 	if innerW < 8 || innerH < 8 {
@@ -560,9 +562,9 @@ func (r *renderer) renderChart(s *ChartShape) {
 	case *LineChart:
 		r.renderLineChart(c, s, innerX, innerY, innerW, innerH)
 	case *PieChart:
-		r.renderPieChart(c.Series, s, innerX, innerY, innerW, innerH)
+		r.renderPieChart(c.Series, s, innerX, innerY, innerW, innerH, autoPlotLayout)
 	case *Pie3DChart:
-		r.renderPieChart(c.Series, s, innerX, innerY, innerW, innerH)
+		r.renderPieChart(c.Series, s, innerX, innerY, innerW, innerH, autoPlotLayout)
 	case *DoughnutChart:
 		r.renderDoughnutChart(c, s, innerX, innerY, innerW, innerH)
 	case *AreaChart:
@@ -1433,7 +1435,7 @@ func (r *renderer) chartValueLabelDropV(f *Font) int {
 
 // --- pie / doughnut ---
 
-func (r *renderer) renderPieChart(series []*ChartSeries, s *ChartShape, px, py, pw, ph int) {
+func (r *renderer) renderPieChart(series []*ChartSeries, s *ChartShape, px, py, pw, ph int, autoPlotLayout bool) {
 	if len(series) == 0 || len(series[0].Categories) == 0 {
 		return
 	}
@@ -1458,6 +1460,14 @@ func (r *renderer) renderPieChart(series []*ChartSeries, s *ChartShape, px, py, 
 	cx := px + pw/2
 	cy := py + ph/2
 	radius := minInt(pw, ph)/2 - 2
+	if autoPlotLayout {
+		// With the plot layout left automatic, PowerPoint does not fill the
+		// whole plot rect with the circle: the pie-chart deck's export
+		// measures a 580px circle in a 662px rect, 7/8 of it, and centres it
+		// in what remains. A manual layout pins the rect exactly, so the
+		// fit-for-rect behaviour stays untouched there.
+		radius = int(float64(radius) * 0.875)
+	}
 	if radius < 5 {
 		return
 	}
@@ -1972,15 +1982,26 @@ func (r *renderer) renderChartLegend(s *ChartShape, x, y, w, h, titleH int, pos 
 
 	switch pos {
 	case LegendLeft, LegendRight:
-		legendW := r.chartLegendWidth(s, w/2)
+		// A vertical legend reserves a strip along its edge. The reserved
+		// width is wider than the longest entry — PowerPoint's own export
+		// keeps a margin around the entry block (pie-chart.pptx: a 190px
+		// strip for "1st Qtr" at 12pt) — and never narrower than the text
+		// plus swatch, floored at 3/16 of the frame.
+		legendW := r.chartLegendWidth(s, w/2) + 31
+		if minW := w * 3 / 16; legendW < minW {
+			legendW = minW
+		}
 		lx := x + 4
 		if pos == LegendRight {
 			lx = x + w - legendW - 4
 		}
 		innerX := lx + 6
+		// Entries sit in a vertical block; the block is centred vertically in
+		// the space below the title, the way the reference export draws it,
+		// instead of hanging from the top edge.
 		ly := y + titleH + 4
-		if innerX+legendW > x+w {
-			innerX = x + 4
+		if blockH := len(names) * lineH; blockH < h-titleH {
+			ly = y + titleH + (h-titleH-blockH)/2
 		}
 		for i, name := range names {
 			drawEntry(innerX, ly+i*lineH, name, colors[i])
