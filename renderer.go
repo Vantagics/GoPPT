@@ -131,7 +131,10 @@ func (p *Presentation) SlideToImage(slideIndex int, opts *RenderOptions) (img im
 	slideW := float64(layout.CX)
 	slideH := float64(layout.CY)
 	imgW := opts.Width
-	imgH := int(float64(imgW) * slideH / slideW)
+	// Round, as PowerPoint's own export does: truncation shrinks the canvas a
+	// full row whenever the aspect ratio lands past .5, and the resulting
+	// render no longer pairs with the reference export pixel for pixel.
+	imgH := int(math.Round(float64(imgW) * slideH / slideW))
 	// An extreme slide aspect ratio can round the height away; a zero-height
 	// canvas is not a usable image, so keep at least one row.
 	if imgH < 1 {
