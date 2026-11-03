@@ -1696,10 +1696,10 @@ func (r *PPTXReader) parseSlideXML(decoder *xml.Decoder, slide *Slide, rels []xm
 						if lstStyleFont.Size > 0 {
 							currentFont.Size = lstStyleFont.Size
 						}
-						if lstStyleFont.Bold {
+						if lstStyleFont.Bold && !currentFont.boldSet {
 							currentFont.Bold = true
 						}
-						if lstStyleFont.Italic {
+						if lstStyleFont.Italic && !currentFont.italicSet {
 							currentFont.Italic = true
 						}
 						if lstStyleFont.Name != "Calibri" && lstStyleFont.Name != "" {
@@ -1717,10 +1717,10 @@ func (r *PPTXReader) parseSlideXML(decoder *xml.Decoder, slide *Slide, rels []xm
 						if defFont.Size > 0 {
 							currentFont.Size = defFont.Size
 						}
-						if defFont.Bold {
+						if defFont.Bold && !currentFont.boldSet {
 							currentFont.Bold = true
 						}
-						if defFont.Italic {
+						if defFont.Italic && !currentFont.italicSet {
 							currentFont.Italic = true
 						}
 						if defFont.Name != "Calibri" && defFont.Name != "" {
@@ -1773,8 +1773,10 @@ func (r *PPTXReader) parseSlideXML(decoder *xml.Decoder, slide *Slide, rels []xm
 							}
 						case "b":
 							currentFont.Bold = attr.Value == "1"
+						currentFont.boldSet = true
 						case "i":
 							currentFont.Italic = attr.Value == "1"
+						currentFont.italicSet = true
 						case "u":
 							currentFont.Underline = UnderlineType(attr.Value)
 						case "strike":
@@ -4973,7 +4975,7 @@ func applyPlaceholderFont(ph *PlaceholderShape, def *layoutPlaceholder) {
 			if runSizeIsDefault(tr.font.Size) && def.fontSize > 0 {
 				tr.font.Size = def.fontSize
 			}
-			if def.fontBold {
+			if def.fontBold && !tr.font.boldSet {
 				tr.font.Bold = true
 			}
 			if def.fontColor.ARGB != "" && def.fontColor.ARGB != "FF000000" && tr.font.Color.ARGB == "FF000000" {
@@ -5569,10 +5571,10 @@ func applyMasterTextStyles(ph *PlaceholderShape, m *masterTextStyles) {
 			if runSizeIsDefault(tr.font.Size) && s.size > 0 {
 				tr.font.Size = s.size
 			}
-			if s.bold {
+			if s.bold && !tr.font.boldSet {
 				tr.font.Bold = true
 			}
-			if s.italic {
+			if s.italic && !tr.font.italicSet {
 				tr.font.Italic = true
 			}
 			if s.color.ARGB != "" && s.color.ARGB != "FF000000" && tr.font.Color.ARGB == "FF000000" {

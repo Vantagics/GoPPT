@@ -109,6 +109,14 @@ type Font struct {
 	Superscript   bool
 	Subscript     bool
 	Shadow        *Shadow // run-level text shadow, from <a:rPr><a:effectLst><a:outerShdw>
+
+	// boldSet / italicSet record that the run's own markup stated the
+	// property — including as an explicit "0". The inheritance ladder may
+	// only fill in a property the run left unstated: with plain bools, a
+	// master bodyStyle's bold overrode a run's explicit b="0", because
+	// false and unstated were indistinguishable to it.
+	boldSet   bool
+	italicSet bool
 }
 
 // UnderlineType represents the underline style.

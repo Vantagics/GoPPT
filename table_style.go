@@ -584,7 +584,7 @@ func applyTableStyleFill(s *TableShape, pres *Presentation) {
 			if band.hasTextMod && band.bold {
 				for _, para := range cell.paragraphs {
 					for _, elem := range para.elements {
-						if tr, ok := elem.(*TextRun); ok && tr.font != nil && !tr.font.Bold {
+						if tr, ok := elem.(*TextRun); ok && tr.font != nil && !tr.font.Bold && !tr.font.boldSet {
 							tr.font.Bold = true
 						}
 					}
