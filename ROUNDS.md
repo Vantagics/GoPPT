@@ -40,8 +40,10 @@ POI 特性文稿），用 cmd/zz_render + cmd/zz_cmp 与 PowerPoint COM 导出
 1. **SmartArt 引擎 v1 已落地（r89/r90）**：无缓存 drawingN.xml 的 6 个文稿
    现在由数据模型 + 四族布局（lin/snake/cycle/hier）现场排布：
    fill-color-list 11.9→9.0%、font-size 45.9→**15.5%**、cycle 9.7→8.6%、
-   rotation 9.7→7.2%、rightoleft 19.0→18.0%；org-chart2 的层级几何
-   （行距/盒宽）待精修，18.6→21.9% 的差值待回收。
+   rotation 9.7→7.2%、rightoleft 19.0→18.0%；org-chart2 19.4%（整洁树
+   已对齐，余差为 frame 垂直居中）；r92 补充：文本运行/段落连接与
+   parTrans/sibTrans 中继穿越（多 run 标签不再丢字）。注意 LO 布局自带
+   的模板内容（如 font-size 的 "smaller" 盒）v1 不复绘。
 2. **treck 主题装饰的楔形对齐**：ooxtheme 剩余部分——母版装饰的多段
    渐变楔形在两渲染中的排序/位置次差。（custgeom 的标记位置问题已随 r87 清零。）
 3. **themes slide09/06**：29%/23%——画布纹理的映射 superb，蜂窝/粗纹笔触的
