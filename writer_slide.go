@@ -1927,7 +1927,7 @@ func (w *PPTXWriter) writeDiagramFrameXML(shape Shape, b *BaseShape, diagram *St
 		}
 		return 0
 	}
-	dmID, loID, qsID, csID := slot("diagramData"), slot("diagramLayout"), slot("diagramQuickStyle"), slot("diagramColors")
+	dmID, loID, qsID, csID := slot(relTypeDiagramData), slot(relTypeDiagramLayout), slot(relTypeDiagramQuickStyle), slot(relTypeDiagramColors)
 
 	return fmt.Sprintf(`      <p:graphicFrame>
         <p:nvGraphicFramePr>
