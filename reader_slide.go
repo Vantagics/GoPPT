@@ -299,6 +299,16 @@ func (r *PPTXReader) readSlideNotes(zr *zip.Reader, slide *Slide, rels []xmlRelF
 // positions keep the LAST colour written there (PowerPoint's reading); the
 // result is sorted by position.
 func dedupeGradStops(colors []Color, positions []int) []GradStop {
+	// A two-stop gradient whose stops share a position still renders as a
+	// full-range two-colour blend in Office — the minimal-gradient-fill
+	// deck's whole point. Spreading them to the start and end lets the
+	// renderer interpolate between the two colours.
+	if len(colors) == 2 && len(positions) == 2 && positions[0] == positions[1] {
+		return []GradStop{
+			{Pos: 0, Color: colors[0]},
+			{Pos: 100000, Color: colors[1]},
+		}
+	}
 	var out []GradStop
 	index := make(map[int]int)
 	for i, c := range colors {
