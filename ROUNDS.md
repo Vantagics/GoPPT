@@ -45,7 +45,9 @@ POI 特性文稿），用 cmd/zz_render + cmd/zz_cmp 与 PowerPoint COM 导出
    已对齐，余差为 frame 垂直居中）；r92 补充：文本运行/段落连接与
    parTrans/sibTrans 中继穿越（多 run 标签不再丢字）。注意 LO 布局自带
    的模板内容（如 font-size 的 "smaller" 盒）v1 不复绘。
-2. **SmartArt 余项**：节点标签 autofit 已落地（r93），snake 网格 gutter
+2. **table-list 37.7→2.77%**（r102）：vert tree 在叶子展开之前检查层级，
+   Parent 头带 + Child 1/2 并列行与 Office 导出一致。
+3. **SmartArt 余项**：节点标签 autofit 已落地（r93），snake 网格 gutter
    已落地（r99，rightoleft 19.0→10.5%）；hier 的
    frame 垂直居中差与 LO 布局模板内容（像 font-size 的 "smaller" 盒）
    不在 v1 复绘范围。
