@@ -35,6 +35,9 @@ type SmartArtModel struct {
 	// header band over a pale body (the accent-process look), regardless of
 	// the quick style's colour cycling.
 	Process bool
+	// Vert marks loCatId "list": the linear children flow top-to-bottom
+	// (the vertical list look), not the default left-to-right.
+	Vert bool
 }
 
 // SmartArtNode is one content point of the model.
@@ -69,6 +72,7 @@ func parseSmartArtModel(data []byte) (*SmartArtModel, error) {
 	}
 	model.Colorful = colorful
 	model.Process = strings.Contains(loCat, "process")
+	model.Vert = strings.Contains(loCat, "list")
 	return model, nil
 }
 
@@ -133,6 +137,8 @@ func parseSmartArtPoints(data []byte) ([]smartartPoint, string, string, bool, er
 							if i := strings.LastIndex(attr.Value, "layout/"); i >= 0 {
 								loType = attr.Value[i+len("layout/"):]
 							}
+						case "loCatId":
+							loCat = attr.Value
 						case "csCatId":
 							// The colourful quick style cycles the accents per
 							// node; every other family paints them uniformly.

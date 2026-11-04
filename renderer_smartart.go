@@ -106,7 +106,7 @@ func (r *renderer) renderSmartArt(model *SmartArtModel, x, y, w, h int) {
 	case "snake":
 		r.smartArtSnake(nodes, model.Colorful, model.Process, face, x, y, w, h)
 	default:
-		r.smartArtLin(nodes, model.Colorful, model.Process, face, x, y, w, h)
+		r.smartArtLin(nodes, model.Colorful, model.Process, model.Vert, face, x, y, w, h)
 	}
 }
 
@@ -171,9 +171,27 @@ func (r *renderer) smartArtNode(n *SmartArtNode, i int, colorful, twoToneOnly bo
 }
 
 // smartArtLin lays the children across the frame, each full height.
-func (r *renderer) smartArtLin(nodes []*SmartArtNode, colorful, twoTone bool, face font.Face, x, y, w, h int) {
+func (r *renderer) smartArtLin(nodes []*SmartArtNode, colorful, twoTone, vert bool, face font.Face, x, y, w, h int) {
 	n := len(nodes)
 	if n == 0 || w < 1 {
+		return
+	}
+	if vert {
+		// loCatId "list": nodes flow top-to-bottom, full width each, with
+		// a vertical gap between them — the linear-rule-vert deck's
+		// rounded-rect stack draws three separate boxes, not one wall.
+		cw := w
+		ch := h / n
+		for i, node := range nodes {
+			rect := image.Rect(x, y+i*ch, x+cw, y+(i+1)*ch)
+			if i == n-1 {
+				rect.Max.Y = y + h
+			}
+			inset := ch * 15 / 100
+			rect.Min.Y += inset
+			rect.Max.Y -= inset
+			r.smartArtNode(node, i, colorful, twoTone, face, rect)
+		}
 		return
 	}
 	cw := w / n
