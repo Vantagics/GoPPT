@@ -1773,10 +1773,10 @@ func (r *PPTXReader) parseSlideXML(decoder *xml.Decoder, slide *Slide, rels []xm
 							}
 						case "b":
 							currentFont.Bold = attr.Value == "1"
-						currentFont.boldSet = true
+							currentFont.boldSet = true
 						case "i":
 							currentFont.Italic = attr.Value == "1"
-						currentFont.italicSet = true
+							currentFont.italicSet = true
 						case "u":
 							currentFont.Underline = UnderlineType(attr.Value)
 						case "strike":
@@ -4029,6 +4029,11 @@ func (r *PPTXReader) parseSlideXML(decoder *xml.Decoder, slide *Slide, rels []xm
 					diagramResolved := false
 					if isDiagramGraphicData(graphicDataURI) && pres != nil {
 						if dg := r.readDiagramDrawing(zr, rels, slidePath, pres, extCX, extCY, frameDataRelID); dg != nil {
+							// Stash the frame's own parts before the group is
+							// filed away: the writer puts the graphicFrame back
+							// with them, so a round trip keeps the diagram a
+							// diagram instead of flattening it to a group.
+							r.stashDiagramParts(zr, slidePath, rels, dg, nil, frameDataRelID, "")
 							dg.name = shapeName
 							if dg.name == "" {
 								dg.name = "Diagram"
@@ -4059,6 +4064,13 @@ func (r *PPTXReader) parseSlideXML(decoder *xml.Decoder, slide *Slide, rels []xm
 							reason = "chart (its part could not be read)"
 						}
 						ph := NewUnsupportedShape(reason)
+						// A SmartArt frame whose parts exist but never cached
+						// a drawing keeps those parts on the stand-in: the
+						// writer puts the graphicFrame back verbatim, so the
+						// diagram is preserved even though nothing drew it.
+						if isDiagramGraphicData(graphicDataURI) {
+							r.stashDiagramParts(zr, slidePath, rels, nil, ph, frameDataRelID, "")
+						}
 						ph.name = shapeName
 						ph.hidden = shapeHidden
 						ph.offsetX = offX
@@ -6164,4 +6176,3 @@ func (r *PPTXReader) parseLayoutBackground(data []byte, rels []xmlRelForRead, zr
 	}
 	return nil, nil
 }
-

@@ -14,6 +14,11 @@ type GroupShape struct {
 	// groupFill is the fill defined on the group's grpSpPr, inherited by
 	// child shapes that use <a:grpFill/>.
 	groupFill *Fill
+	// diagram marks a group a SmartArt frame produced. The reader renders
+	// the frame's cached drawing as this group's shapes and stashes the
+	// frame's own parts alongside, so the writer can put the graphicFrame
+	// back instead of flattening the diagram into a plain group.
+	diagram *StashedDiagram
 }
 
 // ShapeTypeGroup is the shape type for groups.

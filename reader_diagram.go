@@ -39,6 +39,140 @@ func isDiagramGraphicData(uri string) bool {
 	return strings.Contains(uri, "/diagram")
 }
 
+// StashedDiagram carries one SmartArt frame's own parts — the data model, the
+// layout definition, the quick style and the colour transform, the cached
+// drawing and the drawing's own relationship file with whatever media it
+// names — byte for byte out of the source package. The reader renders the
+// cached drawing; the writer puts these back and re-emits the graphicFrame
+// whose relationship ids it filled in, so a read-write round trip neither
+// flattens the diagram nor loses the parts editing it again would need.
+type StashedDiagram struct {
+	// parts maps the part path the source package carried to what the writer
+	// puts back: bytes and the [Content_Types] entry each one needs.
+	parts map[string]diagramPart
+	// drawingPath is the cached drawing's part path; its blipFills resolve
+	// through the relationship file that also lives in parts.
+	drawingPath string
+	// auxPaths names the part each auxiliary relationship points at, in
+	// dm, lo, qs, cs order, so the writer's slide rels can emit the five
+	// entries with r:dm → rIdN pointing at the same files the stash carries.
+	auxPaths [4]string
+}
+
+// diagramPart is one stashed part.
+type diagramPart struct {
+	data        []byte
+	contentType string
+}
+
+// stashDiagramParts copies a frame's parts out of the source package.
+//
+// dataRelID is the frame's <dgm:relIds r:dm> and drawingRelID the slide
+// relationship the cached drawing was read through — the numbering rule that
+// pairs data and drawing parts points at the same files here. Only readable
+// parts are stashed; a part missing from the source cannot be written back.
+func (r *PPTXReader) stashDiagramParts(zr *zip.Reader, slidePath string, rels []xmlRelForRead, dg *GroupShape, holder *UnsupportedShape, dataRelID, drawingRelID string) {
+	if dg == nil && holder == nil {
+		return
+	}
+	baseDir := strings.TrimSuffix(slidePath, "/"+lastPathComponent(slidePath))
+	resolve := func(target string) string {
+		if strings.HasPrefix(target, "ppt/") {
+			return target
+		}
+		return resolveRelativePath(baseDir, target)
+	}
+	st := &StashedDiagram{parts: make(map[string]diagramPart)}
+	for _, rel := range rels {
+		ct, slot, ok := auxDiagramContentType(rel.Type)
+		if !ok {
+			continue
+		}
+		path := resolve(rel.Target)
+		data, err := readFileFromZip(zr, path)
+		if err != nil {
+			continue
+		}
+		st.parts[path] = diagramPart{data: data, contentType: ct}
+		st.auxPaths[slot] = path
+		// The part's own relationship file travels with it when the source
+		// package carried one.
+		relsPath := strings.Replace(path, "/diagrams/", "/diagrams/_rels/", 1) + ".rels"
+		if rd, rerr := readFileFromZip(zr, relsPath); rerr == nil {
+			st.parts[relsPath] = diagramPart{data: rd,
+				contentType: "application/vnd.openxmlformats-package.relationships+xml"}
+		}
+	}
+	// The cached drawing, read through the slide relationship that produced
+	// the rendered group.
+	var drawingPath string
+	for _, rel := range rels {
+		if (drawingRelID != "" && rel.ID == drawingRelID) ||
+			(drawingRelID == "" && strings.HasSuffix(rel.Type, "/diagramDrawing")) {
+			drawingPath = resolve(rel.Target)
+			break
+		}
+	}
+	if drawingPath != "" {
+		if data, err := readFileFromZip(zr, drawingPath); err == nil {
+			st.parts[drawingPath] = diagramPart{data: data,
+				contentType: "application/vnd.ms-office.drawingml.diagramDrawing+xml"}
+			st.drawingPath = drawingPath
+		}
+	}
+	// Whatever media the drawing's blipFills name comes along: the drawing's
+	// own rels file resolves them, and both are stashed verbatim.
+	if st.drawingPath != "" {
+		drPath := strings.Replace(st.drawingPath, "/diagrams/", "/diagrams/_rels/", 1) + ".rels"
+		if rd, err := readFileFromZip(zr, drPath); err == nil {
+			st.parts[drPath] = diagramPart{data: rd,
+				contentType: "application/vnd.openxmlformats-package.relationships+xml"}
+			for _, dr := range parseRelsBytes(rd) {
+				if !strings.Contains(strings.ToLower(dr.Type), "image") {
+					continue
+				}
+				mpath := resolveRelativePath("ppt/diagrams", dr.Target)
+				if md, merr := readFileFromZip(zr, mpath); merr == nil {
+					st.parts[mpath] = diagramPart{data: md}
+				}
+			}
+		}
+	}
+	if len(st.parts) == 0 {
+		return
+	}
+	if dg != nil {
+		dg.diagram = st
+	} else if holder != nil {
+		holder.diagram = st
+	}
+}
+
+// auxDiagramContentType names the [Content_Types] override for one of the
+// four auxiliary diagram parts, or reports that the relationship names none.
+func auxDiagramContentType(relType string) (string, int, bool) {
+	switch {
+	case strings.HasSuffix(relType, "/diagramData"):
+		return "application/vnd.openxmlformats-officedocument.drawingml.diagramData+xml", 0, true
+	case strings.HasSuffix(relType, "/diagramLayout"):
+		return "application/vnd.openxmlformats-officedocument.drawingml.diagramLayout+xml", 1, true
+	case strings.HasSuffix(relType, "/diagramQuickStyle"):
+		return "application/vnd.openxmlformats-officedocument.drawingml.diagramStyle+xml", 2, true
+	case strings.HasSuffix(relType, "/diagramColors"):
+		return "application/vnd.openxmlformats-officedocument.drawingml.diagramColors+xml", 3, true
+	}
+	return "", 0, false
+}
+
+// The full relationship types the four auxiliary diagram parts and the cached
+// drawing go by. Readers match the trailing segment; the writer states these.
+const (
+	relTypeDiagramData       = "http://schemas.openxmlformats.org/officeDocument/2006/relationships/diagramData"
+	relTypeDiagramLayout     = "http://schemas.openxmlformats.org/officeDocument/2006/relationships/diagramLayout"
+	relTypeDiagramQuickStyle = "http://schemas.openxmlformats.org/officeDocument/2006/relationships/diagramQuickStyle"
+	relTypeDiagramColors     = "http://schemas.openxmlformats.org/officeDocument/2006/relationships/diagramColors"
+)
+
 // readDiagramDrawing resolves the diagramDrawing relationship that belongs to
 // THIS graphic frame and parses the cached drawing into a GroupShape sized to
 // the frame.
@@ -147,4 +281,41 @@ func (r *PPTXReader) parseDiagramDrawing(data []byte, rels []xmlRelForRead, zr *
 	g.childExtX, g.childExtY = frameCX, frameCY
 	g.width, g.height = frameCX, frameCY
 	return g
+}
+
+// parseRelsBytes parses a relationships file that is already in memory: the
+// stash walks the cached drawing's own rels, and re-reading it from the zip
+// would only repeat a lookup for a file the reader has in hand.
+func parseRelsBytes(data []byte) []xmlRelForRead {
+	var rels xmlRelsForRead
+	if err := xml.Unmarshal(data, &rels); err != nil {
+		return nil
+	}
+	return rels.Relationships
+}
+
+// diagramRels returns the relationships a stashed SmartArt frame needs, in
+// the order every rel-id consumer walks them: the auxiliary parts that were
+// actually read (dm, lo, qs, cs), then the cached drawing. A frame whose
+// parts are gone from the source package yields an empty list and the writer
+// skips the frame entirely, the way it skips any other unsupported construct.
+func diagramRels(st *StashedDiagram) (types, targets []string) {
+	if st == nil {
+		return nil, nil
+	}
+	ordered := []string{relTypeDiagramData, relTypeDiagramLayout, relTypeDiagramQuickStyle, relTypeDiagramColors}
+	for k, p := range st.auxPaths {
+		if _, ok := st.parts[p]; !ok {
+			continue
+		}
+		types = append(types, ordered[k])
+		targets = append(targets, p)
+	}
+	if st.drawingPath != "" {
+		if _, ok := st.parts[st.drawingPath]; ok {
+			types = append(types, relTypeDiagramDrawing)
+			targets = append(targets, st.drawingPath)
+		}
+	}
+	return
 }

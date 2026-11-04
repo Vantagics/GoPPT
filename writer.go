@@ -156,6 +156,11 @@ func (w *PPTXWriter) WriteTo(writer io.Writer) error {
 		return err
 	}
 
+	// Write SmartArt parts, verbatim from what was read
+	if err := w.writeDiagramParts(zw); err != nil {
+		return err
+	}
+
 	// Write charts, including those nested in groups, in the same document order
 	// getChartIndex numbers them in.
 	chartIdx := 1

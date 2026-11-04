@@ -37,6 +37,10 @@ type UnsupportedShape struct {
 	// contentType is the a:graphicData uri the shape was read from, kept
 	// verbatim so callers can classify precisely rather than by label.
 	contentType string
+	// diagram carries a SmartArt frame's stashed parts when the diagram had
+	// no cached drawing to render: the stand-in keeps the visible gap honest
+	// while the writer puts the graphicFrame and its parts back verbatim.
+	diagram *StashedDiagram
 }
 
 // NewUnsupportedShape creates a stand-in for a construct the library cannot

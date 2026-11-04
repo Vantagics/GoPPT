@@ -65,7 +65,9 @@ func (w *PPTXWriter) hyperlinkRel(h *Hyperlink) (relType, target string, ok bool
 }
 
 // countShapeRels returns the number of non-hyperlink relationship IDs consumed by a shape
-// (images and charts each consume one relId).
+// (images and charts each consume one relId; a SmartArt frame consumes five —
+// the data part, the layout, the quick style, the colours and the cached
+// drawing).
 func countShapeRels(shape Shape) int {
 	switch s := shape.(type) {
 	case *DrawingShape:
@@ -74,8 +76,19 @@ func countShapeRels(shape Shape) int {
 		}
 	case *ChartShape:
 		return 1
+	case *GroupShape:
+		return diagramRelCount(s.diagram)
+	case *UnsupportedShape:
+		return diagramRelCount(s.diagram)
 	}
 	return 0
+}
+
+// diagramRelCount counts the relationships a stashed SmartArt frame writes: the
+// auxiliary parts and the cached drawing, or none when there is no stash.
+func diagramRelCount(st *StashedDiagram) int {
+	types, _ := diagramRels(st)
+	return len(types)
 }
 
 // shapeParagraphs returns the paragraphs for shapes that can contain hyperlinks.
@@ -153,7 +166,18 @@ func (w *PPTXWriter) writeSlide(zw *zip.Writer, slide *Slide, slideNum int, hlin
 		case *ChartShape:
 			shapesXML.WriteString(w.writeChartShapeXML(s, &shapeID, slideNum))
 		case *GroupShape:
-			shapesXML.WriteString(w.writeGroupShapeXML(s, &shapeID, slideNum))
+			if s.diagram != nil {
+				shapesXML.WriteString(w.writeDiagramFrameXML(s, &s.BaseShape, s.diagram, s.name, &shapeID, slideNum))
+			} else {
+				shapesXML.WriteString(w.writeGroupShapeXML(s, &shapeID, slideNum))
+			}
+		case *UnsupportedShape:
+			if s.diagram != nil {
+				// A diagram stand-in re-emits the SmartArt frame its parts
+				// were stashed from; a stand-in without stashed parts is
+				// dropped, as before.
+				shapesXML.WriteString(w.writeDiagramFrameXML(s, &s.BaseShape, s.diagram, s.name, &shapeID, slideNum))
+			}
 		}
 	}
 
@@ -303,6 +327,19 @@ func (w *PPTXWriter) writeSlideRels(zw *zip.Writer, slide *Slide, slideNum int, 
   <Relationship Id="rId%d" Type="%s" Target="../charts/chart%d.xml"/>`,
 				relIdx, relTypeChart, chartIdx)
 			relIdx++
+		case *GroupShape, *UnsupportedShape:
+			if f := diagramOf(s); f != nil {
+				// The SmartArt relationships, exactly as many as the stash
+				// found, in the order their ids were reserved: data, layout,
+				// quick style, colours, then the cached drawing.
+				types, targets := diagramRels(f)
+				for k := range types {
+					fmt.Fprintf(&rels, `
+  <Relationship Id="rId%d" Type="%s" Target="%s"/>`,
+						relIdx+k, types[k], xmlEscape(relTarget(targets[k])))
+				}
+				relIdx += len(types)
+			}
 		}
 		// Hyperlinks in the shape's paragraphs — a table cell's included, which
 		// is what shapeParagraphs exists to guarantee.
@@ -353,6 +390,27 @@ func (w *PPTXWriter) writeSlideRels(zw *zip.Writer, slide *Slide, slideNum int, 
 	return writeRawXMLToZip(zw, fmt.Sprintf("ppt/slides/_rels/slide%d.xml.rels", slideNum), rels.String())
 }
 
+// diagramOf returns the stashed SmartArt a shape carries, whether the frame
+// rendered (a group) or stands in visibly (an UnsupportedShape).
+func diagramOf(s Shape) *StashedDiagram {
+	switch t := s.(type) {
+	case *GroupShape:
+		return t.diagram
+	case *UnsupportedShape:
+		return t.diagram
+	}
+	return nil
+}
+
+// relTarget turns a package part path into the relationship target a slide's
+// .rels file carries: everything after the slides directory leaves as it was.
+func relTarget(partPath string) string {
+	if strings.HasPrefix(partPath, "ppt/") {
+		return "../" + partPath[len("ppt/"):]
+	}
+	return partPath
+}
+
 func (w *PPTXWriter) getImageIndex(slide *Slide, target *DrawingShape) int {
 	idx := 1
 	for _, sl := range w.presentation.slides {
@@ -382,7 +440,7 @@ func flattenShapes(shapes []Shape) []Shape {
 	visit = func(list []Shape) {
 		for _, s := range list {
 			out = append(out, s)
-			if g, ok := s.(*GroupShape); ok {
+			if g, ok := s.(*GroupShape); ok && g.diagram == nil {
 				visit(g.shapes)
 			}
 		}
@@ -1725,6 +1783,30 @@ func (w *PPTXWriter) writeBorderXMLWithEnds(b *Border, head, tail *LineEnd) stri
 		widthEMU, colorRGB(b.Color), dashXML, lineEndXML(head, tail, ""))
 }
 
+// writeDiagramParts copies every SmartArt frame's stashed parts into the
+// package under the paths the source carried: the writer has no SmartArt
+// layout engine to regenerate them from, and the re-emitted graphicFrame
+// resolves through these same files.
+func (w *PPTXWriter) writeDiagramParts(zw *zip.Writer) error {
+	written := make(map[string]bool)
+	for _, st := range w.collectDiagrams() {
+		for path, part := range st.parts {
+			if written[path] {
+				continue
+			}
+			f, err := zw.Create(path)
+			if err != nil {
+				return fmt.Errorf("create %s: %w", path, err)
+			}
+			if _, err := f.Write(part.data); err != nil {
+				return fmt.Errorf("write %s: %w", path, err)
+			}
+			written[path] = true
+		}
+	}
+	return nil
+}
+
 // --- Media ---
 
 func (w *PPTXWriter) writeMedia(zw *zip.Writer) error {
@@ -1823,6 +1905,52 @@ func (w *PPTXWriter) writeChartShapeXML(s *ChartShape, shapeID *int, slideNum in
 		relIdx)
 }
 
+// writeDiagramFrameXML re-emits a SmartArt graphicFrame. The five
+// relationship ids — r:dm, r:lo, r:qs, r:cs and the cached drawing's — are
+// reserved through countRelIdxBefore, the same protocol the chart frame
+// follows, and writeSlideRels emits the matching five entries.
+func (w *PPTXWriter) writeDiagramFrameXML(shape Shape, b *BaseShape, diagram *StashedDiagram, name string, shapeID *int, slideNum int) string {
+	id := *shapeID
+	*shapeID++
+
+	if name == "" {
+		name = fmt.Sprintf("Diagram %d", id)
+	}
+	relIdx := w.countRelIdxBefore(w.presentation.slides[slideNum-1].shapes, shape)
+	dgm := "http://schemas.openxmlformats.org/drawingml/2006/diagram"
+	types, _ := diagramRels(diagram)
+	slot := func(relType string) int {
+		for k, t := range types {
+			if t == relType {
+				return relIdx + k
+			}
+		}
+		return 0
+	}
+	dmID, loID, qsID, csID := slot("diagramData"), slot("diagramLayout"), slot("diagramQuickStyle"), slot("diagramColors")
+
+	return fmt.Sprintf(`      <p:graphicFrame>
+        <p:nvGraphicFramePr>
+          <p:cNvPr id="%d" name="%s"%s/>
+          <p:cNvGraphicFramePr/>
+          <p:nvPr/>
+        </p:nvGraphicFramePr>
+        <p:xfrm%s>          <a:off x="%d" y="%d"/>
+          <a:ext cx="%d" cy="%d"/>
+        </p:xfrm>
+        <a:graphic>
+          <a:graphicData uri="%s">
+            <dgm:relIds xmlns:dgm="%s" xmlns:a="%s" xmlns:r="%s" r:dm="rId%d" r:lo="rId%d" r:qs="rId%d" r:cs="rId%d"/>
+          </a:graphicData>
+        </a:graphic>
+      </p:graphicFrame>
+`, id, xmlEscape(name), hiddenAttr(b),
+		xfrmAttrs(b), b.offsetX, b.offsetY,
+		b.width, b.height,
+		dgm, dgm, nsDrawingML, nsOfficeDocRels,
+		dmID, loID, qsID, csID)
+}
+
 // --- Group Shape XML ---
 
 func (w *PPTXWriter) writeGroupShapeXML(g *GroupShape, shapeID *int, slideNum int) string {
@@ -1855,7 +1983,11 @@ func (w *PPTXWriter) writeGroupShapeXML(g *GroupShape, shapeID *int, slideNum in
 		case *ChartShape:
 			childXML.WriteString(w.writeChartShapeXML(s, shapeID, slideNum))
 		case *GroupShape:
-			childXML.WriteString(w.writeGroupShapeXML(s, shapeID, slideNum))
+			if s.diagram != nil {
+				childXML.WriteString(w.writeDiagramFrameXML(s, &s.BaseShape, s.diagram, s.name, shapeID, slideNum))
+			} else {
+				childXML.WriteString(w.writeGroupShapeXML(s, shapeID, slideNum))
+			}
 		}
 	}
 

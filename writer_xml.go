@@ -168,6 +168,35 @@ func (w *PPTXWriter) writeContentTypes(zw *zip.Writer) error {
 		})
 	}
 
+	// SmartArt frames re-emit the parts they stashed at read time: data
+	// model, layout, quick style, colours, the cached drawing and the
+	// drawing's relationship file. Each override was recorded when the part
+	// was read; a media part inside a drawing takes an extension default
+	// instead. Relationship files beyond the package-level default are not
+	// declared — the .rels default covers them.
+	for _, st := range w.collectDiagrams() {
+		for path, part := range st.parts {
+			if strings.HasSuffix(path, ".rels") {
+				continue
+			}
+			if part.contentType != "" {
+				ct.Overrides = append(ct.Overrides, xmlOverride{PartName: "/" + path, ContentType: part.contentType})
+				continue
+			}
+			ext := extOf(path)
+			found := false
+			for _, d := range ct.Defaults {
+				if d.Extension == ext {
+					found = true
+					break
+				}
+			}
+			if !found {
+				ct.Defaults = append(ct.Defaults, xmlDefault{Extension: ext, ContentType: mediaContentType(ext)})
+			}
+		}
+	}
+
 	// Add image defaults
 	for _, slide := range w.presentation.slides {
 		for _, ds := range collectDrawingShapes(slide.shapes) {
@@ -278,6 +307,67 @@ func (w *PPTXWriter) getImageContentType(ds *DrawingShape) string {
 		return "image/svg+xml"
 	default:
 		return "image/png"
+	}
+}
+
+// collectDiagrams walks every slide, through groups, for the SmartArt frames
+// the reader stashed: the parts these carry go back into the package
+// verbatim, and their content-type overrides go into [Content_Types].xml.
+func (w *PPTXWriter) collectDiagrams() []*StashedDiagram {
+	var out []*StashedDiagram
+	var visit func(shapes []Shape)
+	visit = func(list []Shape) {
+		for _, shape := range list {
+			switch g := shape.(type) {
+			case *GroupShape:
+				if g.diagram != nil {
+					out = append(out, g.diagram)
+					continue
+				}
+				visit(g.shapes)
+			case *UnsupportedShape:
+				// A diagram whose parts existed but whose cached drawing did
+				// not: the stand-in keeps the stash on write as well.
+				if g.diagram != nil {
+					out = append(out, g.diagram)
+				}
+			}
+		}
+	}
+	for _, slide := range w.presentation.slides {
+		visit(slide.shapes)
+	}
+	return out
+}
+
+// extOf returns a part path's extension, lowercase.
+func extOf(path string) string {
+	dot := strings.LastIndex(path, ".")
+	if dot < 0 {
+		return ""
+	}
+	return strings.ToLower(path[dot+1:])
+}
+
+// mediaContentType names a media part's type by extension.
+func mediaContentType(ext string) string {
+	switch ext {
+	case "png":
+		return "image/png"
+	case "jpeg", "jpg":
+		return "image/jpeg"
+	case "gif":
+		return "image/gif"
+	case "bmp":
+		return "image/bmp"
+	case "emf":
+		return "image/x-emf"
+	case "wmf":
+		return "image/x-wmf"
+	case "svg":
+		return "image/svg+xml"
+	default:
+		return "application/octet-stream"
 	}
 }
 
