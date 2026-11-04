@@ -59,5 +59,8 @@ POI 特性文稿），用 cmd/zz_render + cmd/zz_cmp 与 PowerPoint COM 导出
 6. **ooxtheme**：母版 txStyles 的标题字号/装饰渐变的组合链。
 7. **ArtisticEffect/customGeo/pptx2svg/背景双色调**（8–10% 级）：艺术效果
    （必剪树印/玻璃等）与 SVG 图形细节。
-8. **minimal-gradient-fill-issue 13.2→9.3%**（r100）：双 stop 同位置
+8. **font-scale 9.35%**：逐字符断行已落地（r101）；normAutofit fontScale
+   (85%) 尚未传递到换行测量 face——文本绘制与换行测量使用不同字号，
+   是残余差异的来源。
+9. **minimal-gradient-fill-issue 13.2→9.3%**（r100）：双 stop 同位置
    渐变已展开为全范围两色混合；radial 渐变路径的余差待修。
