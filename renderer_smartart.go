@@ -192,19 +192,33 @@ func smartArtLeaves(nodes []*SmartArtNode) []*SmartArtNode {
 
 // smartArtLin lays the children across the frame, each full height.
 func (r *renderer) smartArtLin(nodes []*SmartArtNode, colorful, twoTone, vert bool, face font.Face, x, y, w, h int) {
+	// loCatId "list" with a hierarchy: the vert tree draws parent headers
+	// over child rows — the table-list deck's Parent/Child 1/Child 2 look.
+	// This check runs BEFORE leaf flattening so the hierarchy survives.
+	if vert {
+		hasKids := false
+		for _, node := range nodes {
+			if len(node.Children) > 0 {
+				hasKids = true
+				break
+			}
+		}
+		if hasKids {
+			r.smartArtVertTree(nodes, colorful, twoTone, face, x, y, w, h)
+			return
+		}
+	}
 	nodes = smartArtLeaves(nodes)
 	n := len(nodes)
 	if n == 0 || w < 1 {
 		return
 	}
 	if vert {
-		// loCatId "list": nodes flow top-to-bottom, full width each, with
-		// a vertical gap between them — the linear-rule-vert deck's
-		// rounded-rect stack draws three separate boxes, not one wall.
-		cw := w
+		// loCatId "list" without hierarchy: nodes flow top-to-bottom, full
+		// width each, with a vertical gap (the linear-rule-vert stack).
 		ch := h / n
 		for i, node := range nodes {
-			rect := image.Rect(x, y+i*ch, x+cw, y+(i+1)*ch)
+			rect := image.Rect(x, y+i*ch, x+w, y+(i+1)*ch)
 			if i == n-1 {
 				rect.Max.Y = y + h
 			}
@@ -429,4 +443,47 @@ func totalHierLeaves(nodes []*SmartArtNode) int {
 		n = 1
 	}
 	return n
+}
+
+// smartArtVertTree renders a parent-children hierarchy vertically: each
+// parent draws as a full-width header band, its children as a horizontal
+// row below (the table-list deck's Parent/Child 1/Child 2 layout).
+func (r *renderer) smartArtVertTree(nodes []*SmartArtNode, colorful, twoTone bool, face font.Face, x, y, w, h int) {
+	// count total rows: one per top-level node + one per child row
+	rows := 0
+	for _, node := range nodes {
+		rows++
+		if len(node.Children) > 0 {
+			rows++
+		}
+	}
+	rowH := float64(h) / float64(rows)
+	curY := float64(y)
+	for i, node := range nodes {
+		// parent header: full width
+		hdrH := int(rowH)
+		hdrRect := image.Rect(x, int(curY), x+w, int(curY)+hdrH)
+		r.fillRectFast(hdrRect, smartArtSlot(i, colorful))
+		face2, lines := r.smartArtFitFace(node.Text, hdrRect.Dx()-16, hdrRect.Dy()-8)
+		inner := image.Rect(hdrRect.Min.X+8, hdrRect.Min.Y+4, hdrRect.Max.X-8, hdrRect.Max.Y-4)
+		r.smartArtDrawLines(lines, face2, color.RGBA{R: 255, G: 255, B: 255, A: 255}, inner)
+		curY += float64(hdrH)
+		// children row: side by side below the parent
+		if len(node.Children) > 0 {
+			kids := node.Children
+			kw := w / len(kids)
+			kidH := int(rowH)
+			for j, kid := range kids {
+				kidRect := image.Rect(x+j*kw, int(curY), x+(j+1)*kw, int(curY)+kidH)
+				if j == len(kids)-1 {
+					kidRect.Max.X = x + w
+				}
+				r.fillRectFast(kidRect, smartArtSlot(i, colorful))
+				face3, klines := r.smartArtFitFace(kid.Text, kidRect.Dx()-16, kidRect.Dy()-8)
+				kinner := image.Rect(kidRect.Min.X+8, kidRect.Min.Y+4, kidRect.Max.X-8, kidRect.Max.Y-4)
+				r.smartArtDrawLines(klines, face3, color.RGBA{R: 255, G: 255, B: 255, A: 255}, kinner)
+			}
+			curY += float64(kidH)
+		}
+	}
 }
