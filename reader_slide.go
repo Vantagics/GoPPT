@@ -4691,11 +4691,14 @@ type layoutPlaceholder struct {
 	extCX  int64
 	extCY  int64
 	// Default font properties from defRPr
-	fontName  string
-	fontEA    string
-	fontSize  int
-	fontBold  bool
-	fontColor Color
+	fontName string
+	fontEA   string
+	fontSize int
+	fontBold bool
+	// fontItalic is the same level's i="1" — read beside the bold so the
+	// ladder can lean on it the way Office's own export leans.
+	fontItalic bool
+	fontColor  Color
 	// Horizontal alignment from the placeholder's own <a:lstStyle> lvl1pPr
 	// algn attribute. The master's slide-number placeholder is where
 	// algn="r" lives in a deck PowerPoint wrote — its page number is
@@ -4794,10 +4797,24 @@ func (r *PPTXReader) applyLayoutInheritance(zr *zip.Reader, slide *Slide, rels [
 		layoutDecoShapes = nil
 	}
 	if len(masterDeco) > 0 || len(layoutDecoShapes) > 0 {
-		merged := make([]Shape, 0, len(masterDeco)+len(layoutDecoShapes)+len(slide.shapes))
+		// The background image a slide's own <p:bg> carried sits at the head
+		// of the list it already built; decoration shapes must draw ABOVE
+		// that image and BELOW the slide's own shapes — the treck theme's
+		// slide painted its texture through an <a:tile> blip, and a prepend
+		// ahead of the drawing stacked the texture over the master's whole
+		// white panel.
+		offset := 0
+		if len(slide.shapes) > 0 {
+			if ds, ok := slide.shapes[0].(*DrawingShape); ok && ds.offsetX == 0 && ds.offsetY == 0 &&
+				ds.width == pres.layout.CX && ds.height == pres.layout.CY {
+				offset = 1
+			}
+		}
+		merged := make([]Shape, 0, offset+len(masterDeco)+len(layoutDecoShapes)+len(slide.shapes))
+		merged = append(merged, slide.shapes[:offset]...)
 		merged = append(merged, masterDeco...)
 		merged = append(merged, layoutDecoShapes...)
-		merged = append(merged, slide.shapes...)
+		merged = append(merged, slide.shapes[offset:]...)
 		slide.shapes = merged
 	}
 
@@ -5086,6 +5103,9 @@ func applyPlaceholderFont(ph *PlaceholderShape, def *layoutPlaceholder) {
 			}
 			if def.fontBold && !tr.font.boldSet {
 				tr.font.Bold = true
+			}
+			if def.fontItalic && !tr.font.italicSet {
+				tr.font.Italic = true
 			}
 			if def.fontColor.ARGB != "" && def.fontColor.ARGB != "FF000000" && tr.font.Color.ARGB == "FF000000" {
 				tr.font.Color = def.fontColor
@@ -5845,6 +5865,7 @@ func (r *PPTXReader) parsePlaceholderDefs(data []byte, pres *Presentation) []lay
 	var fontName, fontEA string
 	var fontSize int
 	var fontBold bool
+	var fontItalic bool
 	var fontColor Color
 	var insetLeft, insetRight, insetTop, insetBottom int64
 	var insetsSet bool
@@ -5874,6 +5895,7 @@ func (r *PPTXReader) parsePlaceholderDefs(data []byte, pres *Presentation) []lay
 				fontEA = ""
 				fontSize = 0
 				fontBold = false
+				fontItalic = false
 				fontColor = Color{}
 				// Initialize to PowerPoint defaults
 				insetLeft, insetRight = 91440, 91440
@@ -6056,6 +6078,11 @@ func (r *PPTXReader) parsePlaceholderDefs(data []byte, pres *Presentation) []lay
 							}
 						case "b":
 							fontBold = attr.Value == "1"
+						case "i":
+							// The Austin theme's title carries b and i at
+							// this one level; Office leaned it while the
+							// renderer sat upright.
+							fontItalic = attr.Value == "1"
 						}
 					}
 				}
@@ -6152,6 +6179,7 @@ func (r *PPTXReader) parsePlaceholderDefs(data []byte, pres *Presentation) []lay
 						fontEA:      fontEA,
 						fontSize:    fontSize,
 						fontBold:    fontBold,
+						fontItalic:  fontItalic,
 						fontColor:   fontColor,
 						insetLeft:   insetLeft,
 						insetRight:  insetRight,

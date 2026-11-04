@@ -415,3 +415,6 @@ func (dp *DocumentProperties) GetCustomPropertyType(name string) PropertyType {
 	}
 	return PropertyTypeUnknown
 }
+
+// MasterDecoShapes exposes the master's decoration shapes for diagnostics.
+func (p *Presentation) MasterDecoShapes() []Shape { return p.masterDecoShapes }
