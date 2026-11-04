@@ -4,6 +4,7 @@ import (
 	"image"
 	"image/color"
 	"math"
+	"sort"
 
 	"golang.org/x/image/font"
 )
@@ -175,9 +176,11 @@ func smartArtCountLeaves(n *SmartArtNode) int {
 	return c
 }
 
-// smartArtHier draws the tree top-down: a parent sits centred over the span
-// its subtree's leaves occupy, one connector drops from parent to row, and
-// children lay left-to-right within that span.
+// smartArtHier draws the classic tidy org tree, the shape loTypeId
+// orgChart1's Office export shows: every node gets the SAME box, leaves sit
+// in equal columns side by side, a parent is centred over the span of its
+// subtree's columns, and elbow connectors (down-stub, bus, down-stubs) link
+// the rows. Connector lines paint first so boxes cover them.
 func (r *renderer) smartArtHier(nodes []*SmartArtNode, colorful bool, face font.Face, x, y, w, h int) {
 	if len(nodes) == 0 || w < 1 || h < 1 {
 		return
@@ -193,56 +196,98 @@ func (r *renderer) smartArtHier(nodes []*SmartArtNode, colorful bool, face font.
 		return md + 1
 	}
 	deep := maxDepth(nodes)
-	rowH := float64(h) / float64(deep)
-	total := 0
-	for _, node := range nodes {
-		total += smartArtCountLeaves(node)
-	}
-	if total == 0 {
+	colW := float64(w) / float64(totalHierLeaves(nodes))
+	if colW < 1 {
 		return
 	}
+	rowH := float64(h) / float64(deep)
+	bw := int(colW * 0.92)
+	if bw < 24 {
+		bw = 24
+	}
+	bh := int(rowH * 0.72)
+	if bh > bw*9/10 {
+		bh = bw * 9 / 10
+	}
 
-	// drawAt lays one subtree inside [spanX, spanX+spanW], at its row.
-	var drawAt func(node *SmartArtNode, depth int, spanX, spanW float64, colorBase int) int
-	drawAt = func(node *SmartArtNode, depth int, spanX, spanW float64, colorBase int) int {
-		yTop := int(float64(y) + float64(depth)*rowH)
-		yBot := int(float64(y) + (float64(depth)+1)*rowH)
-		side := spanW
-		if side > float64(w)/4 {
-			side = float64(w) / 4
+	type entry struct {
+		node  *SmartArtNode
+		depth int
+		cx    float64
+		cy    float64
+		leafL float64
+		leafR float64
+	}
+	var boxes []entry
+	var edges [][2]float64
+	colCursor := 0.0
+
+	var layout func(n *SmartArtNode, depth int)
+	layout = func(n *SmartArtNode, depth int) {
+		if len(n.Children) == 0 {
+			colX := colCursor
+			colCursor += colW
+			cy := float64(y) + (float64(depth)+0.5)*rowH
+			boxes = append(boxes, entry{n, depth, colX + colW/2, cy, colX, colX + colW})
+			return
 		}
-		if side < 16 {
-			side = 16
-		}
-		// box centered over its children's span (over its whole span for a leaf)
-		cx := spanX + spanW/2
-		rect := image.Rect(int(cx-side/2), yTop+4, int(cx+side/2), yBot-6)
-		if len(node.Children) == 0 {
-			rect = image.Rect(int(spanX)+2, yTop+4, int(spanX+spanW)-2, yBot-6)
-		}
-		if rect.Dx() > 4 && rect.Dy() > 4 {
-			r.smartArtNode(node, colorBase, colorful, face, rect)
-		}
-		colorBase++
-		if len(node.Children) > 0 {
-			midX := int(cx)
-			childTop := yTop + rect.Dy() + 4
-			r.drawLineAA(midX, yTop+6+rect.Dy(), midX, childTop+int(rowH)/6, color.RGBA{R: 130, G: 130, B: 130, A: 255}, 1)
-			kidX := spanX
-			for _, child := range node.Children {
-				kidLeaves := float64(smartArtCountLeaves(child))
-				kidSpan := spanW * kidLeaves / float64(smartArtCountLeaves(node))
-				drawAt(child, depth+1, kidX, kidSpan, colorBase)
-				kidX += kidSpan
+		var kidCx []float64
+		var kidCy []float64
+		firstL, lastR := 0.0, 0.0
+		for i, c := range n.Children {
+			layout(c, depth+1)
+			ch := boxes[len(boxes)-1]
+			kidCx = append(kidCx, ch.cx)
+			kidCy = append(kidCy, float64(y)+(float64(depth+1)+0.5)*rowH)
+			if i == 0 {
+				firstL = ch.leafL
 			}
+			lastR = ch.leafR
 		}
-		return colorBase
+		cx := (firstL + lastR) / 2
+		cy := float64(y) + (float64(depth)+0.5)*rowH
+		boxes = append(boxes, entry{n, depth, cx, cy, firstL, lastR})
+		// elbow pieces: parent stub down, bus across, child stubs down
+		busY := float64(y) + (float64(depth)+1.0)*rowH - rowH*0.18
+		parentBot := float64(y) + (float64(depth)+0.5)*rowH + float64(bh)/2
+		edges = append(edges, [2]float64{cx, parentBot}, [2]float64{cx, busY})
+		for i := range kidCx {
+			edges = append(edges, [2]float64{cx, busY}, [2]float64{kidCx[i], busY})
+			edges = append(edges, [2]float64{kidCx[i], busY}, [2]float64{kidCx[i], kidCy[i]})
+		}
 	}
-	colorBase := 0
-	spanX := float64(x)
 	for _, node := range nodes {
-		spanW := float64(w) * float64(smartArtCountLeaves(node)) / float64(total)
-		colorBase = drawAt(node, 0, spanX, spanW, colorBase)
-		spanX += spanW
+		layout(node, 0)
 	}
+
+	grey := color.RGBA{R: 130, G: 130, B: 130, A: 255}
+	for i := 0; i+1 < len(edges); i += 2 {
+		r.drawLineAA(int(edges[i][0]), int(edges[i][1]), int(edges[i+1][0]), int(edges[i+1][1]), grey, 1)
+	}
+
+	sort.SliceStable(boxes, func(i, j int) bool { return boxes[i].depth < boxes[j].depth })
+	for i := range boxes {
+		b := boxes[i]
+		cy := float64(y) + (float64(b.depth)+0.5)*rowH
+		rect := image.Rect(int(b.cx)-bw/2, int(cy)-bh/2, int(b.cx)+bw/2, int(cy)+bh/2)
+		if rect.Min.X < 0 {
+			rect = rect.Add(image.Pt(-rect.Min.X, 0))
+		}
+		r.fillRectFast(rect, smartArtSlot(b.depth, colorful))
+		tf := NewFont()
+		tf.Size = maxInt(11, minInt(38, bh*27/100))
+		r.drawStringCentered(b.node.Text, r.getFace(tf), color.RGBA{R: 255, G: 255, B: 255, A: 255}, rect)
+	}
+}
+
+// totalHierLeaves counts the leaves across the top-level subtrees.
+func totalHierLeaves(nodes []*SmartArtNode) int {
+	n := 0
+	for _, node := range nodes {
+		n += smartArtCountLeaves(node)
+	}
+	if n == 0 {
+		n = 1
+	}
+	return n
 }
