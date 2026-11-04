@@ -37,14 +37,15 @@ POI 特性文稿），用 cmd/zz_render + cmd/zz_cmp 与 PowerPoint COM 导出
 
 ## 已知剩余差距（按影响排序）
 
-1. **SmartArt 布局引擎缺失（最大项）**：无缓存 drawingN.xml 的 SmartArt
-   ——LibreOffice 系文稿近 17 份——渲染显示占位符，而 Office 用 layoutN.xml 的
-   算法从 data1.xml 现场重排（smartart-*/table-list 一族 9.7–45.9%）。实现
-   单向流程/循环/层级三类核心布局可整批摘除。
-2. **treck 主题装饰的楔形对齐**：ooxtheme 15.0% 剩余部分——母版装饰的多段
+1. **SmartArt 引擎 v1 已落地（r89/r90）**：无缓存 drawingN.xml 的 6 个文稿
+   现在由数据模型 + 四族布局（lin/snake/cycle/hier）现场排布：
+   fill-color-list 11.9→9.0%、font-size 45.9→**15.5%**、cycle 9.7→8.6%、
+   rotation 9.7→7.2%、rightoleft 19.0→18.0%；org-chart2 的层级几何
+   （行距/盒宽）待精修，18.6→21.9% 的差值待回收。
+2. **treck 主题装饰的楔形对齐**：ooxtheme 剩余部分——母版装饰的多段
    渐变楔形在两渲染中的排序/位置次差。（custgeom 的标记位置问题已随 r87 清零。）
 3. **themes slide09/06**：29%/23%——画布纹理的映射 superb，蜂窝/粗纹笔触的
    precise 贴图位置与增高版式面板几何。
-4. **ooxtheme 15.5%**：母版 txStyles 的标题字号/装饰渐变的组合链。
+4. **ooxtheme**：母版 txStyles 的标题字号/装饰渐变的组合链。
 5. **ArtisticEffect/customGeo/pptx2svg/背景双色调**（8–10% 级）：艺术效果
    （必剪树印/玻璃等）与 SVG 图形细节。
