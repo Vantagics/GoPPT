@@ -31,6 +31,10 @@ type SmartArtModel struct {
 	// quick style is uniform — every node wears one accent — which is what
 	// the LibreOffice-authored sample decks' Office exports show.
 	Colorful bool
+	// Process marks loCatId "process": each node renders as a coloured
+	// header band over a pale body (the accent-process look), regardless of
+	// the quick style's colour cycling.
+	Process bool
 }
 
 // SmartArtNode is one content point of the model.
@@ -51,7 +55,7 @@ var errSmartArtNoModel = errors.New("smartart: no usable data model")
 // parseSmartArtModel reads a data part into a SmartArtModel. An error means
 // no usable tree was found and the caller keeps its stand-in.
 func parseSmartArtModel(data []byte) (*SmartArtModel, error) {
-	pts, loType, colorful, err := parseSmartArtPoints(data)
+	pts, loType, loCat, colorful, err := parseSmartArtPoints(data)
 	if err != nil {
 		return nil, err
 	}
@@ -64,6 +68,7 @@ func parseSmartArtModel(data []byte) (*SmartArtModel, error) {
 		return nil, err
 	}
 	model.Colorful = colorful
+	model.Process = strings.Contains(loCat, "process")
 	return model, nil
 }
 
@@ -74,7 +79,7 @@ func parseSmartArtModel(data []byte) (*SmartArtModel, error) {
 // <a:t> inside it. Opening an <a:t> reset the collector, so a node whose
 // body held several runs kept only the last one — the font-size deck's
 // three boxes all grew the same "Automatically shrunk text".
-func parseSmartArtPoints(data []byte) ([]smartartPoint, string, bool, error) {
+func parseSmartArtPoints(data []byte) ([]smartartPoint, string, string, bool, error) {
 	var (
 		pts           []smartartPoint
 		cur           smartartPoint
@@ -82,6 +87,7 @@ func parseSmartArtPoints(data []byte) ([]smartartPoint, string, bool, error) {
 		inT           bool
 		textParts     []string
 		loType        string
+		loCat         string
 		modelColorful bool
 		stack         []string // open-element chain, top = last
 	)
@@ -177,9 +183,9 @@ func parseSmartArtPoints(data []byte) ([]smartartPoint, string, bool, error) {
 		}
 	}
 	if len(pts) == 0 {
-		return nil, "", false, errSmartArtNoModel
+		return nil, "", "", false, errSmartArtNoModel
 	}
-	return pts, loType, modelColorful, nil
+	return pts, loType, loCat, modelColorful, nil
 }
 
 // parseSmartArtConnections collects the parent-child links: an omitted type

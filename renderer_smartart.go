@@ -100,13 +100,13 @@ func (r *renderer) renderSmartArt(model *SmartArtModel, x, y, w, h int) {
 	face := r.getFace(NewFont())
 	switch model.Algo {
 	case "cycle":
-		r.smartArtCycle(nodes, model.Colorful, face, x, y, w, h)
+		r.smartArtCycle(nodes, model.Colorful, model.Process, face, x, y, w, h)
 	case "hier":
-		r.smartArtHier(nodes, model.Colorful, face, x, y, w, h)
+		r.smartArtHier(nodes, model.Colorful, model.Process, face, x, y, w, h)
 	case "snake":
-		r.smartArtSnake(nodes, model.Colorful, face, x, y, w, h)
+		r.smartArtSnake(nodes, model.Colorful, model.Process, face, x, y, w, h)
 	default:
-		r.smartArtLin(nodes, model.Colorful, face, x, y, w, h)
+		r.smartArtLin(nodes, model.Colorful, model.Process, face, x, y, w, h)
 	}
 }
 
@@ -144,13 +144,14 @@ func smartArtBody(slot color.RGBA) color.RGBA {
 
 // smartArtNode paints one node box: the fill (a coloured header band over a
 // pale body when the box is tall enough) and the white label centred in it.
-func (r *renderer) smartArtNode(n *SmartArtNode, i int, colorful bool, face font.Face, rect image.Rectangle) {
+func (r *renderer) smartArtNode(n *SmartArtNode, i int, colorful, twoToneOnly bool, face font.Face, rect image.Rectangle) {
 	if rect.Dx() < 4 || rect.Dy() < 4 {
 		return
 	}
 	white := color.RGBA{R: 255, G: 255, B: 255, A: 255}
 	slot := smartArtSlot(i, colorful)
-	if colorful && rect.Dy() > 24 {
+	twoTone := colorful || twoToneOnly
+	if twoTone && rect.Dy() > 24 {
 		bandH := rect.Dy() * 22 / 100
 		if bandH > 46*rect.Dy()/100 {
 			bandH = rect.Dy() * 46 / 100
@@ -170,7 +171,7 @@ func (r *renderer) smartArtNode(n *SmartArtNode, i int, colorful bool, face font
 }
 
 // smartArtLin lays the children across the frame, each full height.
-func (r *renderer) smartArtLin(nodes []*SmartArtNode, colorful bool, face font.Face, x, y, w, h int) {
+func (r *renderer) smartArtLin(nodes []*SmartArtNode, colorful, twoTone bool, face font.Face, x, y, w, h int) {
 	n := len(nodes)
 	if n == 0 || w < 1 {
 		return
@@ -193,14 +194,14 @@ func (r *renderer) smartArtLin(nodes []*SmartArtNode, colorful bool, face font.F
 				rect.Max.X -= gap / 2
 			}
 		}
-		r.smartArtNode(node, i, colorful, face, rect)
+		r.smartArtNode(node, i, colorful, twoTone, face, rect)
 	}
 }
 
 // smartArtSnake lays the children in a grid: one entry per row while there
 // are two or fewer (the font-size deck's stacked boxes), otherwise two per
 // row (the block-diagram wrap the rightoleft deck's export shows).
-func (r *renderer) smartArtSnake(nodes []*SmartArtNode, colorful bool, face font.Face, x, y, w, h int) {
+func (r *renderer) smartArtSnake(nodes []*SmartArtNode, colorful, twoTone bool, face font.Face, x, y, w, h int) {
 	n := len(nodes)
 	if n == 0 || w < 1 || h < 1 {
 		return
@@ -222,13 +223,13 @@ func (r *renderer) smartArtSnake(nodes []*SmartArtNode, colorful bool, face font
 		if row == rows-1 {
 			rect.Max.Y = y + h
 		}
-		r.smartArtNode(node, i, colorful, face, rect)
+		r.smartArtNode(node, i, colorful, twoTone, face, rect)
 	}
 }
 
 // smartArtCycle places the children on a ring, drawn as ellipses with their
 // white label centred.
-func (r *renderer) smartArtCycle(nodes []*SmartArtNode, colorful bool, face font.Face, x, y, w, h int) {
+func (r *renderer) smartArtCycle(nodes []*SmartArtNode, colorful, twoTone bool, face font.Face, x, y, w, h int) {
 	n := len(nodes)
 	if n == 0 || w < 1 || h < 1 {
 		return
@@ -265,7 +266,7 @@ func smartArtCountLeaves(n *SmartArtNode) int {
 // in equal columns side by side, a parent is centred over the span of its
 // subtree's columns, and elbow connectors (down-stub, bus, down-stubs) link
 // the rows. Connector lines paint first so boxes cover them.
-func (r *renderer) smartArtHier(nodes []*SmartArtNode, colorful bool, face font.Face, x, y, w, h int) {
+func (r *renderer) smartArtHier(nodes []*SmartArtNode, colorful, twoTone bool, face font.Face, x, y, w, h int) {
 	if len(nodes) == 0 || w < 1 || h < 1 {
 		return
 	}
