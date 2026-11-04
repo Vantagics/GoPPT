@@ -40,7 +40,7 @@ func smartArtWrap(text string, face font.Face, maxW int) []string {
 // box height; the corpus's Office exports big labels on big boxes — the
 // "Max size (65 pt)" box — at whatever size the autofit allows.
 func (r *renderer) smartArtFitFace(text string, maxW, maxH int) (font.Face, []string) {
-	for size := 22; size >= 8; size -= 3 {
+	for size := 36; size >= 8; size -= 3 {
 		f := NewFont()
 		f.Size = size
 		face := r.getFace(f)
@@ -151,7 +151,7 @@ func (r *renderer) smartArtNode(n *SmartArtNode, i int, colorful bool, face font
 	white := color.RGBA{R: 255, G: 255, B: 255, A: 255}
 	slot := smartArtSlot(i, colorful)
 	if colorful && rect.Dy() > 24 {
-		bandH := rect.Dy() * 30 / 100
+		bandH := rect.Dy() * 22 / 100
 		if bandH > 46*rect.Dy()/100 {
 			bandH = rect.Dy() * 46 / 100
 		}
@@ -176,10 +176,22 @@ func (r *renderer) smartArtLin(nodes []*SmartArtNode, colorful bool, face font.F
 		return
 	}
 	cw := w / n
+	// The colourful list lays nodes with a gutter between them — the
+	// fill-color-list export keeps ~4% of each column as breathing room —
+	// and the header band reads at a fifth of the column, not a third.
+	gap := cw * 4 / 100
 	for i, node := range nodes {
 		rect := image.Rect(x+i*cw, y, x+(i+1)*cw, y+h)
 		if i == n-1 {
 			rect.Max.X = x + w
+		}
+		if gap > 0 {
+			if i > 0 {
+				rect.Min.X += gap / 2
+			}
+			if i < n-1 {
+				rect.Max.X -= gap / 2
+			}
 		}
 		r.smartArtNode(node, i, colorful, face, rect)
 	}
