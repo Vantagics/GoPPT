@@ -117,6 +117,14 @@ type Font struct {
 	// false and unstated were indistinguishable to it.
 	boldSet   bool
 	italicSet bool
+	// runSizeSet / runColorSet likewise mark size and colour the run's own
+	// markup stated. The style ladder cannot tell a stated value from the
+	// library's substitution (18/10 for an unstated sz, black for an
+	// unstated colour): without the markers a nearer rung's size or colour
+	// — a layout's 54pt title over the master's 36pt — never landed,
+	// because the farther rung had already filled the field.
+	runSizeSet  bool
+	runColorSet bool
 }
 
 // UnderlineType represents the underline style.

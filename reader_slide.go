@@ -1787,6 +1787,7 @@ func (r *PPTXReader) parseSlideXML(decoder *xml.Decoder, slide *Slide, rels []xm
 						case "sz":
 							if v, err := strconv.Atoi(attr.Value); err == nil {
 								currentFont.Size = v / 100
+								currentFont.runSizeSet = true
 							}
 						case "b":
 							currentFont.Bold = attr.Value == "1"
@@ -2149,6 +2150,7 @@ func (r *PPTXReader) parseSlideXML(decoder *xml.Decoder, slide *Slide, rels []xm
 					for _, attr := range t.Attr {
 						if attr.Name.Local == "val" {
 							currentFont.Color = NewColor("FF" + attr.Value)
+							currentFont.runColorSet = true
 							lastColor = &currentFont.Color
 						}
 					}
@@ -2262,6 +2264,7 @@ func (r *PPTXReader) parseSlideXML(decoder *xml.Decoder, slide *Slide, rels []xm
 					lastColor = fontRefColor
 				} else if state.inSolidFill && state.inRunProps && currentFont != nil && !state.inLn {
 					currentFont.Color = c
+					currentFont.runColorSet = true
 					lastColor = &currentFont.Color
 				} else if state.inSolidFill && state.inLn && !state.inRunProps {
 					if state.inCxnSp && currentLine != nil {
@@ -2493,6 +2496,7 @@ func (r *PPTXReader) parseSlideXML(decoder *xml.Decoder, slide *Slide, rels []xm
 						lastColor = fontRefColor
 					} else if state.inSolidFill && state.inRunProps && currentFont != nil {
 						currentFont.Color = c
+						currentFont.runColorSet = true
 						lastColor = &currentFont.Color
 						lineColorExplicit = true
 					} else if state.inSolidFill && state.inLn && !state.inRunProps {
@@ -4969,14 +4973,6 @@ func (r *PPTXReader) applyLayoutInheritance(zr *zip.Reader, slide *Slide, rels [
 	}
 }
 
-// runSizeIsDefault reports whether a run is still carrying a size the reader
-// substituted for markup that declared none.
-//
-// There are two such sizes and both have to be recognised: 18, which the reader
-// assigns a placeholder run with no sz, and 10, which NewFont starts at. Testing
-// only for 10 is what left a 44pt title at 18pt even once the master was read.
-func runSizeIsDefault(size int) bool { return size == 18 || size <= 10 }
-
 // matchPlaceholderDef finds the definition a slide placeholder inherits from.
 //
 // A slide placeholder that declares an index matches by index first: OOXML
@@ -5088,7 +5084,12 @@ func applyPlaceholderFont(ph *PlaceholderShape, def *layoutPlaceholder) {
 	if ph == nil || def == nil {
 		return
 	}
-	if def.fontName == "" && def.fontEA == "" && def.fontSize == 0 && !def.fontBold {
+	if def.fontName == "" && def.fontEA == "" && def.fontSize == 0 && !def.fontBold &&
+		!def.fontItalic && (def.fontColor.ARGB == "" || def.fontColor.ARGB == "FF000000") {
+		// Exit only when the def carries nothing a colour or style can
+		// inherit: the ooxtheme body placeholder states exactly one thing —
+		// its defRPr solidFill, the grey tx1 with two lum halves — and the
+		// old guard dropped it.
 		return
 	}
 	for _, para := range ph.paragraphs {
@@ -5103,7 +5104,7 @@ func applyPlaceholderFont(ph *PlaceholderShape, def *layoutPlaceholder) {
 			if tr.font.NameEA == "" && def.fontEA != "" {
 				tr.font.NameEA = def.fontEA
 			}
-			if runSizeIsDefault(tr.font.Size) && def.fontSize > 0 {
+			if !tr.font.runSizeSet && def.fontSize > 0 {
 				tr.font.Size = def.fontSize
 			}
 			if def.fontBold && !tr.font.boldSet {
@@ -5112,7 +5113,7 @@ func applyPlaceholderFont(ph *PlaceholderShape, def *layoutPlaceholder) {
 			if def.fontItalic && !tr.font.italicSet {
 				tr.font.Italic = true
 			}
-			if def.fontColor.ARGB != "" && def.fontColor.ARGB != "FF000000" && tr.font.Color.ARGB == "FF000000" {
+			if def.fontColor.ARGB != "" && def.fontColor.ARGB != "FF000000" && !tr.font.runColorSet {
 				tr.font.Color = def.fontColor
 			}
 		}
@@ -5804,9 +5805,11 @@ func applyMasterTextStyles(ph *PlaceholderShape, m *masterTextStyles) {
 			if tr.font.NameEA == "" && s.fontEA != "" {
 				tr.font.NameEA = s.fontEA
 			}
-			// 18 is the size the reader gives a placeholder run whose markup
-			// declared none, 10 is what NewFont starts at.
-			if runSizeIsDefault(tr.font.Size) && s.size > 0 {
+			// A run-given size outranks the master; a run the reader
+			// substituted for is fair game for the level style, and a NEARER
+			// rung (applied after this one) may still replace what lands
+			// here — the layout's 54pt outranks the master's 36pt.
+			if !tr.font.runSizeSet && s.size > 0 {
 				tr.font.Size = s.size
 			}
 			if s.bold && !tr.font.boldSet {
@@ -5815,7 +5818,7 @@ func applyMasterTextStyles(ph *PlaceholderShape, m *masterTextStyles) {
 			if s.italic && !tr.font.italicSet {
 				tr.font.Italic = true
 			}
-			if s.color.ARGB != "" && s.color.ARGB != "FF000000" && tr.font.Color.ARGB == "FF000000" {
+			if s.color.ARGB != "" && s.color.ARGB != "FF000000" && !tr.font.runColorSet {
 				tr.font.Color = s.color
 			}
 		}
@@ -6126,21 +6129,26 @@ func (r *PPTXReader) parsePlaceholderDefs(data []byte, pres *Presentation) []lay
 						}
 					}
 				}
-			case "tint", "shade":
-				// A transform nested in the defRPr's scheme colour — the
+			case "tint", "shade", "lumMod", "lumOff":
+				// Transforms nested in the defRPr's scheme colour — the
 				// master's sldNum placeholder shades tx1 this way
-				// (<a:tint val="75000"/>) and the page number inherits the
-				// grey that results. Mixing in linear light, per the COM
-				// variants that fixed applyTint.
+				// (<a:tint val="75000"/>), and a BODY placeholder that wants
+				// the grey between its two slots writes lumMod+lumOff both
+				// at 50%: black or white alone is what missing those read.
 				if inDefSolidFill && fontColor.ARGB != "" {
 					for _, attr := range t.Attr {
 						if attr.Name.Local == "val" {
 							if v, err := strconv.Atoi(attr.Value); err == nil && v > 0 {
 								amount := float64(v) / 100000
-								if t.Name.Local == "tint" {
+								switch t.Name.Local {
+								case "tint":
 									applyTint(&fontColor, amount)
-								} else {
+								case "shade":
 									applyShade(&fontColor, amount)
+								case "lumMod":
+									applyLumMod(&fontColor, amount)
+								case "lumOff":
+									applyLumOff(&fontColor, amount)
 								}
 							}
 						}
