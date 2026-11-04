@@ -68,6 +68,12 @@ func parseSmartArtModel(data []byte) (*SmartArtModel, error) {
 }
 
 // parseSmartArtPoints collects the points and the doc point's loTypeId.
+//
+// The text capture walks with a parent-name stack because two elements
+// share the local name "t": the point's <dgm:t> text body and each run's
+// <a:t> inside it. Opening an <a:t> reset the collector, so a node whose
+// body held several runs kept only the last one — the font-size deck's
+// three boxes all grew the same "Automatically shrunk text".
 func parseSmartArtPoints(data []byte) ([]smartartPoint, string, bool, error) {
 	var (
 		pts           []smartartPoint
@@ -77,7 +83,20 @@ func parseSmartArtPoints(data []byte) ([]smartartPoint, string, bool, error) {
 		textParts     []string
 		loType        string
 		modelColorful bool
+		stack         []string // open-element chain, top = last
 	)
+	push := func(name string) { stack = append(stack, name) }
+	pop := func() string {
+		top := stack[len(stack)-1]
+		stack = stack[:len(stack)-1]
+		return top
+	}
+	top := func() string {
+		if len(stack) == 0 {
+			return ""
+		}
+		return stack[len(stack)-1]
+	}
 	decoder := xml.NewDecoder(bytes.NewReader(data))
 	for {
 		token, err := decoder.Token()
@@ -86,7 +105,8 @@ func parseSmartArtPoints(data []byte) ([]smartartPoint, string, bool, error) {
 		}
 		switch t := token.(type) {
 		case xml.StartElement:
-			switch t.Name.Local {
+			name := t.Name.Local
+			switch name {
 			case "pt":
 				inPt = true
 				cur = smartartPoint{}
@@ -117,17 +137,30 @@ func parseSmartArtPoints(data []byte) ([]smartartPoint, string, bool, error) {
 					}
 				}
 			case "t":
-				if inPt {
-					inT = true
-					textParts = nil
+				if inPt && !inT {
+					parent := top()
+					if parent == "pt" || strings.HasSuffix(parent, "parentOf") || parent == "" {
+						// the point's own dgm:t — the outer "t"
+						inT = true
+						textParts = nil
+					}
 				}
 			}
+			if inT && name == "p" {
+				// a paragraph break inside the point's text body reads as a
+				// space: "Max size (65 pt)" runs across two paragraphs.
+				if len(textParts) > 0 && !strings.HasSuffix(strings.Join(textParts, ""), " ") {
+					textParts = append(textParts, " ")
+				}
+			}
+			push(name)
 		case xml.CharData:
 			if inT {
 				textParts = append(textParts, string(t))
 			}
 		case xml.EndElement:
-			switch t.Name.Local {
+			name := pop()
+			switch name {
 			case "pt":
 				if inPt {
 					cur.text = strings.Join(textParts, "")
@@ -135,7 +168,11 @@ func parseSmartArtPoints(data []byte) ([]smartartPoint, string, bool, error) {
 					inPt = false
 				}
 			case "t":
-				inT = false
+				// the point's own text-body element closes; run-level a:t
+				// closings keep the collection alive
+				if inT && top() == "pt" {
+					inT = false
+				}
 			}
 		}
 	}
@@ -214,6 +251,36 @@ func buildSmartArtModel(pts []smartartPoint, cxns [][3]string, loType string) (*
 		list := childLists[id]
 		sort.SliceStable(list, func(i, j int) bool { return list[i].ord < list[j].ord })
 		childLists[id] = list
+	}
+	// Transition points (parTrans between a parent and its child junctions,
+	// sibTrans along the sibling chain) are connectors, not content: move
+	// every link that targets one up to the transition's own children, then
+	// forget the transition. Without the pass-through the font-size deck's
+	// "smaller" and "Automatically shrunk text" nodes hang off a parTrans
+	// and fell out of the tree entirely.
+	isTransit := map[string]bool{}
+	parentsOf := map[string][]string{}
+	for _, p := range pts {
+		if p.typ == "parTrans" || p.typ == "sibTrans" {
+			isTransit[p.id] = true
+		}
+	}
+	for _, cx := range cxns {
+		parentsOf[cx[1]] = append(parentsOf[cx[1]], cx[0])
+	}
+	for T := range isTransit {
+		for _, k := range childLists[T] {
+			for _, P := range parentsOf[T] {
+				if isTransit[P] {
+					continue
+				}
+				childLists[P] = append(childLists[P], struct {
+					id  string
+					ord int
+				}{k.id, k.ord})
+			}
+		}
+		delete(childLists, T)
 	}
 
 	var build func(id string) *SmartArtNode
