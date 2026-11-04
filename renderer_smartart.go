@@ -5,9 +5,77 @@ import (
 	"image/color"
 	"math"
 	"sort"
+	"strings"
 
 	"golang.org/x/image/font"
+	"golang.org/x/image/math/fixed"
 )
+
+// smartArtWrap breaks a label into lines no wider than maxW measured at face.
+func smartArtWrap(text string, face font.Face, maxW int) []string {
+	text = strings.TrimSpace(text)
+	if text == "" {
+		return nil
+	}
+	words := strings.Fields(text)
+	if len(words) == 0 {
+		return nil
+	}
+	var lines []string
+	line := words[0]
+	for _, w := range words[1:] {
+		cand := line + " " + w
+		if font.MeasureString(face, cand).Ceil() > maxW && line != "" {
+			lines = append(lines, line)
+			line = w
+		} else {
+			line = cand
+		}
+	}
+	lines = append(lines, line)
+	return lines
+}
+
+// smartArtFitFace shrinks the label's face until the wrapped lines fit the
+// box height; the corpus's Office exports big labels on big boxes — the
+// "Max size (65 pt)" box — at whatever size the autofit allows.
+func (r *renderer) smartArtFitFace(text string, maxW, maxH int) (font.Face, []string) {
+	for size := 22; size >= 8; size -= 3 {
+		f := NewFont()
+		f.Size = size
+		face := r.getFace(f)
+		lines := smartArtWrap(text, face, maxW)
+		if len(lines) == 0 {
+			return face, nil
+		}
+		m := face.Metrics()
+		th := (m.Ascent + m.Descent).Ceil()
+		if len(lines)*th <= maxH {
+			return face, lines
+		}
+	}
+	f := NewFont()
+	f.Size = 8
+	return r.getFace(f), smartArtWrap(text, r.getFace(f), maxW)
+}
+
+// smartArtDrawLines paints wrapped label lines, each centred in its slot.
+func (r *renderer) smartArtDrawLines(lines []string, face font.Face, c color.RGBA, rect image.Rectangle) {
+	if len(lines) == 0 || rect.Dy() < 4 {
+		return
+	}
+	m := face.Metrics()
+	th := (m.Ascent + m.Descent).Ceil()
+	total := th * len(lines)
+	y := rect.Min.Y + (rect.Dy()-total)/2 + m.Ascent.Ceil()
+	for _, line := range lines {
+		tw := font.MeasureString(face, line).Ceil()
+		cx := rect.Min.X + (rect.Dx()-tw)/2
+		d := &font.Drawer{Dst: r.img, Src: image.NewUniform(drawSrc(c)), Face: face, Dot: fixed.P(cx, y)}
+		d.DrawString(line)
+		y += th
+	}
+}
 
 // The v1 SmartArt layout engine: it lays a SmartArtModel's tree out in one of
 // four geometry families and paints each node with a theme-accent fill and
@@ -80,6 +148,7 @@ func (r *renderer) smartArtNode(n *SmartArtNode, i int, colorful bool, face font
 	if rect.Dx() < 4 || rect.Dy() < 4 {
 		return
 	}
+	white := color.RGBA{R: 255, G: 255, B: 255, A: 255}
 	slot := smartArtSlot(i, colorful)
 	if colorful && rect.Dy() > 24 {
 		bandH := rect.Dy() * 30 / 100
@@ -90,11 +159,14 @@ func (r *renderer) smartArtNode(n *SmartArtNode, i int, colorful bool, face font
 		body := image.Rect(rect.Min.X, rect.Min.Y+bandH, rect.Max.X, rect.Max.Y)
 		r.fillRectFast(head, slot)
 		r.fillRectFast(body, smartArtBody(slot))
-		r.drawStringCentered(n.Text, face, color.RGBA{R: 255, G: 255, B: 255, A: 255}, head)
+		face, lines := r.smartArtFitFace(n.Text, head.Dx(), head.Dy())
+		r.smartArtDrawLines(lines, face, white, head)
 		return
 	}
 	r.fillRectFast(rect, slot)
-	r.drawStringCentered(n.Text, face, color.RGBA{R: 255, G: 255, B: 255, A: 255}, rect)
+	face, lines := r.smartArtFitFace(n.Text, rect.Dx()-8, rect.Dy()-8)
+	inner := image.Rect(rect.Min.X+3, rect.Min.Y+2, rect.Max.X-3, rect.Max.Y-2)
+	r.smartArtDrawLines(lines, face, white, inner)
 }
 
 // smartArtLin lays the children across the frame, each full height.
