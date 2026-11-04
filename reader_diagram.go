@@ -146,6 +146,56 @@ func (r *PPTXReader) stashDiagramParts(zr *zip.Reader, slidePath string, rels []
 	} else if holder != nil {
 		holder.diagram = st
 	}
+	// No cached drawing: the stand-in can still carry a real diagram —
+	// parse the model out of the data part and the layout family out of
+	// the layout part, and the renderer lays it out with the v1 engine
+	// instead of showing the "Unsupported" box.
+	if dg == nil && holder != nil {
+		dataPath := st.auxPaths[0]
+		if dataBytes, ok := st.parts[dataPath]; ok {
+			if model, merr := parseSmartArtModel(dataBytes.data); merr == nil {
+				if layoutPath := st.auxPaths[1]; layoutPath != "" {
+					if layoutBytes, ok2 := st.parts[layoutPath]; ok2 {
+						if alg := firstSmartArtAlg(layoutBytes.data); alg != "" {
+							model.Algo = alg
+						}
+					}
+				}
+				holder.model = model
+			}
+		}
+	}
+}
+
+// firstSmartArtAlg returns the layout family the layout part's root
+// layoutNode drives — the first <dgm:alg type=".."> the document carries —
+// mapped to one of the v1 engine's four families, or "" when nothing maps.
+func firstSmartArtAlg(data []byte) string {
+	var found string
+	decoder := xml.NewDecoder(bytes.NewReader(data))
+	for {
+		token, err := decoder.Token()
+		if err != nil {
+			break
+		}
+		if t, ok := token.(xml.StartElement); ok && t.Name.Local == "alg" {
+			for _, attr := range t.Attr {
+				if attr.Name.Local == "type" && found == "" {
+					found = attr.Value
+				}
+			}
+			if found != "" {
+				break
+			}
+		}
+	}
+	switch found {
+	case "lin", "snake", "cycle":
+		return found
+	case "hierChild", "hierRoot":
+		return "hier"
+	}
+	return ""
 }
 
 // auxDiagramContentType names the [Content_Types] override for one of the

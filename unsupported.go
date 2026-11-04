@@ -41,6 +41,10 @@ type UnsupportedShape struct {
 	// no cached drawing to render: the stand-in keeps the visible gap honest
 	// while the writer puts the graphicFrame and its parts back verbatim.
 	diagram *StashedDiagram
+	// model carries the data model of that same diagram family when the
+	// frame's parts have no cached drawing: the renderer lays it out with
+	// the v1 engine (the four families) instead of showing the stand-in box.
+	model *SmartArtModel
 }
 
 // NewUnsupportedShape creates a stand-in for a construct the library cannot
@@ -169,6 +173,15 @@ func (r *renderer) renderUnsupported(s *UnsupportedShape) {
 	w := r.emuToPixelX(s.width)
 	h := r.emuToPixelY(s.height)
 	if w <= 0 || h <= 0 {
+		return
+	}
+	// A diagram whose parts carry a usable data model but no cached drawing
+	// renders as the v1 engine's laid-out diagram — the stand-in box stays
+	// for the shapes nothing can lay out yet.
+	if s.model != nil && len(s.model.Root.Children) > 0 {
+		x := r.emuToPixelX(s.offsetX)
+		y := r.emuToPixelY(s.offsetY)
+		r.renderSmartArt(s.model, x, y, w, h)
 		return
 	}
 	x := r.emuToPixelX(s.offsetX)
