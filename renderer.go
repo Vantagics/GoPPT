@@ -1245,6 +1245,17 @@ func (r *renderer) renderDrawing(s *DrawingShape) {
 		if tr != r {
 			ox, oy = 0, 0
 		}
+		// <a:tile/> repeats the bitmap at its native size — the photo is not
+		// resampled to the shape at all, so the per-tile size comes straight
+		// from the file's pixels, one 96-dpi pixel per 9525 EMU — over the
+		// whole frame, clipped at its edges. The corpus deck that hung its
+		// brick wall like this rendered one house-sized brick stretched
+		// across the slide instead of a wallpaper of them.
+		if s.tile && cropF == nil && framePts == nil && rotation == 0 && !flipH && !flipV {
+			tr.drawTiledImage(srcImg, ox, oy, w, h, s.tileSx, s.tileSy,
+				s.lumBright, s.lumContrast, s.alpha)
+			return
+		}
 		pts := framePts
 		if tr != r && pts != nil {
 			// The rotated renderer works in unrotated space from the origin.
@@ -9461,6 +9472,61 @@ func applyIntCrop(src image.Image, crop *[4]float64) image.Image {
 	out := image.NewRGBA(image.Rect(0, 0, x1-x0, y1-y0))
 	draw.Draw(out, out.Bounds(), src, image.Pt(x0, y0), draw.Src)
 	return out
+}
+
+// drawTiledImage repeats one decoded image across dst at its native size —
+// one file pixel per 96-dpi unit — scaled by the <a:tile sx sy> percentages
+// when they are given, clipped to dst. The per-tile copy is what the
+// beta/lum/alpha processors ran on for a straight stretch.
+func (r *renderer) drawTiledImage(srcImg image.Image, ox, oy, w, h int, sxP, syP, bright, contrast, alpha int) {
+	work := image.NewRGBA(image.Rect(0, 0, srcImg.Bounds().Dx(), srcImg.Bounds().Dy()))
+	draw.Draw(work, work.Bounds(), srcImg, srcImg.Bounds().Min, draw.Src)
+	if bright != 0 || contrast != 0 {
+		applyLumAdjust(work, bright, contrast)
+	}
+	var alphaMul float64
+	if alpha > 0 && alpha < 100000 {
+		alphaMul = float64(alpha) / 100000.0
+	}
+	// Apply the per-pixel ops here rather than on the decoded source: the
+	// alpha multiplier has to survive the resample below.
+	if alphaMul > 0 {
+		for py := work.Bounds().Min.Y; py < work.Bounds().Max.Y; py++ {
+			for px := work.Bounds().Min.X; px < work.Bounds().Max.X; px++ {
+				c := work.RGBAAt(px, py)
+				c.R = uint8(float64(c.R) * alphaMul)
+				c.G = uint8(float64(c.G) * alphaMul)
+				c.B = uint8(float64(c.B) * alphaMul)
+				c.A = uint8(float64(c.A) * alphaMul)
+				work.SetRGBA(px, py, c)
+			}
+		}
+	}
+	tw := work.Bounds().Dx()
+	th := work.Bounds().Dy()
+	px := float64(tw) * 9525.0 * r.scaleX
+	py := float64(th) * 9525.0 * r.scaleY
+	if sxP > 0 {
+		px *= float64(sxP) / 100000.0
+	}
+	if syP > 0 {
+		py *= float64(syP) / 100000.0
+	}
+	tw = int(px)
+	th = int(py)
+	if tw < 1 || th < 1 {
+		return
+	}
+	// A tile cell is the resampled image: draw.Draw copies pixel for pixel and
+	// crops, it does not scale, so a 94px bitmap pasted into a 142px cell left
+	// a strip of slide at every fourth edge showing through.
+	work = scaleImageMitchell(work, tw, th, nil)
+	for ty := 0; float64(ty)*float64(th) < float64(h); ty++ {
+		for tx := 0; float64(tx)*float64(tw) < float64(w); tx++ {
+			draw.Draw(r.img, image.Rect(ox+tx*tw, oy+ty*th, ox+(tx+1)*tw, oy+(ty+1)*th),
+				work, image.Point{}, draw.Over)
+		}
+	}
 }
 
 // scaleImageMitchell resamples src so that the source sub-rectangle crop (full

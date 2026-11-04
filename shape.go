@@ -578,6 +578,13 @@ type DrawingShape struct {
 	cropTop    int
 	cropRight  int
 	cropBottom int
+	// tile marks a blipFill that lays its image out in repeats rather than
+	// one stretch: <a:tile sx sy> scales the image relative to its native
+	// 96-dpi size, unset sx/sy meaning 100%. The corpus's textured-slide
+	// backgrounds carry bare <a:tile/>.
+	tile   bool
+	tileSx int
+	tileSy int
 	// recolors holds the <a:clrChange> rules the file attaches to the blip,
 	// in document order. Stacked photos knock their background colour out
 	// with one and depend on the transparency surviving the composite.

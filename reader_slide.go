@@ -818,6 +818,8 @@ func (r *PPTXReader) parseSlideXML(decoder *xml.Decoder, slide *Slide, rels []xm
 	var bgCropLeft, bgCropTop, bgCropRight, bgCropBottom int
 	var bgAlpha int
 	var bgLumBright, bgLumContrast int
+	var bgTile bool
+	var bgTileSx, bgTileSy int
 
 	// Group shape nesting
 	grpDepth := 0
@@ -2013,6 +2015,16 @@ func (r *PPTXReader) parseSlideXML(decoder *xml.Decoder, slide *Slide, rels []xm
 				} else if state.inBgPr {
 					// <a:blipFill> inside bgPr — slide background image
 					state.inBgBlipFill = true
+				}
+			case "tile":
+				// <a:tile/> in a background blipFill repeats the bitmap at
+				// its native size (sx/sy scale it in per-mille of a percent)
+				// instead of stretching it over the slide once — the corpus
+				// deck whose brick wall rendered one house-sized brick.
+				if state.inBgBlipFill {
+					bgTile = true
+					bgTileSx, _ = intAttrValue(t, "sx")
+					bgTileSy, _ = intAttrValue(t, "sy")
 				}
 			case "extLst":
 				if state.inSpPr {
@@ -4414,6 +4426,8 @@ func (r *PPTXReader) parseSlideXML(decoder *xml.Decoder, slide *Slide, rels []xm
 		ds.alpha = bgAlpha
 		ds.lumBright = bgLumBright
 		ds.lumContrast = bgLumContrast
+		ds.tile = bgTile
+		ds.tileSx, ds.tileSy = bgTileSx, bgTileSy
 		slide.shapes = append([]Shape{ds}, slide.shapes...)
 	}
 
