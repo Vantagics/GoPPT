@@ -5141,7 +5141,7 @@ func (r *PPTXReader) masterStateFor(zr *zip.Reader, masterPath string, pres *Pre
 	// whole background turns dark. Nothing downstream reads a mapping gene,
 	// so the map folds straight into the colour table here: the static
 	// aliases the theme parser installed were the default map.
-	remapClrMap(data, st.theme)
+	remapClrMap(data, st.theme, "clrMap")
 
 	st.placeholders = r.parsePlaceholderDefs(data, pres)
 	st.textStyles = parseMasterTextStyles(data, pres)
@@ -5153,9 +5153,11 @@ func (r *PPTXReader) masterStateFor(zr *zip.Reader, masterPath string, pres *Pre
 	return st
 }
 
-// remapClrMap overlays a master's <p:clrMap> onto the theme colour table.
-// A mapped name resolves to whatever slot the master sent it at.
-func remapClrMap(data []byte, ts *themeState) {
+// remapClrMap overlays a colour mapping onto the theme colour table: a
+// master's <p:clrMap> or a layout's <a:overrideClrMapping>, whichever root
+// element the caller names. A mapped name resolves to whatever slot the map
+// sent it at.
+func remapClrMap(data []byte, ts *themeState, root string) {
 	if ts == nil || ts.colors == nil {
 		return
 	}
@@ -5165,7 +5167,7 @@ func remapClrMap(data []byte, ts *themeState) {
 		if err != nil {
 			return
 		}
-		if t, ok := token.(xml.StartElement); ok && t.Name.Local == "clrMap" {
+		if t, ok := token.(xml.StartElement); ok && t.Name.Local == root {
 			for _, attr := range t.Attr {
 				switch attr.Name.Local {
 				case "bg1", "tx1", "bg2", "tx2", "hlink", "folHlink",
@@ -5222,6 +5224,54 @@ func (r *PPTXReader) activateSlideRungs(zr *zip.Reader, slideRels []xmlRelForRea
 		pres.applyMasterState(st)
 	} else {
 		pres.applyThemeState(pres.defaultTheme)
+	}
+
+	// A layout whose clrMapOvr carries <a:overrideClrMapping> rebinds the
+	// colour names a second time — the treck theme's section-header layout
+	// sends bg2 at dk2 and turns its background dark where the master chose
+	// light. The override is per layout, so it applies to a copy of the
+	// master's mapped table: the master's cached colours must stay untouched
+	// for the master's other layouts.
+	if override := layoutClrMapOverride(zr, layoutPath); override != "" {
+		if ts := pres.activeTheme(); ts != nil && ts.colors != nil {
+			clone := make(map[string]string, len(ts.colors))
+			for k, v := range ts.colors {
+				clone[k] = v
+			}
+			copied := &themeState{colors: clone, fonts: ts.fonts}
+			copied.fillStyles = pres.themeFillStyles
+			copied.lnStyles = pres.themeLnStyles
+			copied.effectStyles = pres.themeEffectStyles
+			remapClrMap([]byte(override), copied, "overrideClrMapping")
+			pres.themeColors = clone
+		}
+	}
+}
+
+// layoutClrMapOverride returns the overrideClrMapping element's raw XML from
+// a slide layout part, or "" when the layout maps nothing. It reads the part
+// once per slide read; the XML text it returns feeds remapClrMap without the
+// element being re-decoded into the reader's colour logic a third way.
+func layoutClrMapOverride(zr *zip.Reader, layoutPath string) string {
+	data, err := readFileFromZip(zr, layoutPath)
+	if err != nil {
+		return ""
+	}
+	decoder := xml.NewDecoder(bytes.NewReader(data))
+	for {
+		token, err := decoder.Token()
+		if err != nil {
+			return ""
+		}
+		if t, ok := token.(xml.StartElement); ok && t.Name.Local == "overrideClrMapping" {
+			buf := new(bytes.Buffer)
+			buf.WriteString("<a:overrideClrMapping")
+			for _, attr := range t.Attr {
+				buf.WriteString(" " + attr.Name.Local + "=" + strconv.Quote(attr.Value))
+			}
+			buf.WriteString("/>")
+			return buf.String()
+		}
 	}
 }
 

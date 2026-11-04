@@ -131,6 +131,19 @@ func (p *Presentation) applyThemeState(ts *themeState) {
 	p.themeEffectStyles = ts.effectStyles
 }
 
+// activeTheme returns the theme state the presentation resolves against —
+// the flat fields are the live copy, re-pointed as slides are read. The
+// colour table is nil when nothing has been read yet; callers check.
+func (p *Presentation) activeTheme() *themeState {
+	return &themeState{
+		colors:       p.themeColors,
+		fonts:        p.themeFonts,
+		fillStyles:   p.themeFillStyles,
+		lnStyles:     p.themeLnStyles,
+		effectStyles: p.themeEffectStyles,
+	}
+}
+
 // applyMasterState re-points the active master rung, and with it the theme
 // that master names. A master without a readable theme falls back to the
 // default one: carrying the previous slide's theme across would tint the
