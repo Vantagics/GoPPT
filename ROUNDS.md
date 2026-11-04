@@ -47,10 +47,13 @@ POI 特性文稿），用 cmd/zz_render + cmd/zz_cmp 与 PowerPoint COM 导出
 2. **SmartArt 余项**：好的节点标签 autofit 已落地（r93）；hier 的
    frame 垂直居中差与 LO 布局模板内容（像 font-size 的 "smaller" 盒）
    不在 v1 复绘范围。
-3. **treck 主题装饰的楔形对齐**：ooxtheme 剩余部分——母版装饰的多段
+3. **SmartArt 复合几何**：accent-process 31.8%——header+body 的重
+   叠位置是 composite 约束求解领域（v1 四族几何覆盖不了），node 配色
+   已随 r96 修正。
+4. **treck 主题装饰的楔形对齐**：ooxtheme 剩余部分——母版装饰的多段
    渐变楔形在两渲染中的排序/位置次差。（custgeom 的标记位置问题已随 r87 清零。）
-3. **themes slide09/06**：29%/23%——画布纹理的映射 superb，蜂窝/粗纹笔触的
+5. **themes slide09/06**：29%/23%——画布纹理的映射 superb，蜂窝/粗纹笔触的
    precise 贴图位置与增高版式面板几何。
-4. **ooxtheme**：母版 txStyles 的标题字号/装饰渐变的组合链。
-5. **ArtisticEffect/customGeo/pptx2svg/背景双色调**（8–10% 级）：艺术效果
+6. **ooxtheme**：母版 txStyles 的标题字号/装饰渐变的组合链。
+7. **ArtisticEffect/customGeo/pptx2svg/背景双色调**（8–10% 级）：艺术效果
    （必剪树印/玻璃等）与 SVG 图形细节。
