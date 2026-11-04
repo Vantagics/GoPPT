@@ -8949,14 +8949,43 @@ func (r *renderer) wrapRunLine(runs []textRun, maxWidth int, markSize int) []tex
 		segments := splitCJKAware(run.text)
 
 		if len(segments) <= 1 {
-			// Single segment doesn't fit, force it on new line
-			if len(currentRuns) > 0 {
-				lines = append(lines, r.buildTextLine(currentRuns))
-				currentRuns = nil
-				currentWidth = 0
+			// A single unbreakable segment that exceeds the line width:
+			// break at the character level — Office's own behaviour for
+			// overlong words (the font-scale deck's 88-char "AAAA…" run
+			// at 32pt spans 1848px against a 1409px text width and must
+			// wrap; forcing it whole left the line overflowing the slide).
+			if runW <= maxW26_6 {
+				// fits on its own line
+				if len(currentRuns) > 0 {
+					lines = append(lines, r.buildTextLine(currentRuns))
+					currentRuns = nil
+					currentWidth = 0
+				}
+				currentRuns = append(currentRuns, run)
+				currentWidth = runW
+				continue
 			}
-			currentRuns = append(currentRuns, run)
-			currentWidth = runW
+			// character-level wrap: fill the current line, then break
+			for _, ch := range run.text {
+				chStr := string(ch)
+				chW := measureStringWithKern(mf, chStr)
+				if currentWidth+chW > maxW26_6 && currentWidth > 0 {
+					lines = append(lines, r.buildTextLine(currentRuns))
+					currentRuns = nil
+					currentWidth = 0
+				}
+				currentRuns = append(currentRuns, textRun{
+					text:        chStr,
+					font:        run.font,
+					face:        run.face,
+					measureFace: run.measureFace,
+					width:       int(chW / 64),
+					isBullet:    run.isBullet,
+					winAsc:      run.winAsc,
+					winDesc:     run.winDesc,
+				})
+				currentWidth += chW
+			}
 			continue
 		}
 
