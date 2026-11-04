@@ -20,7 +20,9 @@ POI 特性文稿），用 cmd/zz_render + cmd/zz_cmp 与 PowerPoint COM 导出
 | r82 | 942c61a | 版式 overrideClrMapping（克隆映射表） | themes slide09 97.8% → 28.8% |
 | r83 | 2b40e12 | 背景 blipFill `<a:tile/>` 平铺（重采样贴图块） | page_transparent_bitmap 22.1% → 0.95% |
 | r84 | 6384348 | 图片占位符继承版式几何（DrawingShape 加入梯度 ladder） | customshape-bitmapfill-srcrect 26.2% → 0.29% |
-| r85/+ | e5fbea1|ab2e360 | custGeom 多子路径 fill 属性 + SmartArt 框架 rId 解析修正 | treck 内区留空按语义；损坏包（0x80070570）修复可开 |
+| r85/+ | e5fbea1|ab2e360 | custGeom 多子路径 fill 属性 + SmartArt 框架 rId 解析修正 | 损坏包（0x80070570）修复可开 |
+| r87 | 69694a6 | custGeom 的 </a:path> 处**追加**而非覆盖命令列表 | custgeom-nofill-path 35.9% → **0.05%** |
+| r88 | f542fbf | 较近梯级的字号/颜色可压过较远（runSizeSet/runColorSet）+ 占位符 def 读 lumMod/lumOff + applyPlaceholderFont 早退门槛放宽 | ooxtheme 标题 54pt/副标题灰正确；15.1% |
 | r86 | adbd742 | 版式 lstStyle 斜体梯级 + 装饰画在 blip 背景图之上 | slide04 标题斜体；themes slide05 从 76.5% 跌出最差榜 |
 
 ## 与 Office COM 导出一致性（在最终对比中）
@@ -39,8 +41,8 @@ POI 特性文稿），用 cmd/zz_render + cmd/zz_cmp 与 PowerPoint COM 导出
    ——LibreOffice 系文稿近 17 份——渲染显示占位符，而 Office 用 layoutN.xml 的
    算法从 data1.xml 现场重排（smartart-*/table-list 一族 9.7–45.9%）。实现
    单向流程/循环/层级三类核心布局可整批摘除。
-2. **treck 主题装饰位置的父级链**：custgeom-nofill-path 35.9%——标记几何的
-   版式坐标换算（chOff/chExt 的装饰组）。
+2. **treck 主题装饰的楔形对齐**：ooxtheme 15.0% 剩余部分——母版装饰的多段
+   渐变楔形在两渲染中的排序/位置次差。（custgeom 的标记位置问题已随 r87 清零。）
 3. **themes slide09/06**：29%/23%——画布纹理的映射 superb，蜂窝/粗纹笔触的
    precise 贴图位置与增高版式面板几何。
 4. **ooxtheme 15.5%**：母版 txStyles 的标题字号/装饰渐变的组合链。
