@@ -37,7 +37,8 @@ POI 特性文稿），用 cmd/zz_render + cmd/zz_cmp 与 PowerPoint COM 导出
 
 ## 已知剩余差距（按影响排序）
 
-1. **SmartArt 引擎 v1 已落地（r89/r90）**：无缓存 drawingN.xml 的 6 个文稿
+1. **SmartArt 引擎 v1 已落地（r89–r98）**：叶子展开 + 文本捕获清理（r98）
+   把 autofit-sync 从 37.4% 降到 28.2%（最差文稿摘除）。：无缓存 drawingN.xml 的 6 个文稿
    现在由数据模型 + 四族布局（lin/snake/cycle/hier）现场排布：
    fill-color-list 11.9→9.0%、font-size 45.9→**15.5%**、cycle 9.7→8.6%、
    rotation 9.7→7.2%、rightoleft 19.0→18.0%；org-chart2 19.4%（整洁树
