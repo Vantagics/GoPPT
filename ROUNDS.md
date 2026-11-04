@@ -44,7 +44,10 @@ POI 特性文稿），用 cmd/zz_render + cmd/zz_cmp 与 PowerPoint COM 导出
    已对齐，余差为 frame 垂直居中）；r92 补充：文本运行/段落连接与
    parTrans/sibTrans 中继穿越（多 run 标签不再丢字）。注意 LO 布局自带
    的模板内容（如 font-size 的 "smaller" 盒）v1 不复绘。
-2. **treck 主题装饰的楔形对齐**：ooxtheme 剩余部分——母版装饰的多段
+2. **SmartArt 余项**：好的节点标签 autofit 已落地（r93）；hier 的
+   frame 垂直居中差与 LO 布局模板内容（像 font-size 的 "smaller" 盒）
+   不在 v1 复绘范围。
+3. **treck 主题装饰的楔形对齐**：ooxtheme 剩余部分——母版装饰的多段
    渐变楔形在两渲染中的排序/位置次差。（custgeom 的标记位置问题已随 r87 清零。）
 3. **themes slide09/06**：29%/23%——画布纹理的映射 superb，蜂窝/粗纹笔触的
    precise 贴图位置与增高版式面板几何。
