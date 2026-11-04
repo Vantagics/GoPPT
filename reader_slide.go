@@ -4331,7 +4331,12 @@ func (r *PPTXReader) parseSlideXML(decoder *xml.Decoder, slide *Slide, rels []xm
 				state.inPathLst = false
 			case "path":
 				if state.inCustPath && pendingCustomPath != nil {
-					pendingCustomPath.Commands = pendingPathCmds
+					// Several <a:path> elements are subpaths of one geometry:
+					// appending keeps every one of them, where assignment
+					// used to keep only the last — treck's marker then lost
+					// its filled left region and drew nothing but the
+					// fill="none" region's former place.
+					pendingCustomPath.Commands = append(pendingCustomPath.Commands, pendingPathCmds...)
 					pendingPathCmds = nil
 					state.inCustPath = false
 				}
