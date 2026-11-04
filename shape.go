@@ -585,6 +585,10 @@ type DrawingShape struct {
 	tile   bool
 	tileSx int
 	tileSy int
+	// phIdx/phType: a <p:pic> can carry a <p:ph> — a picture placeholder —
+	// whose geometry the inheritance ladder answers from the layout.
+	phIdx  int
+	phType string
 	// recolors holds the <a:clrChange> rules the file attaches to the blip,
 	// in document order. Stacked photos knock their background colour out
 	// with one and depend on the transparency surviving the composite.

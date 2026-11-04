@@ -1307,6 +1307,21 @@ func (r *PPTXReader) parseSlideXML(decoder *xml.Decoder, slide *Slide, rels []xm
 							}
 						}
 					}
+				} else if state.inPic && currentDrawing != nil {
+					// A picture placeholder's identity, so the inheritance
+					// ladder can hand it the layout's geometry: the corpus
+					// deck whose only shape is a <p:pic> with <p:ph idx="1"/>
+					// and an empty spPr rendered 0x0 without it.
+					for _, attr := range t.Attr {
+						switch attr.Name.Local {
+						case "type":
+							currentDrawing.phType = attr.Value
+						case "idx":
+							if v, err := strconv.Atoi(attr.Value); err == nil {
+								currentDrawing.phIdx = v
+							}
+						}
+					}
 				}
 			case "txBody":
 				if state.inSp {
@@ -4806,61 +4821,105 @@ func (r *PPTXReader) applyLayoutInheritance(zr *zip.Reader, slide *Slide, rels [
 	// rungs nearer the slide left at the library's default, so applying them in
 	// this order lets each nearer rung win.
 	for _, shape := range slide.shapes {
-		ph, ok := shape.(*PlaceholderShape)
-		if !ok {
+		ph, isPh := shape.(*PlaceholderShape)
+		picPh := (*DrawingShape)(nil)
+		var match, masterMatch *layoutPlaceholder
+		if isPh {
+			match = matchPlaceholderDef(layoutPHs, ph)
+			masterMatch = matchPlaceholderDef(pres.masterPlaceholders, ph)
+		} else if ds, isDS := shape.(*DrawingShape); isDS && (ds.phIdx > 0 || ds.phType != "") {
+			// A picture placeholder: no text to inherit, but the geometry
+			// rung still applies — the corpus deck whose only shape is a
+			// <p:pic> with <p:ph idx="1"/> and an empty spPr rendered 0x0,
+			// invisible, until this ladder answered it.
+			picPh = ds
+			mock := &PlaceholderShape{phIdx: ds.phIdx, phType: PlaceholderType(ds.phType)}
+			match = matchPlaceholderDef(layoutPHs, mock)
+			masterMatch = matchPlaceholderDef(pres.masterPlaceholders, mock)
+		} else {
 			continue
 		}
 
-		match := matchPlaceholderDef(layoutPHs, ph)
-		masterMatch := matchPlaceholderDef(pres.masterPlaceholders, ph)
+		if isPh {
+			// Geometry takes the nearest definition that has any. Both are
+			// empty for the title in a deck PowerPoint wrote, so the master
+			// is often the only rung that answers at all: without it a title
+			// placeholder is drawn at 0,0 with zero size, which shrinks it,
+			// moves it left and re-wraps it.
+			if ph.width == 0 && ph.height == 0 {
+				for _, def := range []*layoutPlaceholder{match, masterMatch} {
+					if def != nil && (def.extCX != 0 || def.extCY != 0) {
+						ph.offsetX = def.offX
+						ph.offsetY = def.offY
+						ph.width = def.extCX
+						ph.height = def.extCY
+						break
+					}
+				}
+			}
+			if ph.offsetX == 0 && ph.offsetY == 0 && (ph.width == 0 || ph.height == 0) {
+				for _, def := range []*layoutPlaceholder{match, masterMatch} {
+					if def == nil {
+						continue
+					}
+					if def.offX != 0 && ph.offsetX == 0 {
+						ph.offsetX = def.offX
+					}
+					if def.offY != 0 && ph.offsetY == 0 {
+						ph.offsetY = def.offY
+					}
+					if def.extCX != 0 && ph.width == 0 {
+						ph.width = def.extCX
+					}
+					if def.extCY != 0 && ph.height == 0 {
+						ph.height = def.extCY
+					}
+				}
+			}
 
-		// Geometry takes the nearest definition that has any, rather than
-		// applying the master first and locking the layout out. Both are empty
-		// for the title in a deck PowerPoint wrote, so the master is often the
-		// only rung that answers at all: without it a title placeholder is drawn
-		// at 0,0 with zero size, which shrinks it, moves it left and re-wraps it.
-		if ph.width == 0 && ph.height == 0 {
+			// Text insets: layout preferred, then master. Same reasoning as
+			// above, but here the guard on insetsSet makes the order
+			// self-enforcing.
+			applyPlaceholderInsets(ph, match)
+			applyPlaceholderInsets(ph, masterMatch)
+
+			// Horizontal alignment, layout preferred, then master — applied
+			// before the master's txStyles so the placeholder's own lstStyle
+			// wins the ladder, the way PowerPoint resolves it. The master's
+			// sldNum placeholder is the case that needs this: its algn="r"
+			// is the only right-aligned paragraph in the deck.
+			applyPlaceholderAlign(ph, masterMatch)
+			applyPlaceholderAlign(ph, match)
+
+			// Vertical anchoring, same ladder and same reasoning as the
+			// insets: the slide's own anchor wins, then the layout's, then
+			// the master's.
+			applyPlaceholderAnchor(ph, match)
+			applyPlaceholderAnchor(ph, masterMatch)
+
+			// Bullets: the layout placeholder's own <a:lstStyle> rung, then
+			// the master placeholder's, then the master's <p:txStyles> table.
+			// Each rung only fills paragraphs that declared nothing; a
+			// layout's explicit <a:buNone/> bakes a None bullet that stops
+			// the master body's buChar from reaching the paragraph. (The
+			// master's txStyles rung also carries the fonts, applied
+			// farthest-first so each nearer rung can still override.)
+			applyPlaceholderBullet(ph, match)
+			applyPlaceholderBullet(ph, masterMatch)
+			applyMasterTextStyles(ph, pres.masterTextStyles)
+			applyPlaceholderFont(ph, masterMatch)
+			applyPlaceholderFont(ph, match)
+		} else if picPh.width == 0 && picPh.height == 0 {
 			for _, def := range []*layoutPlaceholder{match, masterMatch} {
 				if def != nil && (def.extCX != 0 || def.extCY != 0) {
-					ph.offsetX = def.offX
-					ph.offsetY = def.offY
-					ph.width = def.extCX
-					ph.height = def.extCY
+					picPh.offsetX = def.offX
+					picPh.offsetY = def.offY
+					picPh.width = def.extCX
+					picPh.height = def.extCY
 					break
 				}
 			}
 		}
-
-		// Text insets: layout preferred, then master. Same reasoning as above,
-		// but here the guard on insetsSet makes the order self-enforcing.
-		applyPlaceholderInsets(ph, match)
-		applyPlaceholderInsets(ph, masterMatch)
-
-		// Horizontal alignment, layout preferred, then master — applied before
-		// the master's txStyles so the placeholder's own lstStyle wins the
-		// ladder, the way PowerPoint resolves it. The master's sldNum
-		// placeholder is the case that needs this: its algn="r" is the only
-		// right-aligned paragraph in the deck.
-		applyPlaceholderAlign(ph, masterMatch)
-		applyPlaceholderAlign(ph, match)
-
-		// Vertical anchoring, same ladder and same reasoning as the insets:
-		// the slide's own anchor wins, then the layout's, then the master's.
-		applyPlaceholderAnchor(ph, match)
-		applyPlaceholderAnchor(ph, masterMatch)
-
-		// Bullets: the layout placeholder's own <a:lstStyle> rung, then the
-		// master placeholder's, then the master's <p:txStyles> table. Each
-		// rung only fills paragraphs that declared nothing; a layout's
-		// explicit <a:buNone/> bakes a None bullet that stops the master
-		// body's buChar from reaching the paragraph. (The master's txStyles
-		// rung also carries the fonts, applied farthest-first so each nearer
-		// rung can still override.)
-		applyPlaceholderBullet(ph, match)
-		applyPlaceholderBullet(ph, masterMatch)
-		applyMasterTextStyles(ph, pres.masterTextStyles)
-		applyPlaceholderFont(ph, masterMatch)
-		applyPlaceholderFont(ph, match)
 	}
 }
 
@@ -5308,6 +5367,11 @@ func (r *PPTXReader) parseDecorationShapes(data []byte, rels []xmlRelForRead, zr
 	var out []Shape
 	for _, s := range deco.shapes {
 		if _, ok := s.(*PlaceholderShape); ok {
+			continue
+		}
+		// A layout's picture placeholder is a prompt, not decoration: an
+		// export does not draw it any more than it draws an empty title.
+		if ds, ok := s.(*DrawingShape); ok && (ds.phIdx > 0 || ds.phType != "") {
 			continue
 		}
 		out = append(out, s)
