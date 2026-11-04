@@ -165,6 +165,11 @@ type CustomGeomPath struct {
 	Width    int64         // path coordinate space width
 	Height   int64         // path coordinate space height
 	Commands []PathCommand // path commands (moveTo, lineTo, close, etc.)
+	// subPathNoFill records, per subpath (a source <a:path> element, ending
+	// in order at each moveTo), whether that subpath declared fill="none" —
+	// the corpus's treck marker draws a closed rectangle region inside a
+	// bigger filled outline that must stay transparent.
+	subPathNoFill []bool
 }
 
 // PathCommand represents a single path command.

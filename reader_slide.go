@@ -3304,6 +3304,7 @@ func (r *PPTXReader) parseSlideXML(decoder *xml.Decoder, slide *Slide, rels []xm
 					state.inCustPath = true
 					pendingPathCmds = nil
 					var pw, ph int64
+					pathFillNone := false
 					for _, attr := range t.Attr {
 						switch attr.Name.Local {
 						case "w":
@@ -3314,9 +3315,23 @@ func (r *PPTXReader) parseSlideXML(decoder *xml.Decoder, slide *Slide, rels []xm
 							if v, err := strconv.ParseInt(attr.Value, 10, 64); err == nil {
 								ph = v
 							}
+						case "fill":
+							// A subpath can decline the shape's own fill:
+							// treck's marker outline declares the inner
+							// rectangle region fill="none" so the marker
+							// shapes stay transparent there.
+							pathFillNone = attr.Value == "none"
 						}
 					}
-					pendingCustomPath = &CustomGeomPath{Width: pw, Height: ph}
+					if pendingCustomPath == nil {
+						pendingCustomPath = &CustomGeomPath{Width: pw, Height: ph, subPathNoFill: []bool{pathFillNone}}
+					} else {
+						// Further <a:path> elements are further subpaths of
+						// the same geometry in the same coordinate space;
+						// merging them keeps the renderer's moveTo
+						// segmentation in step with the file's.
+						pendingCustomPath.subPathNoFill = append(pendingCustomPath.subPathNoFill, pathFillNone)
+					}
 				} else if state.inGradFill {
 					// <a:path path="circle"> — the gradient-path kind. The
 					// custGeom branch above owns this element name inside
@@ -3600,6 +3615,15 @@ func (r *PPTXReader) parseSlideXML(decoder *xml.Decoder, slide *Slide, rels []xm
 						if pendingShadow != nil {
 							currentPlaceholder.shadow = pendingShadow
 							pendingShadow = nil
+						}
+						if pendingCustomPath != nil {
+							// A placeholder's own custGeom — the treck theme's
+							// picture-marker carries a multi-path custom
+							// outline with a solid fill — rides on the model
+							// like a text box's does, so the filter below can
+							// recognise it as explicit decoration.
+							currentPlaceholder.customPath = pendingCustomPath
+							pendingCustomPath = nil
 						}
 						if state.inGrpSp && currentGroup != nil {
 							currentGroup.AddShape(currentPlaceholder)
@@ -5366,15 +5390,27 @@ func (r *PPTXReader) parseDecorationShapes(data []byte, rels []xmlRelForRead, zr
 	}
 	var out []Shape
 	for _, s := range deco.shapes {
-		if _, ok := s.(*PlaceholderShape); ok {
-			continue
+		switch v := s.(type) {
+		case *PlaceholderShape:
+			// A placeholder is a prompt an export never draws — unless the
+			// layout gave it explicit decoration to carry: the treck theme's
+			// picture marker holds a multi-path custGeom over a solid fill,
+			// and Office draws exactly that on every slide using the layout.
+			if v.customPath != nil ||
+				(v.fill != nil && v.fill.Type != FillNone) ||
+				(v.border != nil && v.border.Style != BorderNone) {
+				out = append(out, s)
+			}
+		case *DrawingShape:
+			// A picture placeholder is a prompt, not decoration: an export
+			// does not draw it any more than it draws an empty title.
+			if v.phIdx > 0 || v.phType != "" {
+				continue
+			}
+			out = append(out, s)
+		default:
+			out = append(out, s)
 		}
-		// A layout's picture placeholder is a prompt, not decoration: an
-		// export does not draw it any more than it draws an empty title.
-		if ds, ok := s.(*DrawingShape); ok && (ds.phIdx > 0 || ds.phType != "") {
-			continue
-		}
-		out = append(out, s)
 	}
 	return out, deco.hideMasterSp
 }

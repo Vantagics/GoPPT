@@ -3393,14 +3393,20 @@ func (r *renderer) renderCustomPathFill(cp *CustomGeomPath, fill *Fill, ox, oy, 
 	if fill == nil || fill.Type == FillNone || cp == nil || len(cp.Commands) == 0 {
 		return
 	}
-	// Convert path coordinates to pixel coordinates
-	pts := r.customPathToPixelPoints(cp, ox, oy, w, h)
-	if len(pts) < 3 {
-		return
-	}
 	fc := argbToRGBA(fill.Color)
 	fc = r.scaleAlpha(fc)
-	r.fillPolygon(pts, fc)
+	subs := r.customPathToPixelSubpaths(cp, ox, oy, w, h)
+	// Each subpath fills on its own, except the ones whose source <a:path>
+	// declared fill="none": the marker's inner rectangle region stays glass.
+	for i, sub := range subs {
+		if i < len(cp.subPathNoFill) && cp.subPathNoFill[i] {
+			continue
+		}
+		if len(sub) < 3 {
+			continue
+		}
+		r.fillPolygon(sub, fc)
+	}
 }
 
 // customPathToPixelPoints converts a custom geometry path to pixel-space fpoints.
