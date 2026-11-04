@@ -170,8 +170,29 @@ func (r *renderer) smartArtNode(n *SmartArtNode, i int, colorful, twoToneOnly bo
 	r.smartArtDrawLines(lines, face, white, inner)
 }
 
+// smartArtLeaves flattens a tree to its leaf nodes — the list and process
+// families draw one box per content item, not per group node.
+func smartArtLeaves(nodes []*SmartArtNode) []*SmartArtNode {
+	var out []*SmartArtNode
+	var visit func(n *SmartArtNode)
+	visit = func(n *SmartArtNode) {
+		if len(n.Children) == 0 {
+			out = append(out, n)
+			return
+		}
+		for _, c := range n.Children {
+			visit(c)
+		}
+	}
+	for _, n := range nodes {
+		visit(n)
+	}
+	return out
+}
+
 // smartArtLin lays the children across the frame, each full height.
 func (r *renderer) smartArtLin(nodes []*SmartArtNode, colorful, twoTone, vert bool, face font.Face, x, y, w, h int) {
+	nodes = smartArtLeaves(nodes)
 	n := len(nodes)
 	if n == 0 || w < 1 {
 		return
@@ -220,6 +241,7 @@ func (r *renderer) smartArtLin(nodes []*SmartArtNode, colorful, twoTone, vert bo
 // are two or fewer (the font-size deck's stacked boxes), otherwise two per
 // row (the block-diagram wrap the rightoleft deck's export shows).
 func (r *renderer) smartArtSnake(nodes []*SmartArtNode, colorful, twoTone bool, face font.Face, x, y, w, h int) {
+	nodes = smartArtLeaves(nodes)
 	n := len(nodes)
 	if n == 0 || w < 1 || h < 1 {
 		return

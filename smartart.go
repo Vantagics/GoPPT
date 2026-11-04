@@ -167,7 +167,7 @@ func parseSmartArtPoints(data []byte) ([]smartartPoint, string, string, bool, er
 			}
 			push(name)
 		case xml.CharData:
-			if inT {
+			if inT && top() == "t" {
 				textParts = append(textParts, string(t))
 			}
 		case xml.EndElement:
@@ -175,7 +175,7 @@ func parseSmartArtPoints(data []byte) ([]smartartPoint, string, string, bool, er
 			switch name {
 			case "pt":
 				if inPt {
-					cur.text = strings.Join(textParts, "")
+					cur.text = strings.TrimSpace(strings.Join(textParts, ""))
 					pts = append(pts, cur)
 					inPt = false
 				}
