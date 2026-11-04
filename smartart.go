@@ -269,18 +269,20 @@ func buildSmartArtModel(pts []smartartPoint, cxns [][3]string, loType string) (*
 		parentsOf[cx[1]] = append(parentsOf[cx[1]], cx[0])
 	}
 	for T := range isTransit {
-		for _, k := range childLists[T] {
-			for _, P := range parentsOf[T] {
-				if isTransit[P] {
-					continue
-				}
-				childLists[P] = append(childLists[P], struct {
-					id  string
-					ord int
-				}{k.id, k.ord})
+		// lift through transit chains transit→transit→node too: resolve the
+		// deepest transit's children first by walking the parent chains.
+		liftTransit(T, isTransit, parentsOf, childLists)
+	}
+	// remove transit points from every remaining list (a second look can
+	// leave one behind when two chains shared a head)
+	for id := range childLists {
+		kept := childLists[id][:0]
+		for _, k := range childLists[id] {
+			if !isTransit[k.id] {
+				kept = append(kept, k)
 			}
 		}
-		delete(childLists, T)
+		childLists[id] = kept
 	}
 
 	var build func(id string) *SmartArtNode
@@ -352,4 +354,37 @@ func smartArtFamily(loType string) string {
 	default:
 		return "snake"
 	}
+}
+
+// liftTransit raises the transit point's children to its parents, resolving
+// transit→transit chains depth-first, then forgets the transit itself.
+func liftTransit(T string, isTransit map[string]bool, parentsOf map[string][]string,
+	childLists map[string][]struct {
+		id  string
+		ord int
+	}) {
+	kids := childLists[T]
+	// children that are themselves transits lift first
+	for _, k := range kids {
+		if isTransit[k.id] {
+			liftTransit(k.id, isTransit, parentsOf, childLists)
+		}
+	}
+	// re-read the list: lifting a transit child may have rewritten it
+	kids = childLists[T]
+	for _, k := range kids {
+		if isTransit[k.id] {
+			continue
+		}
+		for _, P := range parentsOf[T] {
+			if isTransit[P] {
+				continue
+			}
+			childLists[P] = append(childLists[P], struct {
+				id  string
+				ord int
+			}{k.id, k.ord})
+		}
+	}
+	delete(childLists, T)
 }
