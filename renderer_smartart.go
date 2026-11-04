@@ -253,15 +253,29 @@ func (r *renderer) smartArtSnake(nodes []*SmartArtNode, colorful, twoTone bool, 
 	rows := (n + cols - 1) / cols
 	cw := w / cols
 	ch := h / rows
+	gx := cw * 6 / 100
+	gy := ch * 12 / 100
 	for i, node := range nodes {
 		row := i / cols
 		col := i % cols
 		rect := image.Rect(x+col*cw, y+row*ch, x+(col+1)*cw, y+(row+1)*ch)
-		if col == cols-1 {
-			rect.Max.X = x + w
+		if col < cols-1 {
+			rect.Max.X -= gx
 		}
-		if row == rows-1 {
-			rect.Max.Y = y + h
+		if row < rows-1 {
+			rect.Max.Y -= gy
+		}
+		if i > 0 && col > 0 {
+			rect.Min.X += gx / 2
+		}
+		if i > 0 && row > 0 {
+			rect.Min.Y += gy / 2
+		}
+		// centre the odd-count last row
+		if i == n-1 && col == 0 && cols > 1 {
+			centre := (x + x + w) / 2
+			off := centre - (rect.Min.X+rect.Max.X)/2
+			rect = rect.Add(image.Pt(off, 0))
 		}
 		r.smartArtNode(node, i, colorful, twoTone, face, rect)
 	}
