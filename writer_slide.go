@@ -149,7 +149,27 @@ func (w *PPTXWriter) writeSlide(zw *zip.Writer, slide *Slide, slideNum int, hlin
 	var shapesXML strings.Builder
 	shapeID := 2 // 1 is reserved for the group shape
 
-	for _, shape := range slide.shapes {
+	// A blipFill background arrives as a full-slide DrawingShape at index 0
+	// (the reader prepends it). The writer converts it to a bgPr blipFill:
+	// the shapes loop skips it and the bgXML block emits the blipFill.
+	bgHasImage := false
+	bgIsTile := false
+	bgAlpha := 0
+	if len(slide.shapes) > 0 {
+		if ds, ok := slide.shapes[0].(*DrawingShape); ok && ds.data != nil &&
+			ds.offsetX == 0 && ds.offsetY == 0 &&
+			ds.width >= w.presentation.layout.CX*3/5 &&
+			ds.height >= w.presentation.layout.CY*3/5 {
+			bgHasImage = true
+			bgIsTile = ds.tile
+			bgAlpha = ds.alpha
+		}
+	}
+
+	for i, shape := range slide.shapes {
+		if i == 0 && bgHasImage {
+			continue
+		}
 		switch s := shape.(type) {
 		case *PlaceholderShape:
 			shapesXML.WriteString(w.writePlaceholderShapeXML(s, &shapeID))
@@ -188,9 +208,24 @@ func (w *PPTXWriter) writeSlide(zw *zip.Writer, slide *Slide, slideNum int, hlin
 		result = strings.Replace(result, placeholder, relID, 1)
 	}
 
-	// Background XML
+	// Background XML: the bg image DrawingShape (detected above) writes as
+	// a bgPr blipFill so the background survives the round trip instead of
+	// becoming a stray pic.
 	bgXML := ""
-	if slide.background != nil && slide.background.Type != FillNone {
+	if bgHasImage {
+		tileEl := "<a:stretch><a:fillRect/></a:stretch>"
+		if bgIsTile {
+			tileEl = "<a:tile/>"
+		}
+		bgXML = "    <p:bg>\n      <p:bgPr>\n        <a:blipFill>\n"
+		if bgAlpha > 0 {
+			bgXML += fmt.Sprintf("          <a:blip r:embed=\"rId2\"><a:alphaModFix amt=\"%d\"/></a:blip>\n", bgAlpha)
+		} else {
+			bgXML += "          <a:blip r:embed=\"rId2\"/>\n"
+		}
+		bgXML += "          " + tileEl + "\n"
+		bgXML += "        </a:blipFill>\n        <a:effectLst/>\n      </p:bgPr>\n    </p:bg>\n"
+	} else if slide.background != nil && slide.background.Type != FillNone {
 		bgXML = "    <p:bg>\n      <p:bgPr>\n"
 		bgXML += w.writeFillXML(slide.background)
 		bgXML += "        <a:effectLst/>\n      </p:bgPr>\n    </p:bg>\n"
@@ -310,7 +345,28 @@ func (w *PPTXWriter) writeSlideRels(zw *zip.Writer, slide *Slide, slideNum int, 
   <Relationship Id="rId1" Type="%s" Target="../slideLayouts/slideLayout1.xml"/>`, nsRelationships, relTypeSlideLayout)
 
 	relIdx := 2
+	// The bg image DrawingShape (skipped in the shapes loop) gets rId2 here
+	// so the bgPr blipFill can reference it; the shapes loop starts at rId3.
+	bgHasImage := false
+	if len(slide.shapes) > 0 {
+		if ds, ok := slide.shapes[0].(*DrawingShape); ok && ds.data != nil &&
+			ds.offsetX == 0 && ds.offsetY == 0 &&
+			ds.width >= w.presentation.layout.CX*3/5 &&
+			ds.height >= w.presentation.layout.CY*3/5 {
+			imgIdx := w.getImageIndex(slide, ds)
+			ext := w.getImageExtension(ds)
+			fmt.Fprintf(&rels, "\n  <Relationship Id=\"rId2\" Type=\"%s\" Target=\"../media/image%d.%s\"/>",
+				relTypeImage, imgIdx, ext)
+			bgHasImage = true
+			relIdx = 3
+		}
+	}
 	for _, shape := range flattenShapes(slide.shapes) {
+		// skip the bg image DrawingShape — its relationship is rId2 above
+		if ds, ok := shape.(*DrawingShape); ok && ds.data != nil &&
+			ds.offsetX == 0 && ds.offsetY == 0 && bgHasImage {
+			continue
+		}
 		switch s := shape.(type) {
 		case *DrawingShape:
 			if s.data != nil || s.path != "" {
