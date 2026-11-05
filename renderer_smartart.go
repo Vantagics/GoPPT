@@ -98,6 +98,10 @@ func (r *renderer) renderSmartArt(model *SmartArtModel, x, y, w, h int) {
 	}
 	nodes := flattenSmartArtTop(model.Root.Children)
 	face := r.getFace(NewFont())
+	if model.Process {
+		r.smartArtProcessArrow(nodes, model.Colorful, face, x, y, w, h)
+		return
+	}
 	switch model.Algo {
 	case "cycle":
 		r.smartArtCycle(nodes, model.Colorful, model.Process, face, x, y, w, h)
@@ -491,5 +495,47 @@ func (r *renderer) smartArtVertTree(nodes []*SmartArtNode, colorful, twoTone boo
 			}
 			curY += float64(kidH)
 		}
+	}
+}
+
+// smartArtProcessArrow draws the hProcess3 family's single arrow shape:
+// a rect body with a triangular tip pointing right, all children's texts
+// evenly spaced inside in white. The arrow fills with one accent — the
+// office export for the linear-rule deck shows this arrow, not separate
+// boxes per item.
+func (r *renderer) smartArtProcessArrow(nodes []*SmartArtNode, colorful bool, face font.Face, x, y, w, h int) {
+	if len(nodes) == 0 || w < 1 || h < 1 {
+		return
+	}
+	slot := smartArtSlot(0, colorful)
+	tipW := float64(h) / 2
+	bodyW := float64(w) - tipW
+	if bodyW < 1 {
+		bodyW = float64(w)
+	}
+	// arrow body (rect) + tip (triangle)
+	pts := [][2]float64{
+		{float64(x), float64(y)},
+		{float64(x) + bodyW, float64(y)},
+		{float64(x) + float64(w), float64(y) + float64(h)/2},
+		{float64(x) + bodyW, float64(y) + float64(h)},
+		{float64(x), float64(y) + float64(h)},
+	}
+	var fpts []fpoint
+	for _, p := range pts {
+		fpts = append(fpts, fpoint{p[0], p[1]})
+	}
+	r.fillPolygon(fpts, slot)
+
+	// texts evenly spaced inside the body
+	white := color.RGBA{R: 255, G: 255, B: 255, A: 255}
+	n := len(nodes)
+	slotW := bodyW / float64(n)
+	for i, node := range nodes {
+		cx := float64(x) + slotW*(float64(i)+0.5)
+		nodeRect := image.Rect(int(cx-slotW/2), y, int(cx+slotW/2), y+h)
+		face2, lines := r.smartArtFitFace(node.Text, nodeRect.Dx()-8, nodeRect.Dy()-6)
+		inner := image.Rect(nodeRect.Min.X+4, nodeRect.Min.Y+2, nodeRect.Max.X-4, nodeRect.Max.Y-2)
+		r.smartArtDrawLines(lines, face2, white, inner)
 	}
 }
