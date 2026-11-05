@@ -5,6 +5,7 @@ import (
 	"bytes"
 	"encoding/xml"
 	"fmt"
+	"math"
 	"sort"
 	"strconv"
 	"strings"
@@ -666,6 +667,7 @@ func (r *PPTXReader) parseSlideXML(decoder *xml.Decoder, slide *Slide, rels []xm
 
 		// custGeom tracking
 		inCustGeom bool
+		inGdLst    bool
 		inPathLst  bool
 		inCustPath bool
 
@@ -726,6 +728,11 @@ func (r *PPTXReader) parseSlideXML(decoder *xml.Decoder, slide *Slide, rels []xm
 	// Pending custom geometry path
 	var pendingCustomPath *CustomGeomPath
 	var pendingPathCmds []PathCommand
+	// pendingGuides holds the custGeom's <a:gdLst> formulas and
+	// pendingGuideVals their evaluated values, built when the first <a:path>
+	// opens (guides always precede pathLst, and path points reference them).
+	var pendingGuides []custGuide
+	var pendingGuideVals map[string]float64
 
 	// Default font properties from defRPr (paragraph-level defaults)
 	var defFont *Font
@@ -976,6 +983,8 @@ func (r *PPTXReader) parseSlideXML(decoder *xml.Decoder, slide *Slide, rels []xm
 					pendingBlipFillData = nil
 					pendingBlipFillMime = ""
 					pendingCustomPath = nil
+					pendingGuides = nil
+					pendingGuideVals = nil
 					fontRefColor = nil
 				}
 			case "pic":
@@ -1012,6 +1021,8 @@ func (r *PPTXReader) parseSlideXML(decoder *xml.Decoder, slide *Slide, rels []xm
 					prstGeom = ""
 					shapeRotation = 0
 					pendingCustomPath = nil
+					pendingGuides = nil
+					pendingGuideVals = nil
 					lineColorExplicit = false
 					state.inFillRef = false
 					state.inLnRef = false
@@ -3310,6 +3321,12 @@ func (r *PPTXReader) parseSlideXML(decoder *xml.Decoder, slide *Slide, rels []xm
 			case "custGeom":
 				if state.inSpPr {
 					state.inCustGeom = true
+					pendingGuides = nil
+					pendingGuideVals = nil
+				}
+			case "gdLst":
+				if state.inCustGeom {
+					state.inGdLst = true
 				}
 			case "pathLst":
 				if state.inCustGeom {
@@ -3339,6 +3356,15 @@ func (r *PPTXReader) parseSlideXML(decoder *xml.Decoder, slide *Slide, rels []xm
 							pathFillNone = attr.Value == "none"
 						}
 					}
+					// A path without w/h uses the shape's own box as its
+					// coordinate space (PowerPoint writes the rounded-rect
+					// freeforms of pasted diagrams this way).
+					if pw == 0 {
+						pw = extCX
+					}
+					if ph == 0 {
+						ph = extCY
+					}
 					if pendingCustomPath == nil {
 						pendingCustomPath = &CustomGeomPath{Width: pw, Height: ph, subPathNoFill: []bool{pathFillNone}}
 					} else {
@@ -3348,6 +3374,9 @@ func (r *PPTXReader) parseSlideXML(decoder *xml.Decoder, slide *Slide, rels []xm
 						// segmentation in step with the file's.
 						pendingCustomPath.subPathNoFill = append(pendingCustomPath.subPathNoFill, pathFillNone)
 					}
+					// Every guide is declared before pathLst, so the values
+					// can be resolved once here and read as points stream in.
+					pendingGuideVals = evalCustGeomGuides(pendingGuides, pw, ph)
 				} else if state.inGradFill {
 					// <a:path path="circle"> — the gradient-path kind. The
 					// custGeom branch above owns this element name inside
@@ -3382,18 +3411,26 @@ func (r *PPTXReader) parseSlideXML(decoder *xml.Decoder, slide *Slide, rels []xm
 						case "wR":
 							if v, err := strconv.ParseInt(attr.Value, 10, 64); err == nil {
 								wR = v
+							} else if g, ok := pendingGuideVals[attr.Value]; ok {
+								wR = int64(math.Round(g))
 							}
 						case "hR":
 							if v, err := strconv.ParseInt(attr.Value, 10, 64); err == nil {
 								hR = v
+							} else if g, ok := pendingGuideVals[attr.Value]; ok {
+								hR = int64(math.Round(g))
 							}
 						case "stAng":
 							if v, err := strconv.ParseInt(attr.Value, 10, 64); err == nil {
 								stAng = v
+							} else if g, ok := pendingGuideVals[attr.Value]; ok {
+								stAng = int64(math.Round(g))
 							}
 						case "swAng":
 							if v, err := strconv.ParseInt(attr.Value, 10, 64); err == nil {
 								swAng = v
+							} else if g, ok := pendingGuideVals[attr.Value]; ok {
+								swAng = int64(math.Round(g))
 							}
 						}
 					}
@@ -3417,10 +3454,16 @@ func (r *PPTXReader) parseSlideXML(decoder *xml.Decoder, slide *Slide, rels []xm
 						case "x":
 							if v, err := strconv.ParseInt(attr.Value, 10, 64); err == nil {
 								px = v
+							} else if g, ok := pendingGuideVals[attr.Value]; ok {
+								// A gdLst guide reference ("f5") — the coordinate
+								// lives behind the formula, not in the attribute.
+								px = int64(math.Round(g))
 							}
 						case "y":
 							if v, err := strconv.ParseInt(attr.Value, 10, 64); err == nil {
 								py = v
+							} else if g, ok := pendingGuideVals[attr.Value]; ok {
+								py = int64(math.Round(g))
 							}
 						}
 					}
@@ -3432,7 +3475,24 @@ func (r *PPTXReader) parseSlideXML(decoder *xml.Decoder, slide *Slide, rels []xm
 					state.inAvLst = true
 				}
 			case "gd":
-				if state.inAvLst {
+				if state.inGdLst {
+					// <a:gdLst> guide: name + full formula. Path point
+					// attributes reference these by name (e.g. <a:pt x="f5"/>),
+					// and PowerPoint's pasted-diagram freeforms put every
+					// coordinate behind one.
+					var gdName, gdFmla string
+					for _, attr := range t.Attr {
+						switch attr.Name.Local {
+						case "name":
+							gdName = attr.Value
+						case "fmla":
+							gdFmla = attr.Value
+						}
+					}
+					if gdName != "" {
+						pendingGuides = append(pendingGuides, custGuide{name: gdName, fmla: gdFmla})
+					}
+				} else if state.inAvLst {
 					var gdName string
 					var gdVal int
 					for _, attr := range t.Attr {
@@ -4353,8 +4413,12 @@ func (r *PPTXReader) parseSlideXML(decoder *xml.Decoder, slide *Slide, rels []xm
 				state.inExtLst = false
 			case "avLst":
 				state.inAvLst = false
+			case "gdLst":
+				state.inGdLst = false
 			case "custGeom":
 				state.inCustGeom = false
+				pendingGuides = nil
+				pendingGuideVals = nil
 			case "pathLst":
 				state.inPathLst = false
 			case "path":

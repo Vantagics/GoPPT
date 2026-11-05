@@ -976,9 +976,32 @@ func (r *renderer) renderRichText(s *RichTextShape) {
 		}
 		rect := image.Rect(ox, oy, ox+w, oy+h)
 
-		// Shadow BEFORE fill (so shadow appears behind)
+		// Shadow BEFORE fill (so shadow appears behind). A custom-geometry
+		// shape casts the shadow of its own silhouette, not of its bounding
+		// box: the elbow connectors of a pasted diagram are thin open paths
+		// whose bounding box covers the whole band between the boxes — a rect
+		// shadow there paints the band grey where Office shows nothing.
+		var pathPts []fpoint
+		if s.customPath != nil {
+			pathPts = tr.customPathToPixelPoints(s.customPath, ox, oy, w, h)
+		}
 		if s.shadow != nil && s.shadow.Visible {
-			tr.renderShadow(s.shadow, rect)
+			if pathPts != nil {
+				if s.fill == nil || s.fill.Type == FillNone {
+					// Outline-only silhouette: the shadow follows the pen
+					// trace (the brace presets' law), not the area the open
+					// path would close over.
+					penPx := 1
+					if s.border != nil && s.border.Style != BorderNone {
+						penPx = maxInt(int(float64(maxInt(s.border.Width, 1))*12700.0*tr.scaleX), 1)
+					}
+					tr.renderShadowPolyline(s.shadow, pathPts, penPx)
+				} else {
+					tr.renderShadowPolygon(s.shadow, pathPts)
+				}
+			} else {
+				tr.renderShadow(s.shadow, rect)
+			}
 		}
 		if s.customPath != nil {
 			tr.renderCustomPathFill(s.customPath, s.fill, ox, oy, w, h)
@@ -989,7 +1012,7 @@ func (r *renderer) renderRichText(s *RichTextShape) {
 			pw := maxInt(int(float64(maxInt(s.border.Width, 1))*12700.0*tr.scaleX), 1)
 			if s.customPath != nil {
 				// Draw border along the custom geometry path
-				pts := tr.customPathToPixelPoints(s.customPath, ox, oy, w, h)
+				pts := pathPts
 				bc := argbToRGBA(s.border.Color)
 				if len(pts) >= 2 {
 					if s.border.Style == BorderDash || s.border.Style == BorderDot {

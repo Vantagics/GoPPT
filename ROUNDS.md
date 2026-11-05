@@ -40,6 +40,16 @@ POI 特性文稿），用 cmd/zz_render + cmd/zz_cmp 与 PowerPoint COM 导出
 | r106 | 9be024a | 非 ASCII 子弹字符符号 face 解析 | ◆/▲/■ 子弹受益 |
 | r108 | 7c7ba0c | tile 背景 bgPr blipFill 写回 + alphaModFix | page_transparent_bitmap gen 87.4→0.95% |
 | r109 | 4c099c1 | 母版装饰形状写入母版 XML | alterman 装饰 gen 保留 |
+| r110 | f9cda61 | accent-process 族 header+body 两盒对 | smartart-accent-process 31.8→10.2% |
+| r111 | 本轮 | **custGeom gdLst guide 公式求值**（val/\*/+-/?:/pin/min/max/abs/sqrt/at2/sin/cos/tan/ss；
+  path 无 w/h 时回退形状盒）+ RichText 自定义几何的阴影像素轮廓（noFill 走描边影子、填充走多边形影子） | customGeo 8.37→8.02、最差页 22.66→17.86；ooxtheme 14.94→5.75（母版楔形装饰） |
+
+PowerPoint 把粘贴的 SmartArt/图表转成的 "Freeform N" 全部走
+`<a:gdLst>` 公式引用（`<a:pt x="f5"/>`），旧解析器 `strconv.ParseInt("f5")`
+静默失败把所有点堆到 0——路径退化成空多边形，只有包围矩形阴影可见
+（白盒变 255×0.65 的灰、浅蓝幽灵卡消失、肘形连接线变灰带）。r111 求值
+guide 链（惰性求值+备忘录+环守卫），并让自定义几何的阴影沿几何轮廓
+投射而非包围盒。
 
 ## 渲染端改善汇总
 
@@ -62,17 +72,20 @@ alphaModFix 写回（r108）、母版装饰形状写回（r109）。
 
 ## 已知剩余差距
 
-1. **SmartArt composite 几何**：accent-process 31.8% — header+body
-   重叠位置需 composite 约束求解（v1 四族几何覆盖不了），配色已修。
-2. **autofit-sync vert tree 容器配色**：28.2% — office 的淡色圆角容器
+1. **SmartArt composite 几何**：accent-process 10.2% — 重叠位置的
+   composite 约束求解（r110 两盒对已收大头）。
+2. **autofit-sync vert tree 容器配色**：31.7% — office 的淡色圆角容器
    与 accent 底色头带的视觉差异需精确调参。
 3. **multi-master writer**：writer 创建一个 master/layout/theme；多母版
    文稿（themes 20.8% gen）的 master 2-7 需写回支持。
-4. **radial 渐变**：minimal-gradient 9.3% — lumMod 在 gradient stop 的
+4. **customGeo 其余页**：最差页自 gdLst 修复后还有 17.86%（slide04/
+   slide33 级），已转样式引用/图表细节。
+5. **radial 渐变**：minimal-gradient 9.3% — lumMod 在 gradient stop 的
    schemeClr 上的色彩变换链路。
-5. **ooxtheme 楔形**：15.0% — 母版装饰的多段渐变楔形在两渲染中的排序。
-6. **LO 布局模板内容**：font-size 的 "smaller" 盒等 LO 布局自带内容
+6. **SmartArt 竖排列表布局**：fill-color-list 30.26%（横带 vs Office 竖
+   三列）——v1 引擎的 lin 族只覆盖线性条带，列式分布未建模。
+7. **LO 布局模板内容**：font-size 的 "smaller" 盒等 LO 布局自带内容
    v1 不复绘。
-7. **ArtisticEffect/customGeo/pptx2svg**（8-10% 级）：艺术效果与 SVG
+8. **ArtisticEffect/pptx2svg**（8-10% 级）：艺术效果与 SVG
    图形细节。
-8. **文字反锯齿**：结构性差异，不可归零。
+9. **文字反锯齿**：结构性差异，不可归零。
