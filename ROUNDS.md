@@ -60,7 +60,10 @@ POI 特性文稿），用 cmd/zz_render + cmd/zz_cmp 与 PowerPoint COM 导出
 5. **themes slide09/06**：29%/23%——画布纹理的映射 superb，蜂窝/粗纹笔触的
    precise 贴图位置与增高版式面板几何。
 6. **ooxtheme**：母版 txStyles 的标题字号/装饰渐变的组合链。
-7. **ArtisticEffect/customGeo/pptx2svg/背景双色调**（8–10% 级）：艺术效果
+7. **tile 背景写入 gen 87.4→0.95%**（r108）：writer 将 bg DrawingShape
+   转为 bgPr blipFill（含 alphaModFix + tile），page_transparent_bitmap
+   的半透明纹理背景往返保真。
+8. **ArtisticEffect/customGeo/pptx2svg/背景双色调**（8–10% 级）：艺术效果
    （必剪树印/玻璃等）与 SVG 图形细节。
 8. **font-scale 9.35%**：逐字符断行已落地（r101）；normAutofit fontScale
    (85%) 尚未传递到换行测量 face——文本绘制与换行测量使用不同字号，
