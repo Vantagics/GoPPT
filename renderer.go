@@ -1937,6 +1937,11 @@ func (r *renderer) renderAutoShape(s *AutoShape) {
 					}
 				case AutoShapeRectangle, "":
 					tr.renderShadow(s.shadow, rect)
+				case AutoShapePie:
+					// The wedge silhouette, not the bounding box: three
+					// stacked pie slices sharing one box would otherwise
+					// shade the whole pie three times.
+					tr.renderShadowPolygon(s.shadow, pieWedgePoints(ox, oy, w, h, s.adjustValues))
 				default:
 					if s.shapeType == AutoShapeEllipse {
 						tr.renderShadowEllipse(s.shadow, rect, ellipseShadowRingPx(s, tr))
@@ -2219,6 +2224,13 @@ func (r *renderer) renderAutoShapeFill(s *AutoShape, x, y, w, h int) {
 		// Skip fill for arc shapes.
 	case AutoShapeCan, AutoShapeFlowChartMagneticDisk:
 		r.fillCan(x, y, w, h, fc, s.adjustValues)
+	case AutoShapePie:
+		pts := pieWedgePoints(x, y, w, h, s.adjustValues)
+		if s.fill.Type == FillSolid {
+			r.fillPolygon(pts, fc)
+		} else {
+			r.fillPolygonGradient(pts, rect, s.fill)
+		}
 	default:
 		r.renderFill(s.fill, rect)
 	}
@@ -2259,6 +2271,49 @@ func roundedRectOutlinePoints(x, y, w, h, radius int) []fpoint {
 	pts = append(pts, fpoint{fx, fy + fr})
 	arc(fx+fr, fy+fr, math.Pi, 1.5*math.Pi)
 	pts = append(pts, fpoint{fx + fr, fy})
+	return pts
+}
+
+// pieWedgePoints is the pie preset: a centre-anchored wedge from the start
+// angle (adj1) to the end angle (adj2), both in 60000ths of a degree, clamped
+// like the spec's pin 0 … 21599999. A negative sweep wraps to a positive one
+// (the way a270 crosses 360°); equal angles mean the full circle.
+func pieWedgePoints(x, y, w, h int, adj map[string]int) []fpoint {
+	stAng, enAng := 0, 16200000
+	if adj != nil {
+		if v, ok := adj["adj1"]; ok {
+			stAng = v
+		}
+		if v, ok := adj["adj2"]; ok {
+			enAng = v
+		}
+	}
+	if stAng < 0 {
+		stAng = 0
+	}
+	if stAng > 21599999 {
+		stAng = 21599999
+	}
+	if enAng < 0 {
+		enAng = 0
+	}
+	if enAng > 21599999 {
+		enAng = 21599999
+	}
+	swAng := enAng - stAng
+	if swAng <= 0 {
+		swAng += 21600000
+	}
+	fx, fy := float64(x), float64(y)
+	fw, fh := float64(w), float64(h)
+	cx, cy := fx+fw/2, fy+fh/2
+	rx, ry := fw/2, fh/2
+	steps := maxInt(int(float64(swAng)/60000.0)+1, 8)
+	pts := []fpoint{{cx, cy}}
+	for i := 0; i <= steps; i++ {
+		a := (float64(stAng) + float64(swAng)*float64(i)/float64(steps)) / 60000.0 * math.Pi / 180.0
+		pts = append(pts, fpoint{cx + rx*math.Cos(a), cy + ry*math.Sin(a)})
+	}
 	return pts
 }
 
@@ -2317,6 +2372,14 @@ func (r *renderer) renderAutoShapeBorder(s *AutoShape, x, y, w, h int) {
 	case AutoShapeBentUpArrow:
 		pts := r.bentUpArrowPoints(x, y, w, h, s.adjustValues)
 		r.drawPolygon(pts, bc, pw)
+	case AutoShapePie:
+		// Two radii plus the arc between them — the wedge outline runs
+		// centre → arc start → around → arc end → centre.
+		pts := pieWedgePoints(x, y, w, h, s.adjustValues)
+		for i := 1; i < len(pts); i++ {
+			r.drawLineAA(int(pts[i-1].x), int(pts[i-1].y), int(pts[i].x), int(pts[i].y), bc, pw)
+		}
+		r.drawLineAA(int(pts[len(pts)-1].x), int(pts[len(pts)-1].y), int(pts[0].x), int(pts[0].y), bc, pw)
 	case AutoShapeSnip2DiagRect:
 		pts := r.snip2DiagRectPoints(x, y, w, h, s.adjustValues)
 		r.drawPolygon(pts, bc, pw)
