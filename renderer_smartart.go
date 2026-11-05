@@ -99,7 +99,11 @@ func (r *renderer) renderSmartArt(model *SmartArtModel, x, y, w, h int) {
 	nodes := flattenSmartArtTop(model.Root.Children)
 	face := r.getFace(NewFont())
 	if model.Process {
-		r.smartArtProcessArrow(nodes, model.Colorful, face, x, y, w, h)
+		if model.ProcessTwoBox {
+			r.smartArtTwoBox(nodes, model.Colorful, face, x, y, w, h)
+		} else {
+			r.smartArtProcessArrow(nodes, model.Colorful, face, x, y, w, h)
+		}
 		return
 	}
 	switch model.Algo {
@@ -537,5 +541,47 @@ func (r *renderer) smartArtProcessArrow(nodes []*SmartArtNode, colorful bool, fa
 		face2, lines := r.smartArtFitFace(node.Text, nodeRect.Dx()-8, nodeRect.Dy()-6)
 		inner := image.Rect(nodeRect.Min.X+4, nodeRect.Min.Y+2, nodeRect.Max.X-4, nodeRect.Max.Y-2)
 		r.smartArtDrawLines(lines, face2, white, inner)
+	}
+}
+
+// smartArtTwoBox draws the accent-process family's layout: each node
+// renders as a blue header box (top-left) with a pale body box (larger,
+// below-right, overlapping) — the office export's header/body pair with
+// a thin border on the body box. The texts go in their respective boxes.
+func (r *renderer) smartArtTwoBox(nodes []*SmartArtNode, colorful bool, face font.Face, x, y, w, h int) {
+	n := len(nodes)
+	if n == 0 || w < 1 || h < 1 {
+		return
+	}
+	cw := w / n
+	white := color.RGBA{R: 255, G: 255, B: 255, A: 255}
+
+	for i, node := range nodes {
+		nx := x + i*cw
+		slot := smartArtSlot(i, colorful)
+		body := smartArtBody(slot)
+
+		// header box: blue, covers the top-left area (smaller)
+		hdrRect := image.Rect(nx, y, nx+cw*7/8, y+h*45/100)
+		r.fillRectFast(hdrRect, slot)
+		face2, lines := r.smartArtFitFace(node.Text, hdrRect.Dx()-12, hdrRect.Dy()-8)
+		inner := image.Rect(hdrRect.Min.X+6, hdrRect.Min.Y+3, hdrRect.Max.X-6, hdrRect.Max.Y-3)
+		r.smartArtDrawLines(lines, face2, white, inner)
+
+		// body box: pale with a thin border, larger, below-right (overlapping)
+		bodyRect := image.Rect(nx+cw/8, y+h*30/100, nx+cw-4, y+h*88/100)
+		r.fillRectFast(bodyRect, body)
+		r.drawRectBorder(bodyRect, color.RGBA{R: 120, G: 120, B: 120, A: 255}, 1, BorderSolid)
+
+		// children as bullet text lines inside the body box
+		kidY := bodyRect.Min.Y + 8
+		kidFace := NewFont()
+		kidFace.Size = 11
+		kidFace2 := r.getFace(kidFace)
+		for _, kid := range node.Children {
+			kidRect := image.Rect(bodyRect.Min.X+10, kidY, bodyRect.Max.X-10, kidY+16)
+			r.drawStringCentered("• "+kid.Text, kidFace2, color.RGBA{R: 50, G: 50, B: 50, A: 255}, kidRect)
+			kidY += 16
+		}
 	}
 }

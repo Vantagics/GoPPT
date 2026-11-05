@@ -38,6 +38,10 @@ type SmartArtModel struct {
 	// Vert marks loCatId "list": the linear children flow top-to-bottom
 	// (the vertical list look), not the default left-to-right.
 	Vert bool
+	// ProcessTwoBox marks loTypeId "process*" (the accent-process family):
+	// each node draws as a header box (blue, top-left) with a body box
+	// (pale, larger, bottom-right, overlapping) — the office layout.
+	ProcessTwoBox bool
 }
 
 // SmartArtNode is one content point of the model.
@@ -72,6 +76,7 @@ func parseSmartArtModel(data []byte) (*SmartArtModel, error) {
 	}
 	model.Colorful = colorful
 	model.Process = strings.Contains(loCat, "process")
+	model.ProcessTwoBox = strings.HasPrefix(loType, "process")
 	model.Vert = strings.Contains(loCat, "list")
 	return model, nil
 }
