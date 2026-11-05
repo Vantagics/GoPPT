@@ -3,6 +3,7 @@ package gopresentation
 import (
 	"archive/zip"
 	"fmt"
+	"strings"
 )
 
 // --- Presentation Part ---
@@ -112,6 +113,31 @@ func (w *PPTXWriter) writeTableStyles(zw *zip.Writer) error {
 // --- Slide Master ---
 
 func (w *PPTXWriter) writeSlideMaster(zw *zip.Writer) error {
+	// The master's decoration shapes (bands, logos, artwork from the source
+	// deck) are written into the spTree so they survive the round trip —
+	// the reader renders them on every slide, and losing them strips the
+	// deck's visual identity.
+	var decoXML strings.Builder
+	shapeID := 2
+	// The shape writers use slideNum for relIdx calculations; master deco
+	// shapes have no slide-level rels, so slideNum=1 is safe (the calc
+	// walks the first slide's shapes but the deco shapes aren't in it).
+	for _, shape := range w.presentation.masterDecoShapes {
+		switch s := shape.(type) {
+		case *AutoShape:
+			decoXML.WriteString(w.writeAutoShapeXML(s, &shapeID))
+		case *RichTextShape:
+			decoXML.WriteString(w.writeRichTextShapeXML(s, &shapeID))
+		case *DrawingShape:
+			decoXML.WriteString(w.writeDrawingShapeXML(s, &shapeID, 1))
+		case *LineShape:
+			decoXML.WriteString(w.writeLineShapeXML(s, &shapeID))
+		case *GroupShape:
+			decoXML.WriteString(w.writeGroupShapeXML(s, &shapeID, 1))
+		}
+	}
+	decoStr := decoXML.String()
+
 	content := fmt.Sprintf(`<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
 <p:sldMaster xmlns:a="%s" xmlns:r="%s" xmlns:p="%s">
   <p:cSld>
@@ -134,13 +160,13 @@ func (w *PPTXWriter) writeSlideMaster(zw *zip.Writer) error {
           <a:chExt cx="0" cy="0"/>
         </a:xfrm>
       </p:grpSpPr>
-    </p:spTree>
+%s    </p:spTree>
   </p:cSld>
   <p:clrMap bg1="lt1" tx1="dk1" bg2="lt2" tx2="dk2" accent1="accent1" accent2="accent2" accent3="accent3" accent4="accent4" accent5="accent5" accent6="accent6" hlink="hlink" folHlink="folHlink"/>
   <p:sldLayoutIdLst>
     <p:sldLayoutId id="2147483649" r:id="rId1"/>
   </p:sldLayoutIdLst>
-</p:sldMaster>`, nsDrawingML, nsOfficeDocRels, nsPresentationML)
+</p:sldMaster>`, nsDrawingML, nsOfficeDocRels, nsPresentationML, decoStr)
 
 	if err := writeRawXMLToZip(zw, "ppt/slideMasters/slideMaster1.xml", content); err != nil {
 		return err
