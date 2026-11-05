@@ -8362,7 +8362,23 @@ func (r *renderer) buildBulletRun(b *Bullet, para *Paragraph, ordinal int) textR
 		}
 	}
 
+	// Non-ASCII bullet characters (✭, □, ◆ …) need a font that has the
+	// glyph — the buFont or the text font may lack it, and the fallback
+	// renders a replacement box. The symbol face resolver finds a font
+	// that covers the bullet character.
 	face := r.getFace(bulletFont)
+	if b.Type == BulletTypeChar && !isSymbolFont(bulletFont.Name) {
+		first := ""
+		for _, r := range b.Style {
+			first = string(r)
+			break
+		}
+		if first != "" && first[0] >= 0x80 {
+			if sf, _ := r.getSymbolFace(bulletFont, first); sf != nil {
+				face = sf
+			}
+		}
+	}
 	w := font.MeasureString(face, text).Ceil()
 	// For symbol fonts rendered via PUA (no trailing space in text),
 	// add a small gap so the bullet doesn't touch the text.
