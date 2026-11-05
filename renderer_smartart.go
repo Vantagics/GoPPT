@@ -305,7 +305,13 @@ func (r *renderer) smartArtCycle(nodes []*SmartArtNode, colorful, twoTone bool, 
 	cx := float64(x) + float64(w)/2
 	cy := float64(y) + float64(h)/2
 	radius := float64(minInt(w, h)) / 2 * 0.55
-	d := float64(minInt(w, h)) / 4.4
+	// Node size adapts to the node count: the chord between adjacent ring
+	// positions caps the diameter so the nodes never overlap (the autoTxRot
+	// deck's 12 nodes overlapped into a solid wall at a fixed size).
+	d := 2 * radius * math.Sin(math.Pi/float64(n))
+	if d > float64(minInt(w, h))/3.0 {
+		d = float64(minInt(w, h)) / 3.0
+	}
 	for i, node := range nodes {
 		angle := -math.Pi/2 + 2*math.Pi*float64(i)/float64(n)
 		ncx := cx + radius*math.Cos(angle)
