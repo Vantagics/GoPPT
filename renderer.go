@@ -2087,6 +2087,21 @@ func (r *renderer) renderAutoShapeFill(s *AutoShape, x, y, w, h int) {
 	if s.fill == nil || s.fill.Type == FillNone {
 		return
 	}
+	if s.fill.Type == FillPicture && len(s.fill.PictureData) > 0 {
+		// blipFill: the image fills the shape's geometry — Office clips to
+		// the ellipse for the smartart-simple deck's ocean-photo circle.
+		srcImg, _, err := image.Decode(bytes.NewReader(s.fill.PictureData))
+		if err != nil {
+			return
+		}
+		if s.shapeType == AutoShapeEllipse {
+			r.fillEllipseImage(x, y, w, h, srcImg)
+		} else {
+			scaled := scaleImageMitchell(srcImg, w, h, nil)
+			draw.Draw(r.img, image.Rect(x, y, x+w, y+h), scaled, image.Point{}, draw.Over)
+		}
+		return
+	}
 	fc := argbToRGBA(s.fill.Color)
 	fc = r.scaleAlpha(fc)
 	rect := image.Rect(x, y, x+w, y+h)
@@ -4878,6 +4893,30 @@ func (r *renderer) fillEllipseAA(cx, cy, w, h int, c color.RGBA) {
 		}
 	}
 
+}
+
+// fillEllipseImage paints the source image inside the ellipse bounds,
+// sampling per-pixel with nearest-neighbour mapping (the geometry clips the
+// photo to the circle, matching Office's own behaviour for image-filled
+// SmartArt nodes).
+func (r *renderer) fillEllipseImage(x, y, w, h int, src image.Image) {
+	sb := src.Bounds()
+	srcW, srcH := float64(sb.Dx()), float64(sb.Dy())
+	ecx, ecy := float64(w)/2, float64(h)/2
+	erx, ery := float64(w)/2, float64(h)/2
+	for py := 0; py < h; py++ {
+		for px := 0; px < w; px++ {
+			dxn := (float64(px) + 0.5 - ecx) / erx
+			dyn := (float64(py) + 0.5 - ecy) / ery
+			if dxn*dxn+dyn*dyn > 1 {
+				continue
+			}
+			sx := int(float64(px) / float64(w) * srcW)
+			sy := int(float64(py) / float64(h) * srcH)
+			c := src.At(sb.Min.X+sx, sb.Min.Y+sy)
+			r.img.Set(x+px, y+py, drawSrc(color.RGBAModel.Convert(c).(color.RGBA)))
+		}
+	}
 }
 
 func (r *renderer) drawEllipseAA(cx, cy, w, h int, c color.RGBA, lineWidth int) {

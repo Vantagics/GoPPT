@@ -274,6 +274,11 @@ type Fill struct {
 	// Stops carries the full ordered stop list of an N-stop gradient (nil =
 	// legacy fields above). Pos is in 0..100000 gradient-vector units.
 	Stops []GradStop
+	// PictureData/PictureMime carry the blipFill image for FillPicture
+	// fills — the image fills a non-DrawingShape's geometry with a photo
+	// or texture (the smartart-simple deck's ocean-photo circle).
+	PictureData []byte
+	PictureMime string
 	// Path is the gradient-path kind for FillGradientPath fills ("circle",
 	// "rect", "shape"); empty for linear gradients. FillTo holds the
 	// <a:fillToRect> insets and TileTo the <a:tileRect> insets, both as
@@ -324,6 +329,7 @@ const (
 	FillSolid
 	FillGradientLinear
 	FillGradientPath
+	FillPicture
 )
 
 // NewFill creates a new Fill with no fill.

@@ -949,6 +949,8 @@ func (r *PPTXReader) parseSlideXML(decoder *xml.Decoder, slide *Slide, rels []xm
 				}
 			case "sp":
 				if state.inSpTree || state.inGrpSp {
+					pendingBlipFillData = nil
+					pendingBlipFillMime = ""
 					state.inSp = true
 					currentRichText = nil
 					currentPlaceholder = nil
@@ -3684,6 +3686,18 @@ func (r *PPTXReader) parseSlideXML(decoder *xml.Decoder, slide *Slide, rels []xm
 							autoShape.bevelW, autoShape.bevelH = pendingBevelW, pendingBevelH
 							autoShape.prstMaterial = pendingPrstMaterial
 							pendingBevelW, pendingBevelH = 0, 0
+						}
+						// blipFill on an AutoShape: the image fills the shape
+						// geometry (the smartart-simple deck's ocean-photo
+						// circle — Office's cached drawing carries the image
+						// fill, our render was a flat accent circle).
+						if len(pendingBlipFillData) > 0 {
+							autoShape.fill = NewFill()
+							autoShape.fill.Type = FillPicture
+							autoShape.fill.PictureData = pendingBlipFillData
+							autoShape.fill.PictureMime = pendingBlipFillMime
+							pendingBlipFillData = nil
+							pendingBlipFillMime = ""
 						}
 						// Apply deferred arrow ends
 						if pendingHeadEnd != nil {
