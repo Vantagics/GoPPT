@@ -52,6 +52,8 @@ POI 特性文稿），用 cmd/zz_render + cmd/zz_cmp 与 PowerPoint COM 导出
 | r115 | 0fb813c | pList 族（垂直项目符号列表）bullet 列：容器带（45% 高、
   75% 白混）+ 每列空框（68% 白混）+ 三张深色圆角卡（父标题+子项 bullet，autofit
   驱动缩字）；统一 quick style 用 deck 主题 accent1（解析时盖章进模型） | smartart-autofit-sync 31.66→0.66 |
+| r116 | 17e60a4 | list1（垂直盒列表）描边行：全宽细边框白盒（63% 节距）
+  + 左上叠实心圆角卡（69% 宽、5.4% 左移、斜体小标签） | smartart-linear-rule-vert 23.84→3.22 |
 
 PowerPoint 把粘贴的 SmartArt/图表转成的 "Freeform N" 全部走
 `<a:gdLst>` 公式引用（`<a:pt x="f5"/>`），旧解析器 `strconv.ParseInt("f5")`
@@ -81,7 +83,8 @@ alphaModFix 写回（r108）、母版装饰形状写回（r109）。
 
 ## 已知剩余差距
 
-1. **SmartArt composite 几何**：accent-process 10.2% — 重叠位置的
+1. **SmartArt composite 几何**：accent-process 10.2%、org-chart 18.6% —
+   composite 约束求解（org chart 的辅助连接线与多级缩进）。
    composite 约束求解（r110 两盒对已收大头）。
 2. **multi-master writer**：writer 创建一个 master/layout/theme；多母版
    文稿（themes 20.8% gen）的 master 2-7 需写回支持。
