@@ -58,6 +58,9 @@ POI 特性文稿），用 cmd/zz_render + cmd/zz_cmp 与 PowerPoint COM 导出
   rels——rId1 撞车，照片圆读到 layout XML）；hier 族标签改自适应换行缩字 | smartart-simple 13.62→6.69 |
 | r118 | da71341 | hier 引擎：叶列游标加 frame 的 x 偏移（原树整体左移出框）；
   asst 节点左挂独立层（deep 计数加带、子树下移一行、水平肘连主干）；卡宽上限 30% | org-chart 18.55→15.68、org-chart2 19.69→17.64 |
+| r119 | 1e0fa40 | 多图 deck 的 frame 部件隔离：stash 按 dgm:relIds 四元组
+  （dm/lo/qs/cs）过滤（原全 slide 部件入每个 frame，auxPaths 被最后一个 data
+  覆盖——三 frame 全读第三图）；单节点竖带内缩 15%→4% | smartart-font-size 16.80→16.19 |
 
 PowerPoint 把粘贴的 SmartArt/图表转成的 "Freeform N" 全部走
 `<a:gdLst>` 公式引用（`<a:pt x="f5"/>`），旧解析器 `strconv.ParseInt("f5")`
@@ -97,8 +100,8 @@ alphaModFix 写回（r108）、母版装饰形状写回（r109）。
    （slide28 组合页），已转细节样式。
 4. **radial 渐变**：minimal-gradient 9.3% — lumMod 在 gradient stop 的
    schemeClr 上的色彩变换链路。
-5. **LO 布局模板内容**：font-size 的 "smaller" 盒等 LO 布局自带内容
-   v1 不复绘。
+5. **LO 布局模板内容**：font-size 的第二张 auto 卡等 LO 布局自带
+   内容 v1 不复绘（r119 已让各 frame 各读各的 data）。
 6. **ArtisticEffect/pptx2svg**（8-10% 级）：艺术效果与 SVG 图形细节；
    smartart-simple 残差为渐变 stop 的 25% alpha（r100 回退区）。
 7. **文字反锯齿**：结构性差异，不可归零。
