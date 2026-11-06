@@ -49,6 +49,9 @@ POI 特性文稿），用 cmd/zz_render + cmd/zz_cmp 与 PowerPoint COM 导出
   椭圆预设按椭圆轮廓填/描边（渐变经 fillEllipseImage 逐像素椭圆裁剪） | customGeo 7.14→7.01、最差页 15.59→14.73；smartart-simple 16.93→13.62 |
 | r114 | 3e52adb | hList1（水平项目符号列表）横排卡片：仅 hList1 走横向
   （10% 列距 + 8% 上下边距，实测自 fill-color-list 导出），hList2/3 保持竖排 | fill-color-list 30.26→1.86 |
+| r115 | 0fb813c | pList 族（垂直项目符号列表）bullet 列：容器带（45% 高、
+  75% 白混）+ 每列空框（68% 白混）+ 三张深色圆角卡（父标题+子项 bullet，autofit
+  驱动缩字）；统一 quick style 用 deck 主题 accent1（解析时盖章进模型） | smartart-autofit-sync 31.66→0.66 |
 
 PowerPoint 把粘贴的 SmartArt/图表转成的 "Freeform N" 全部走
 `<a:gdLst>` 公式引用（`<a:pt x="f5"/>`），旧解析器 `strconv.ParseInt("f5")`
@@ -80,16 +83,14 @@ alphaModFix 写回（r108）、母版装饰形状写回（r109）。
 
 1. **SmartArt composite 几何**：accent-process 10.2% — 重叠位置的
    composite 约束求解（r110 两盒对已收大头）。
-2. **autofit-sync vert tree 容器配色**：31.7% — office 的淡色圆角容器
-   与 accent 底色头带的视觉差异需精确调参。
-3. **multi-master writer**：writer 创建一个 master/layout/theme；多母版
+2. **multi-master writer**：writer 创建一个 master/layout/theme；多母版
    文稿（themes 20.8% gen）的 master 2-7 需写回支持。
-4. **customGeo 其余页**：最差页自 gdLst/pie/椭圆修复后 14.73%
+3. **customGeo 其余页**：最差页自 gdLst/pie/椭圆修复后 14.73%
    （slide28 组合页），已转细节样式。
-5. **radial 渐变**：minimal-gradient 9.3% — lumMod 在 gradient stop 的
+4. **radial 渐变**：minimal-gradient 9.3% — lumMod 在 gradient stop 的
    schemeClr 上的色彩变换链路。
-6. **LO 布局模板内容**：font-size 的 "smaller" 盒等 LO 布局自带内容
+5. **LO 布局模板内容**：font-size 的 "smaller" 盒等 LO 布局自带内容
    v1 不复绘。
-7. **ArtisticEffect/pptx2svg**（8-10% 级）：艺术效果与 SVG
+6. **ArtisticEffect/pptx2svg**（8-10% 级）：艺术效果与 SVG
    图形细节。
-8. **文字反锯齿**：结构性差异，不可归零。
+7. **文字反锯齿**：结构性差异，不可归零。
