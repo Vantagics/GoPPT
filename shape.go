@@ -207,8 +207,12 @@ type RichTextShape struct {
 	insetBottom int64
 	insetsSet   bool            // true if insets were explicitly parsed from XML
 	customPath  *CustomGeomPath // non-nil for freeform/custGeom shapes
-	headEnd     *LineEnd        // arrow at start of custom path (from <a:ln><a:headEnd>)
-	tailEnd     *LineEnd        // arrow at end of custom path (from <a:ln><a:tailEnd>)
+	// presetShape carries the sp's <a:prstGeom prst>: a text-bearing shape
+	// whose geometry is an ellipse draws inside the ellipse, not its
+	// bounding box.
+	presetShape AutoShapeType
+	headEnd     *LineEnd // arrow at start of custom path (from <a:ln><a:headEnd>)
+	tailEnd     *LineEnd // arrow at end of custom path (from <a:ln><a:tailEnd>)
 	// Top-bevel shading resolved from the shape's effectRef into the theme's
 	// effectStyleLst entry (<a:sp3d><a:bevelT w= h=>), in EMU — same law as
 	// AutoShape's. Zero means no bevel.

@@ -3701,6 +3701,9 @@ func (r *PPTXReader) parseSlideXML(decoder *xml.Decoder, slide *Slide, rels []xm
 							currentPlaceholder.customPath = pendingCustomPath
 							pendingCustomPath = nil
 						}
+						if prstGeom != "" && prstGeom != "rect" {
+							currentPlaceholder.presetShape = AutoShapeType(prstGeom)
+						}
 						if state.inGrpSp && currentGroup != nil {
 							currentGroup.AddShape(currentPlaceholder)
 						} else {
@@ -3847,6 +3850,9 @@ func (r *PPTXReader) parseSlideXML(decoder *xml.Decoder, slide *Slide, rels []xm
 						currentRichText.flipVertical = flipV
 						currentRichText.rotation = shapeRotation
 						currentRichText.textAnchor = textAnchor
+						if prstGeom != "" && prstGeom != "rect" {
+							currentRichText.presetShape = AutoShapeType(prstGeom)
+						}
 						// Apply deferred shape-level fill (spPr comes before txBody)
 						if pendingShapeFill != nil {
 							currentRichText.fill = pendingShapeFill

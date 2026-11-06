@@ -1005,12 +1005,35 @@ func (r *renderer) renderRichText(s *RichTextShape) {
 		}
 		if s.customPath != nil {
 			tr.renderCustomPathFill(s.customPath, s.fill, ox, oy, w, h)
+		} else if s.presetShape == AutoShapeEllipse {
+			// A text-bearing shape's geometry honours the preset: an ellipse
+			// body draws inside the ellipse, not its bounding box (a theme
+			// fill style on it painted a rectangle where Office fans an
+			// ellipse — customGeo's slide41).
+			if s.fill != nil && s.fill.Type != FillNone {
+				if s.fill.Type == FillSolid {
+					fc := argbToRGBA(s.fill.Color)
+					fc = tr.scaleAlpha(fc)
+					tr.fillEllipseAA(ox, oy, w, h, fc)
+				} else {
+					buf := image.NewRGBA(image.Rect(0, 0, maxInt(w, 1), maxInt(h, 1)))
+					br := tr.subRenderer(buf)
+					if s.fill.Type == FillGradientPath {
+						br.fillGradientPath(buf.Bounds(), s.fill)
+					} else {
+						br.fillGradientLinear(buf.Bounds(), s.fill)
+					}
+					tr.fillEllipseImage(ox, oy, w, h, buf)
+				}
+			}
 		} else {
 			tr.renderFill(s.fill, rect)
 		}
 		if s.border != nil && s.border.Style != BorderNone {
 			pw := maxInt(int(float64(maxInt(s.border.Width, 1))*12700.0*tr.scaleX), 1)
-			if s.customPath != nil {
+			if s.presetShape == AutoShapeEllipse {
+				tr.drawEllipseAA(ox, oy, w, h, argbToRGBA(s.border.Color), pw)
+			} else if s.customPath != nil {
 				// Draw border along the custom geometry path
 				pts := pathPts
 				bc := argbToRGBA(s.border.Color)
@@ -2139,7 +2162,18 @@ func (r *renderer) renderAutoShapeFill(s *AutoShape, x, y, w, h int) {
 		if s.fill.Type == FillSolid {
 			r.fillEllipseAA(x, y, w, h, fc)
 		} else {
-			r.fillGradientLinear(rect, s.fill)
+			// A gradient fills the ellipse silhouette, not its bounding
+			// box: a theme fill style (fillRef idx=2) on an ellipse drew
+			// the box and printed a rectangle where Office fans an
+			// ellipse (customGeo's slide41).
+			buf := image.NewRGBA(image.Rect(0, 0, maxInt(w, 1), maxInt(h, 1)))
+			br := r.subRenderer(buf)
+			if s.fill.Type == FillGradientPath {
+				br.fillGradientPath(buf.Bounds(), s.fill)
+			} else {
+				br.fillGradientLinear(buf.Bounds(), s.fill)
+			}
+			r.fillEllipseImage(x, y, w, h, buf)
 		}
 	case AutoShapeRoundedRect:
 		radius := roundedRectRadius(w, h, s.adjustValues)
