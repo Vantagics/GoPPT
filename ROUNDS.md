@@ -43,8 +43,10 @@ POI 特性文稿），用 cmd/zz_render + cmd/zz_cmp 与 PowerPoint COM 导出
 | r110 | f9cda61 | accent-process 族 header+body 两盒对 | smartart-accent-process 31.8→10.2% |
 | r111 | bea24bb | **custGeom gdLst guide 公式求值**（val/\*/+-/?:/pin/min/max/abs/sqrt/at2/sin/cos/tan/ss；
   path 无 w/h 时回退形状盒）+ RichText 自定义几何的阴影像素轮廓（noFill 走描边影子、填充走多边形影子） | customGeo 8.37→8.02、最差页 22.66→17.86；ooxtheme 14.94→5.75（母版楔形装饰） |
-| r112 | 本轮 | **pie 预设几何**（ Centre 锚定楔形，adj1/adj2 起止角 + 21600000° 环绕；
+| r112 | 7108bfc | **pie 预设几何**（Centre 锚定楔形，adj1/adj2 起止角 + 21600000° 环绕；
   fill/扇形轮廓阴影/border 两半径+弧三处接线） | customGeo 8.02→7.14、最差页 17.86→15.59（三扇饼页） |
+| r113 | d0838bc | 文本形状恢复 prstGeom：RichTextShape/PlaceholderShape 带 presetShape，
+  椭圆预设按椭圆轮廓填/描边（渐变经 fillEllipseImage 逐像素椭圆裁剪） | customGeo 7.14→7.01、最差页 15.59→14.73；smartart-simple 16.93→13.62 |
 
 PowerPoint 把粘贴的 SmartArt/图表转成的 "Freeform N" 全部走
 `<a:gdLst>` 公式引用（`<a:pt x="f5"/>`），旧解析器 `strconv.ParseInt("f5")`
@@ -80,8 +82,8 @@ alphaModFix 写回（r108）、母版装饰形状写回（r109）。
    与 accent 底色头带的视觉差异需精确调参。
 3. **multi-master writer**：writer 创建一个 master/layout/theme；多母版
    文稿（themes 20.8% gen）的 master 2-7 需写回支持。
-4. **customGeo 其余页**：最差页自 gdLst/pie 修复后还有 15.59%
-   （slide41 spark 表页），已转样式引用细节。
+4. **customGeo 其余页**：最差页自 gdLst/pie/椭圆修复后 14.73%
+   （slide28 组合页），已转细节样式。
 5. **radial 渐变**：minimal-gradient 9.3% — lumMod 在 gradient stop 的
    schemeClr 上的色彩变换链路。
 6. **SmartArt 竖排列表布局**：fill-color-list 30.26%（横带 vs Office 竖
