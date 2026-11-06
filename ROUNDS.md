@@ -63,6 +63,8 @@ POI 特性文稿），用 cmd/zz_render + cmd/zz_cmp 与 PowerPoint COM 导出
   覆盖——三 frame 全读第三图）；单节点竖带内缩 15%→4% | smartart-font-size 16.80→16.19 |
 | r120 | 9d20ea1 | hProcess3 箭头：凹口轮廓（头部背上凸 18%、尖点 72% 高、
   体右下角收 92.5%）+ 打包进 frame 的 19%..63% 段；标签按体段均布 | smartart-linear-rule 11.25→2.52 |
+| r121 | a39abd8 | snake 的 grDir="tR" 分支：data 无 dir 属性且 layout 带 tR 支
+  时右到左镜像列序，网格缩至 72% 帧宽居中，尾盒按镜像前列号居中 | rightoleft 10.47→2.62、font-size 16.19→14.97 |
 
 PowerPoint 把粘贴的 SmartArt/图表转成的 "Freeform N" 全部走
 `<a:gdLst>` 公式引用（`<a:pt x="f5"/>`），旧解析器 `strconv.ParseInt("f5")`
