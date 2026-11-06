@@ -4178,7 +4178,7 @@ func (r *PPTXReader) parseSlideXML(decoder *xml.Decoder, slide *Slide, rels []xm
 							// filed away: the writer puts the graphicFrame back
 							// with them, so a round trip keeps the diagram a
 							// diagram instead of flattening it to a group.
-							r.stashDiagramParts(zr, slidePath, rels, dg, nil, frameDataRelID, "")
+							r.stashDiagramParts(zr, slidePath, rels, dg, nil, frameDataRelID, "", pres)
 							dg.name = shapeName
 							if dg.name == "" {
 								dg.name = "Diagram"
@@ -4214,7 +4214,7 @@ func (r *PPTXReader) parseSlideXML(decoder *xml.Decoder, slide *Slide, rels []xm
 						// writer puts the graphicFrame back verbatim, so the
 						// diagram is preserved even though nothing drew it.
 						if isDiagramGraphicData(graphicDataURI) {
-							r.stashDiagramParts(zr, slidePath, rels, nil, ph, frameDataRelID, "")
+							r.stashDiagramParts(zr, slidePath, rels, nil, ph, frameDataRelID, "", pres)
 						}
 						ph.name = shapeName
 						ph.hidden = shapeHidden

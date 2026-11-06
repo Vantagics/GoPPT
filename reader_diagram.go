@@ -71,7 +71,7 @@ type diagramPart struct {
 // relationship the cached drawing was read through — the numbering rule that
 // pairs data and drawing parts points at the same files here. Only readable
 // parts are stashed; a part missing from the source cannot be written back.
-func (r *PPTXReader) stashDiagramParts(zr *zip.Reader, slidePath string, rels []xmlRelForRead, dg *GroupShape, holder *UnsupportedShape, dataRelID, drawingRelID string) {
+func (r *PPTXReader) stashDiagramParts(zr *zip.Reader, slidePath string, rels []xmlRelForRead, dg *GroupShape, holder *UnsupportedShape, dataRelID, drawingRelID string, pres *Presentation) {
 	if dg == nil && holder == nil {
 		return
 	}

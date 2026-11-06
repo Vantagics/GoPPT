@@ -106,6 +106,10 @@ func (r *renderer) renderSmartArt(model *SmartArtModel, x, y, w, h int) {
 		}
 		return
 	}
+	if model.BulletCols {
+		r.smartArtBulletCols(nodes, model.Colorful, model.AccentARGB, face, x, y, w, h)
+		return
+	}
 	switch model.Algo {
 	case "cycle":
 		r.smartArtCycle(nodes, model.Colorful, model.Process, face, x, y, w, h)
@@ -507,6 +511,115 @@ func (r *renderer) smartArtVertTree(nodes []*SmartArtNode, colorful, twoTone boo
 			curY += float64(kidH)
 		}
 	}
+}
+
+// smartArtBulletCols draws the pList family (vertical bullet list): a tinted
+// container band across the top carrying one empty rounded box per column,
+// then the columns themselves as tall rounded cards below, each holding its
+// node label over a bulleted child list. Geometry and colours are measured
+// off the autofit-sync Office export: the band spans the full frame at 45%
+// of its height, the boxes and cards share the column x-spans (29% of the
+// frame wide with 3% gutters and 3% side insets), the cards run from the
+// band's bottom edge down to the frame bottom, and the whole family wears
+// one accent — the container near-white, the boxes a step darker, the cards
+// the raw accent.
+func (r *renderer) smartArtBulletCols(nodes []*SmartArtNode, colorful bool, accentARGB string, face font.Face, x, y, w, h int) {
+	n := len(nodes)
+	if n == 0 || w < 40 || h < 40 {
+		return
+	}
+	white := color.RGBA{R: 255, G: 255, B: 255, A: 255}
+	slot := smartArtSlot(0, colorful)
+	if accentARGB != "" {
+		// A uniform quick style wears the deck theme's own accent1.
+		slot = argbToRGBA(Color{ARGB: accentARGB})
+	}
+	// The band's tint runs ~75% of the way to white; the empty boxes inside
+	// sit a step darker at ~68% (measured off the autofit-sync export).
+	band := smartArtBodyMix(slot, 0.75)
+	boxFill := smartArtBodyMix(slot, 0.68)
+	bandH := h * 45 / 100
+	r.fillRoundedRect(x, y, w, bandH, h*4/100, band)
+	// Column spans: 3% side insets, 3% gutters.
+	inset := w * 3 / 100
+	gutter := w * 3 / 100
+	colW := (w - 2*inset - (n-1)*gutter) / n
+	if colW < 8 {
+		return
+	}
+	boxInset := h * 63 / 1000
+	boxTop := y + boxInset
+	boxH := bandH - 2*boxInset
+	radius := h * 15 / 1000
+	for i := range nodes {
+		bx := x + inset + i*(colW+gutter)
+		r.fillRoundedRect(bx, boxTop, colW, boxH, radius, boxFill)
+	}
+	// The cards hang right below the band and run to the frame bottom.
+	cardY := y + bandH + 2
+	cardH := y + h - cardY
+	textX := w * 25 / 1000 // the label/bullet inset inside a card, in px
+	for i, node := range nodes {
+		bx := x + inset + i*(colW+gutter)
+		r.fillRoundedRect(bx, cardY, colW, cardH, radius, slot)
+		r.smartArtBulletText(node, face, white, bx+textX, cardY+textX, colW-2*textX, cardH-2*textX)
+	}
+}
+
+// smartArtBulletText paints one card's content: the node label left-aligned
+// near the top, then one bullet line per child, wrapping each to the card
+// width and shrinking until every child fits (the autofit the deck is named
+// for).
+func (r *renderer) smartArtBulletText(node *SmartArtNode, face font.Face, c color.RGBA, tx, ty, tw, th int) {
+	if tw < 20 || th < 20 {
+		return
+	}
+	children := node.Children
+	label := node.Text
+	// Collect the bullet lines once per size: label first, then "• child".
+	lines := func(f font.Face, lw int) []string {
+		out := smartArtWrap(label, f, lw)
+		for _, kid := range children {
+			out = append(out, smartArtWrap("• "+kid.Text, f, lw)...)
+		}
+		return out
+	}
+	face, all := func() (font.Face, []string) {
+		for size := 14; size >= 8; size -= 2 {
+			f := NewFont()
+			f.Size = size
+			fc := r.getFace(f)
+			if ls := lines(fc, tw); len(ls) > 0 {
+				m := fc.Metrics()
+				if len(ls)*int((m.Ascent+m.Descent).Ceil()) <= th {
+					return fc, ls
+				}
+			}
+		}
+		f := NewFont()
+		f.Size = 8
+		return r.getFace(f), lines(r.getFace(f), tw)
+	}()
+	m := face.Metrics()
+	thh := int((m.Ascent + m.Descent).Ceil())
+	y := ty
+	for _, line := range all {
+		if y+thh > ty+th {
+			break
+		}
+		d := &font.Drawer{Dst: r.img, Src: image.NewUniform(drawSrc(c)), Face: face, Dot: fixed.P(tx, y+m.Ascent.Ceil())}
+		d.DrawString(line)
+		y += thh
+	}
+}
+
+// smartArtBodyMix blends an accent toward white by the given weight — the
+// family's container tints.
+func smartArtBodyMix(slot color.RGBA, weight float64) color.RGBA {
+	mix := func(v uint8) uint8 {
+		return uint8(float64(v)*(1-weight) + 255*weight)
+	}
+	return color.RGBA{R: mix(slot.R), G: mix(slot.G), B: mix(slot.B), A: 255}
 }
 
 // smartArtProcessArrow draws the hProcess3 family's single arrow shape:

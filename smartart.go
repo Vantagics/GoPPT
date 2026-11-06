@@ -42,6 +42,16 @@ type SmartArtModel struct {
 	// sit side by side with generous gutters inside vertical margins —
 	// measured off the fill-color-list Office export.
 	CardList bool
+	// AccentARGB carries the deck theme's resolved accent1 for the uniform
+	// quick styles (csCatId "accent1"), which wear the theme colour rather
+	// than the engine palette's default.
+	AccentARGB string
+	// BulletCols marks loTypeId "pList*" (the vertical bullet list
+	// family): the parents sit side by side as tall rounded cards, each
+	// holding its label over a bulleted child list, with the family's
+	// decorative container band (a tinted strip carrying one empty box
+	// per column) above — measured off the autofit-sync Office export.
+	BulletCols bool
 	// ProcessTwoBox marks loTypeId "process*" (the accent-process family):
 	// each node draws as a header box (blue, top-left) with a body box
 	// (pale, larger, bottom-right, overlapping) — the office layout.
@@ -87,7 +97,8 @@ func parseSmartArtModel(data []byte) (*SmartArtModel, error) {
 	// The other hList variants (hList2/3 = vertical box list, the
 	// table-list deck) stay vertical.
 	model.CardList = strings.Contains(loType, "hList1")
-	model.Vert = strings.Contains(loCat, "list") && !model.CardList
+	model.BulletCols = strings.HasPrefix(loType, "pList")
+	model.Vert = strings.Contains(loCat, "list") && !model.CardList && !model.BulletCols
 	return model, nil
 }
 
