@@ -56,6 +56,8 @@ POI 特性文稿），用 cmd/zz_render + cmd/zz_cmp 与 PowerPoint COM 导出
   + 左上叠实心圆角卡（69% 宽、5.4% 左移、斜体小标签） | smartart-linear-rule-vert 23.84→3.22 |
 | r117 | f0aaf55 | 缓存 drawing 的 blipFill 按drawingN.xml.rels 解析（原误用 slide
   rels——rId1 撞车，照片圆读到 layout XML）；hier 族标签改自适应换行缩字 | smartart-simple 13.62→6.69 |
+| r118 | da71341 | hier 引擎：叶列游标加 frame 的 x 偏移（原树整体左移出框）；
+  asst 节点左挂独立层（deep 计数加带、子树下移一行、水平肘连主干）；卡宽上限 30% | org-chart 18.55→15.68、org-chart2 19.69→17.64 |
 
 PowerPoint 把粘贴的 SmartArt/图表转成的 "Freeform N" 全部走
 `<a:gdLst>` 公式引用（`<a:pt x="f5"/>`），旧解析器 `strconv.ParseInt("f5")`
@@ -85,8 +87,9 @@ alphaModFix 写回（r108）、母版装饰形状写回（r109）。
 
 ## 已知剩余差距
 
-1. **SmartArt composite 几何**：accent-process 10.2%、org-chart 18.6% —
-   composite 约束求解（org chart 的辅助连接线与多级缩进）。
+1. **SmartArt composite 几何**：accent-process 10.2%、org-chart 15.7% —
+   composite 约束求解（office 的 composite 会溢出声明 frame 重新排布，
+   v1 引擎按 frame 网格布局）。
    composite 约束求解（r110 两盒对已收大头）。
 2. **multi-master writer**：writer 创建一个 master/layout/theme；多母版
    文稿（themes 20.8% gen）的 master 2-7 需写回支持。
