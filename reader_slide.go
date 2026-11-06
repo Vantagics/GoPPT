@@ -766,6 +766,10 @@ func (r *PPTXReader) parseSlideXML(decoder *xml.Decoder, slide *Slide, rels []xm
 	// read. It classifies the frame when it turns out to be neither a table nor
 	// a chart, so the stand-in can name what it replaced.
 	var graphicDataURI string
+	// frameDiagramRelIDs collects the four dgm:relIds relationship ids of the
+	// diagram graphicFrame being read; only those parts belong to this
+	// frame's stash.
+	frameDiagramRelIDs := map[string]bool{}
 	// frameDataRelID is the <dgm:relIds r:dm> of the diagram graphicFrame being
 	// read: the relationship id of the diagram's data part. A slide can carry
 	// several diagrams, and the cached drawingN.xml pairs with its frame
@@ -1042,6 +1046,7 @@ func (r *PPTXReader) parseSlideXML(decoder *xml.Decoder, slide *Slide, rels []xm
 					oleSPID, oleProgID, oleRelID = "", "", ""
 					graphicDataURI = ""
 					frameDataRelID = ""
+					frameDiagramRelIDs = map[string]bool{}
 				}
 			case "graphicData":
 				if state.inGraphicFrame {
@@ -1055,11 +1060,16 @@ func (r *PPTXReader) parseSlideXML(decoder *xml.Decoder, slide *Slide, rels []xm
 			case "relIds":
 				// <dgm:relIds r:dm r:lo r:qs r:cs> inside a diagram
 				// graphicData: r:dm names the data part that pairs this
-				// frame with its cached drawingN.xml.
+				// frame with its cached drawingN.xml, and the other three
+				// name the frame's own layout/quickStyle/colors parts.
 				if state.inGraphicFrame {
 					for _, attr := range t.Attr {
-						if attr.Name.Local == "dm" {
+						switch attr.Name.Local {
+						case "dm":
 							frameDataRelID = attr.Value
+							frameDiagramRelIDs[attr.Value] = true
+						case "lo", "qs", "cs":
+							frameDiagramRelIDs[attr.Value] = true
 						}
 					}
 				}
@@ -4178,7 +4188,7 @@ func (r *PPTXReader) parseSlideXML(decoder *xml.Decoder, slide *Slide, rels []xm
 							// filed away: the writer puts the graphicFrame back
 							// with them, so a round trip keeps the diagram a
 							// diagram instead of flattening it to a group.
-							r.stashDiagramParts(zr, slidePath, rels, dg, nil, frameDataRelID, "", pres)
+							r.stashDiagramParts(zr, slidePath, rels, dg, nil, frameDataRelID, "", pres, frameDiagramRelIDs)
 							dg.name = shapeName
 							if dg.name == "" {
 								dg.name = "Diagram"
@@ -4214,7 +4224,7 @@ func (r *PPTXReader) parseSlideXML(decoder *xml.Decoder, slide *Slide, rels []xm
 						// writer puts the graphicFrame back verbatim, so the
 						// diagram is preserved even though nothing drew it.
 						if isDiagramGraphicData(graphicDataURI) {
-							r.stashDiagramParts(zr, slidePath, rels, nil, ph, frameDataRelID, "", pres)
+							r.stashDiagramParts(zr, slidePath, rels, nil, ph, frameDataRelID, "", pres, frameDiagramRelIDs)
 						}
 						ph.name = shapeName
 						ph.hidden = shapeHidden

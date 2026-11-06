@@ -232,14 +232,20 @@ func (r *renderer) smartArtLin(nodes []*SmartArtNode, colorful, twoTone, vert, c
 	}
 	if vert {
 		// loCatId "list" without hierarchy: nodes flow top-to-bottom, full
-		// width each, with a vertical gap (the linear-rule-vert stack).
+		// width each, with a vertical gap (the linear-rule-vert stack). A
+		// single node fills its frame — the LO "default" family's lone card
+		// spans ~93% of it, where a stacked list keeps 15% breathing room.
 		ch := h / n
+		insetPct := 15
+		if n == 1 {
+			insetPct = 4
+		}
 		for i, node := range nodes {
 			rect := image.Rect(x, y+i*ch, x+w, y+(i+1)*ch)
 			if i == n-1 {
 				rect.Max.Y = y + h
 			}
-			inset := ch * 15 / 100
+			inset := ch * insetPct / 100
 			rect.Min.Y += inset
 			rect.Max.Y -= inset
 			r.smartArtNode(node, i, colorful, twoTone, face, rect)

@@ -71,7 +71,7 @@ type diagramPart struct {
 // relationship the cached drawing was read through — the numbering rule that
 // pairs data and drawing parts points at the same files here. Only readable
 // parts are stashed; a part missing from the source cannot be written back.
-func (r *PPTXReader) stashDiagramParts(zr *zip.Reader, slidePath string, rels []xmlRelForRead, dg *GroupShape, holder *UnsupportedShape, dataRelID, drawingRelID string, pres *Presentation) {
+func (r *PPTXReader) stashDiagramParts(zr *zip.Reader, slidePath string, rels []xmlRelForRead, dg *GroupShape, holder *UnsupportedShape, dataRelID, drawingRelID string, pres *Presentation, frameRelIDs map[string]bool) {
 	if dg == nil && holder == nil {
 		return
 	}
@@ -86,6 +86,13 @@ func (r *PPTXReader) stashDiagramParts(zr *zip.Reader, slidePath string, rels []
 	for _, rel := range rels {
 		ct, slot, ok := auxDiagramContentType(rel.Type)
 		if !ok {
+			continue
+		}
+		// A frame's stash carries only the parts its own dgm:relIds named:
+		// a slide with several diagrams numbered every part in one rels
+		// table, and taking them all left every frame's auxPaths pointing at
+		// the last data part (three frames all read the third diagram).
+		if frameRelIDs != nil && !frameRelIDs[rel.ID] {
 			continue
 		}
 		path := resolve(rel.Target)
