@@ -54,6 +54,8 @@ POI 特性文稿），用 cmd/zz_render + cmd/zz_cmp 与 PowerPoint COM 导出
   驱动缩字）；统一 quick style 用 deck 主题 accent1（解析时盖章进模型） | smartart-autofit-sync 31.66→0.66 |
 | r116 | 17e60a4 | list1（垂直盒列表）描边行：全宽细边框白盒（63% 节距）
   + 左上叠实心圆角卡（69% 宽、5.4% 左移、斜体小标签） | smartart-linear-rule-vert 23.84→3.22 |
+| r117 | f0aaf55 | 缓存 drawing 的 blipFill 按drawingN.xml.rels 解析（原误用 slide
+  rels——rId1 撞车，照片圆读到 layout XML）；hier 族标签改自适应换行缩字 | smartart-simple 13.62→6.69 |
 
 PowerPoint 把粘贴的 SmartArt/图表转成的 "Freeform N" 全部走
 `<a:gdLst>` 公式引用（`<a:pt x="f5"/>`），旧解析器 `strconv.ParseInt("f5")`
@@ -94,6 +96,6 @@ alphaModFix 写回（r108）、母版装饰形状写回（r109）。
    schemeClr 上的色彩变换链路。
 5. **LO 布局模板内容**：font-size 的 "smaller" 盒等 LO 布局自带内容
    v1 不复绘。
-6. **ArtisticEffect/pptx2svg**（8-10% 级）：艺术效果与 SVG
-   图形细节。
+6. **ArtisticEffect/pptx2svg**（8-10% 级）：艺术效果与 SVG 图形细节；
+   smartart-simple 残差为渐变 stop 的 25% alpha（r100 回退区）。
 7. **文字反锯齿**：结构性差异，不可归零。
