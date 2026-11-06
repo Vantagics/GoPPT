@@ -61,6 +61,8 @@ POI 特性文稿），用 cmd/zz_render + cmd/zz_cmp 与 PowerPoint COM 导出
 | r119 | 1e0fa40 | 多图 deck 的 frame 部件隔离：stash 按 dgm:relIds 四元组
   （dm/lo/qs/cs）过滤（原全 slide 部件入每个 frame，auxPaths 被最后一个 data
   覆盖——三 frame 全读第三图）；单节点竖带内缩 15%→4% | smartart-font-size 16.80→16.19 |
+| r120 | 9d20ea1 | hProcess3 箭头：凹口轮廓（头部背上凸 18%、尖点 72% 高、
+  体右下角收 92.5%）+ 打包进 frame 的 19%..63% 段；标签按体段均布 | smartart-linear-rule 11.25→2.52 |
 
 PowerPoint 把粘贴的 SmartArt/图表转成的 "Freeform N" 全部走
 `<a:gdLst>` 公式引用（`<a:pt x="f5"/>`），旧解析器 `strconv.ParseInt("f5")`
