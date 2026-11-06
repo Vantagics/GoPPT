@@ -88,10 +88,8 @@ alphaModFix 写回（r108）、母版装饰形状写回（r109）。
    （slide28 组合页），已转细节样式。
 5. **radial 渐变**：minimal-gradient 9.3% — lumMod 在 gradient stop 的
    schemeClr 上的色彩变换链路。
-6. **autofit-sync vert tree 容器配色**：31.7% — office 的淡色圆角容器
-   与 accent 底色头带的视觉差异需精确调参。
-7. **LO 布局模板内容**：font-size 的 "smaller" 盒等 LO 布局自带内容
+6. **LO 布局模板内容**：font-size 的 "smaller" 盒等 LO 布局自带内容
    v1 不复绘。
-8. **ArtisticEffect/pptx2svg**（8-10% 级）：艺术效果与 SVG
+7. **ArtisticEffect/pptx2svg**（8-10% 级）：艺术效果与 SVG
    图形细节。
 9. **文字反锯齿**：结构性差异，不可归零。
