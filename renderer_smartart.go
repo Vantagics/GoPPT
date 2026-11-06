@@ -121,7 +121,7 @@ func (r *renderer) renderSmartArt(model *SmartArtModel, x, y, w, h int) {
 	case "hier":
 		r.smartArtHier(nodes, model.Colorful, model.Process, face, x, y, w, h)
 	case "snake":
-		r.smartArtSnake(nodes, model.Colorful, model.Process, face, x, y, w, h)
+		r.smartArtSnake(nodes, model.Colorful, model.Process, model.RTLSnake, face, x, y, w, h)
 	default:
 		r.smartArtLin(nodes, model.Colorful, model.Process, model.Vert, model.CardList, face, x, y, w, h)
 	}
@@ -284,7 +284,7 @@ func (r *renderer) smartArtLin(nodes []*SmartArtNode, colorful, twoTone, vert, c
 // smartArtSnake lays the children in a grid: one entry per row while there
 // are two or fewer (the font-size deck's stacked boxes), otherwise two per
 // row (the block-diagram wrap the rightoleft deck's export shows).
-func (r *renderer) smartArtSnake(nodes []*SmartArtNode, colorful, twoTone bool, face font.Face, x, y, w, h int) {
+func (r *renderer) smartArtSnake(nodes []*SmartArtNode, colorful, twoTone, rtl bool, face font.Face, x, y, w, h int) {
 	nodes = smartArtLeaves(nodes)
 	n := len(nodes)
 	if n == 0 || w < 1 || h < 1 {
@@ -294,6 +294,13 @@ func (r *renderer) smartArtSnake(nodes []*SmartArtNode, colorful, twoTone bool, 
 	if n <= 2 {
 		cols = 1
 	}
+	// The RTL grid centres at ~72% of the frame width, margins and all —
+	// the rightoleft export keeps ~14% of the frame free on each side.
+	if rtl {
+		inset := int(float64(w) * 0.14)
+		x += inset
+		w -= 2 * inset
+	}
 	rows := (n + cols - 1) / cols
 	cw := w / cols
 	ch := h / rows
@@ -302,6 +309,10 @@ func (r *renderer) smartArtSnake(nodes []*SmartArtNode, colorful, twoTone bool, 
 	for i, node := range nodes {
 		row := i / cols
 		col := i % cols
+		if rtl {
+			// The grDir="tR" branch flows right to left: mirror the column.
+			col = cols - 1 - col
+		}
 		rect := image.Rect(x+col*cw, y+row*ch, x+(col+1)*cw, y+(row+1)*ch)
 		if col < cols-1 {
 			rect.Max.X -= gx
@@ -315,9 +326,10 @@ func (r *renderer) smartArtSnake(nodes []*SmartArtNode, colorful, twoTone bool, 
 		if i > 0 && row > 0 {
 			rect.Min.Y += gy / 2
 		}
-		// centre the odd-count last row
-		if i == n-1 && col == 0 && cols > 1 {
-			centre := (x + x + w) / 2
+		// centre the odd-count last row (the pre-mirror column index tells
+		// whether the row started at the flow edge)
+		if i == n-1 && i%cols == 0 && cols > 1 {
+			centre := x + w/2
 			off := centre - (rect.Min.X+rect.Max.X)/2
 			rect = rect.Add(image.Pt(off, 0))
 		}

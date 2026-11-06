@@ -166,6 +166,15 @@ func (r *PPTXReader) stashDiagramParts(zr *zip.Reader, slidePath string, rels []
 						if alg := firstSmartArtAlg(layoutBytes.data); alg != "" {
 							model.Algo = alg
 						}
+						// The snake layouts branch on the "dir" variable:
+						// dir="norm" flows top-left, anything else — the
+						// LO-authored decks set nothing — flows top-right,
+						// i.e. right to left. A data part that names its own
+						// dir keeps its say.
+						if !bytes.Contains(dataBytes.data, []byte(`dir=`)) &&
+							bytes.Contains(layoutBytes.data, []byte(`val="tR"`)) {
+							model.RTLSnake = true
+						}
 					}
 				}
 				holder.model = model

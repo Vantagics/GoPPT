@@ -52,6 +52,9 @@ type SmartArtModel struct {
 	// decorative container band (a tinted strip carrying one empty box
 	// per column) above — measured off the autofit-sync Office export.
 	BulletCols bool
+	// RTLSnake marks a snake layout whose live branch carries grDir="tR":
+	// the grid fills right to left (the rightoleftblockdiagram deck).
+	RTLSnake bool
 	// VertBoxes marks loTypeId "list1" (the vertical box list): each node
 	// draws as a full-width thin-outlined white box with a solid rounded
 	// card overlapping its upper-left — the linear-rule-vert look,
