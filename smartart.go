@@ -52,6 +52,11 @@ type SmartArtModel struct {
 	// decorative container band (a tinted strip carrying one empty box
 	// per column) above — measured off the autofit-sync Office export.
 	BulletCols bool
+	// VertBoxes marks loTypeId "list1" (the vertical box list): each node
+	// draws as a full-width thin-outlined white box with a solid rounded
+	// card overlapping its upper-left — the linear-rule-vert look,
+	// measured off that deck's Office export.
+	VertBoxes bool
 	// ProcessTwoBox marks loTypeId "process*" (the accent-process family):
 	// each node draws as a header box (blue, top-left) with a body box
 	// (pale, larger, bottom-right, overlapping) — the office layout.
@@ -98,7 +103,8 @@ func parseSmartArtModel(data []byte) (*SmartArtModel, error) {
 	// table-list deck) stay vertical.
 	model.CardList = strings.Contains(loType, "hList1")
 	model.BulletCols = strings.HasPrefix(loType, "pList")
-	model.Vert = strings.Contains(loCat, "list") && !model.CardList && !model.BulletCols
+	model.VertBoxes = strings.Contains(loType, "list1")
+	model.Vert = strings.Contains(loCat, "list") && !model.CardList && !model.BulletCols && !model.VertBoxes
 	return model, nil
 }
 

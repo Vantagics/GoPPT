@@ -1,6 +1,7 @@
 package gopresentation
 
 import (
+	"fmt"
 	"image"
 	"image/color"
 	"math"
@@ -108,6 +109,10 @@ func (r *renderer) renderSmartArt(model *SmartArtModel, x, y, w, h int) {
 	}
 	if model.BulletCols {
 		r.smartArtBulletCols(nodes, model.Colorful, model.AccentARGB, face, x, y, w, h)
+		return
+	}
+	if model.VertBoxes {
+		r.smartArtVertBoxes(nodes, model.Colorful, model.AccentARGB, face, x, y, w, h)
 		return
 	}
 	switch model.Algo {
@@ -611,6 +616,66 @@ func (r *renderer) smartArtBulletText(node *SmartArtNode, face font.Face, c colo
 		d.DrawString(line)
 		y += thh
 	}
+}
+
+// smartArtVertBoxes draws the list1 family (vertical box list): each row is
+// a full-width thin-outlined white box with a solid rounded card overlapping
+// its upper-left, the node label sitting small at the card's top-left.
+// Geometry measured off the linear-rule-vert Office export (1600px wide, one
+// 776px frame of three rows): the outlined box spans the whole frame at 63%
+// of a row's pitch, starting 35% in; the card runs from the row top to 73%
+// of the pitch at 69% of the frame width, offset 5.4% from the left; the
+// card corners round at ~1.4% of the frame width.
+func (r *renderer) smartArtVertBoxes(nodes []*SmartArtNode, colorful bool, accentARGB string, face font.Face, x, y, w, h int) {
+	nodes = smartArtLeaves(nodes)
+	n := len(nodes)
+	if n == 0 || w < 40 || h < 40 {
+		return
+	}
+	slot := smartArtSlot(0, colorful)
+	if accentARGB != "" {
+		slot = argbToRGBA(Color{ARGB: accentARGB})
+	}
+	white := color.RGBA{R: 255, G: 255, B: 255, A: 255}
+	pitch := float64(h) / float64(n)
+	outlineW := maxInt(int(float64(w)*0.003), 2)
+	cardX := x + int(float64(w)*0.054)
+	cardW := int(float64(w) * 0.694)
+	radius := int(float64(w) * 0.014)
+	// The label rides the card's top-left, sized like the export's ~11pt
+	// italic on a 188px-tall card.
+	lf := NewFont()
+	lf.Size = 11
+	lf.SetItalic(true)
+	labelFace := r.getFace(lf)
+	m := labelFace.Metrics()
+	lh := int((m.Ascent + m.Descent).Ceil())
+	for i, node := range nodes {
+		rowY := float64(y) + float64(i)*pitch
+		// The outlined box sits behind, lower than the card.
+		obY := int(rowY + pitch*0.351)
+		obH := int(pitch * 0.633)
+		if obY+obH > y+h {
+			obH = y + h - obY
+		}
+		r.fillRectFast(image.Rect(x, obY, x+w, obY+obH), white)
+		r.drawRectBorder(image.Rect(x, obY, x+w, obY+obH), argbToRGBA(Color{ARGB: hexARGB(slot)}), outlineW, BorderSolid)
+		// The solid card overlaps the box's top edge.
+		cY := int(rowY)
+		cH := int(pitch * 0.726)
+		r.fillRoundedRect(cardX, cY, cardW, cH, radius, slot)
+		// Label at the card's top-left.
+		tx := cardX + int(float64(w)*0.025)
+		ty := cY + int(float64(cH)*0.12)
+		d := &font.Drawer{Dst: r.img, Src: image.NewUniform(drawSrc(white)), Face: labelFace, Dot: fixed.P(tx, ty+lh)}
+		d.DrawString(node.Text)
+	}
+}
+
+// hexARGB renders an RGBA back into the ARGB hex string the colour helpers
+// take.
+func hexARGB(c color.RGBA) string {
+	return fmt.Sprintf("%02X%02X%02X%02X", c.A, c.R, c.G, c.B)
 }
 
 // smartArtBodyMix blends an accent toward white by the given weight — the
