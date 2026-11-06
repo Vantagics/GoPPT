@@ -114,7 +114,7 @@ func (r *renderer) renderSmartArt(model *SmartArtModel, x, y, w, h int) {
 	case "snake":
 		r.smartArtSnake(nodes, model.Colorful, model.Process, face, x, y, w, h)
 	default:
-		r.smartArtLin(nodes, model.Colorful, model.Process, model.Vert, face, x, y, w, h)
+		r.smartArtLin(nodes, model.Colorful, model.Process, model.Vert, model.CardList, face, x, y, w, h)
 	}
 }
 
@@ -199,7 +199,7 @@ func smartArtLeaves(nodes []*SmartArtNode) []*SmartArtNode {
 }
 
 // smartArtLin lays the children across the frame, each full height.
-func (r *renderer) smartArtLin(nodes []*SmartArtNode, colorful, twoTone, vert bool, face font.Face, x, y, w, h int) {
+func (r *renderer) smartArtLin(nodes []*SmartArtNode, colorful, twoTone, vert, cardRow bool, face font.Face, x, y, w, h int) {
 	// loCatId "list" with a hierarchy: the vert tree draws parent headers
 	// over child rows — the table-list deck's Parent/Child 1/Child 2 look.
 	// This check runs BEFORE leaf flattening so the hierarchy survives.
@@ -242,8 +242,15 @@ func (r *renderer) smartArtLin(nodes []*SmartArtNode, colorful, twoTone, vert bo
 	// fill-color-list export keeps ~4% of each column as breathing room —
 	// and the header band reads at a fifth of the column, not a third.
 	gap := cw * 4 / 100
+	// The hList cards float inside the frame: ~10% gutters and ~8% vertical
+	// margins top and bottom (measured off the fill-color-list export).
+	marginY := 0
+	if cardRow {
+		gap = cw * 10 / 100
+		marginY = h * 8 / 100
+	}
 	for i, node := range nodes {
-		rect := image.Rect(x+i*cw, y, x+(i+1)*cw, y+h)
+		rect := image.Rect(x+i*cw, y+marginY, x+(i+1)*cw, y+h-marginY)
 		if i == n-1 {
 			rect.Max.X = x + w
 		}

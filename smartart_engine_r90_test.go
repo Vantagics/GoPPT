@@ -1,6 +1,7 @@
 package gopresentation
 
 import (
+	"strings"
 	"testing"
 )
 
@@ -26,6 +27,25 @@ func TestSmartArtModelFillList(t *testing.T) {
 		if kids[i].Text != want {
 			t.Errorf("child %d text = %q, want %q", i, kids[i].Text, want)
 		}
+	}
+	// hList1 flows its cards left to right; it must not take the vertical
+	// list route loCatId "list" usually picks (the fill-color-list export
+	// shows three side-by-side cards inside the frame, not stacked bands).
+	if model.Vert || !model.CardList {
+		t.Errorf("hList1 model: Vert=%v CardList=%v, want Vert=false CardList=true", model.Vert, model.CardList)
+	}
+}
+
+// hList3 is a vertical box list: the table-list deck's Parent/Child table
+// must keep the vertical route.
+func TestSmartArtModelHList3StaysVertical(t *testing.T) {
+	xml := strings.Replace(smartArtDataXML, "layout/hList1", "layout/hList3", 1)
+	model, err := parseSmartArtModel([]byte(xml))
+	if err != nil {
+		t.Fatalf("parse: %v", err)
+	}
+	if !model.Vert || model.CardList {
+		t.Errorf("hList3 model: Vert=%v CardList=%v, want Vert=true CardList=false", model.Vert, model.CardList)
 	}
 }
 

@@ -38,6 +38,10 @@ type SmartArtModel struct {
 	// Vert marks loCatId "list": the linear children flow top-to-bottom
 	// (the vertical list look), not the default left-to-right.
 	Vert bool
+	// CardList marks loTypeId "hList*" (the horizontal list family): cards
+	// sit side by side with generous gutters inside vertical margins —
+	// measured off the fill-color-list Office export.
+	CardList bool
 	// ProcessTwoBox marks loTypeId "process*" (the accent-process family):
 	// each node draws as a header box (blue, top-left) with a body box
 	// (pale, larger, bottom-right, overlapping) — the office layout.
@@ -77,7 +81,13 @@ func parseSmartArtModel(data []byte) (*SmartArtModel, error) {
 	model.Colorful = colorful
 	model.Process = strings.Contains(loCat, "process")
 	model.ProcessTwoBox = strings.HasPrefix(loType, "process")
-	model.Vert = strings.Contains(loCat, "list")
+	// hList1 is the horizontal bullet list: its cards flow left to right
+	// (fill-color-list's three side-by-side header+body cards), so it must
+	// not take the vertical list route even though its loCatId is "list".
+	// The other hList variants (hList2/3 = vertical box list, the
+	// table-list deck) stay vertical.
+	model.CardList = strings.Contains(loType, "hList1")
+	model.Vert = strings.Contains(loCat, "list") && !model.CardList
 	return model, nil
 }
 
