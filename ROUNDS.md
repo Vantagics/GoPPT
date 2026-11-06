@@ -47,6 +47,8 @@ POI 特性文稿），用 cmd/zz_render + cmd/zz_cmp 与 PowerPoint COM 导出
   fill/扇形轮廓阴影/border 两半径+弧三处接线） | customGeo 8.02→7.14、最差页 17.86→15.59（三扇饼页） |
 | r113 | d0838bc | 文本形状恢复 prstGeom：RichTextShape/PlaceholderShape 带 presetShape，
   椭圆预设按椭圆轮廓填/描边（渐变经 fillEllipseImage 逐像素椭圆裁剪） | customGeo 7.14→7.01、最差页 15.59→14.73；smartart-simple 16.93→13.62 |
+| r114 | 3e52adb | hList1（水平项目符号列表）横排卡片：仅 hList1 走横向
+  （10% 列距 + 8% 上下边距，实测自 fill-color-list 导出），hList2/3 保持竖排 | fill-color-list 30.26→1.86 |
 
 PowerPoint 把粘贴的 SmartArt/图表转成的 "Freeform N" 全部走
 `<a:gdLst>` 公式引用（`<a:pt x="f5"/>`），旧解析器 `strconv.ParseInt("f5")`
@@ -86,8 +88,8 @@ alphaModFix 写回（r108）、母版装饰形状写回（r109）。
    （slide28 组合页），已转细节样式。
 5. **radial 渐变**：minimal-gradient 9.3% — lumMod 在 gradient stop 的
    schemeClr 上的色彩变换链路。
-6. **SmartArt 竖排列表布局**：fill-color-list 30.26%（横带 vs Office 竖
-   三列）——v1 引擎的 lin 族只覆盖线性条带，列式分布未建模。
+6. **autofit-sync vert tree 容器配色**：31.7% — office 的淡色圆角容器
+   与 accent 底色头带的视觉差异需精确调参。
 7. **LO 布局模板内容**：font-size 的 "smaller" 盒等 LO 布局自带内容
    v1 不复绘。
 8. **ArtisticEffect/pptx2svg**（8-10% 级）：艺术效果与 SVG
