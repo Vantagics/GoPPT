@@ -772,18 +772,21 @@ func (r *renderer) smartArtProcessArrow(nodes []*SmartArtNode, colorful bool, fa
 		return
 	}
 	slot := smartArtSlot(0, colorful)
-	tipW := float64(h) / 2
-	bodyW := float64(w) - tipW
-	if bodyW < 1 {
-		bodyW = float64(w)
-	}
-	// arrow body (rect) + tip (triangle)
+	// The hProcess3 composite packs the arrow into the upper-middle of its
+	// frame and notches the profile: the body is a low rect, the head's
+	// back edge rises above the body top, and the tip lands ~72% down the
+	// arrow's height (measured off the linear-rule export: the arrow spans
+	// 19%..63% of the frame, body top at 18% of the arrow, head back at
+	// 75% of the width, tip at the right edge, body's bottom-right corner
+	// pulled in to 92.5%).
+	ax, ay, aw, ah := float64(x), float64(y)+float64(h)*0.19, float64(w), float64(h)*0.44
 	pts := [][2]float64{
-		{float64(x), float64(y)},
-		{float64(x) + bodyW, float64(y)},
-		{float64(x) + float64(w), float64(y) + float64(h)/2},
-		{float64(x) + bodyW, float64(y) + float64(h)},
-		{float64(x), float64(y) + float64(h)},
+		{ax, ay + ah*0.18},
+		{ax + aw*0.754, ay + ah*0.18},
+		{ax + aw*0.754, ay},
+		{ax + aw, ay + ah*0.72},
+		{ax + aw*0.925, ay + ah},
+		{ax, ay + ah},
 	}
 	var fpts []fpoint
 	for _, p := range pts {
@@ -791,13 +794,17 @@ func (r *renderer) smartArtProcessArrow(nodes []*SmartArtNode, colorful bool, fa
 	}
 	r.fillPolygon(fpts, slot)
 
-	// texts evenly spaced inside the body
+	// texts evenly spaced across the body (the head excluded), centred in
+	// the body band
 	white := color.RGBA{R: 255, G: 255, B: 255, A: 255}
 	n := len(nodes)
+	bodyW := aw * 0.754
 	slotW := bodyW / float64(n)
+	bodyTop := ay + ah*0.18
+	bodyH := ah * 0.82
 	for i, node := range nodes {
-		cx := float64(x) + slotW*(float64(i)+0.5)
-		nodeRect := image.Rect(int(cx-slotW/2), y, int(cx+slotW/2), y+h)
+		cx := ax + slotW*(float64(i)+0.5)
+		nodeRect := image.Rect(int(cx-slotW/2), int(bodyTop), int(cx+slotW/2), int(bodyTop+bodyH))
 		face2, lines := r.smartArtFitFace(node.Text, nodeRect.Dx()-8, nodeRect.Dy()-6)
 		inner := image.Rect(nodeRect.Min.X+4, nodeRect.Min.Y+2, nodeRect.Max.X-4, nodeRect.Max.Y-2)
 		r.smartArtDrawLines(lines, face2, white, inner)
