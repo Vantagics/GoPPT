@@ -457,9 +457,12 @@ func (r *renderer) smartArtHier(nodes []*SmartArtNode, colorful, twoTone bool, f
 			rect = rect.Add(image.Pt(-rect.Min.X, 0))
 		}
 		r.fillRectFast(rect, smartArtSlot(b.depth, colorful))
-		tf := NewFont()
-		tf.Size = maxInt(11, minInt(38, bh*27/100))
-		r.drawStringCentered(b.node.Text, r.getFace(tf), color.RGBA{R: 255, G: 255, B: 255, A: 255}, rect)
+		// Fit the label like the engine's other families: wrap to the box
+		// width and shrink until the lines fit the box height — the org
+		// chart's two-paragraph manager card and narrow employee boxes
+		// clipped their text at a fixed size.
+		tf, lines := r.smartArtFitFace(b.node.Text, rect.Dx()-8, rect.Dy()-6)
+		r.smartArtDrawLines(lines, tf, color.RGBA{R: 255, G: 255, B: 255, A: 255}, rect)
 	}
 }
 

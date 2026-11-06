@@ -306,6 +306,15 @@ func (r *PPTXReader) loadDiagramDrawing(zr *zip.Reader, rels []xmlRelForRead, sl
 // <p:sp> would.
 func (r *PPTXReader) parseDiagramDrawing(data []byte, rels []xmlRelForRead, zr *zip.Reader, path string, pres *Presentation, frameCX, frameCY int64) *GroupShape {
 	holder := newSlide()
+	// The cached drawing's blip fills resolve against the DRAWING part's own
+	// rels (drawingN.xml.rels), not the slide's: the two rels tables number
+	// their ids independently, and smartart-simple's rId1 is a slideLayout
+	// on one side and the ocean photo on the other.
+	if drPath := strings.Replace(path, "/diagrams/", "/diagrams/_rels/", 1) + ".rels"; drPath != path {
+		if rd, err := readFileFromZip(zr, drPath); err == nil {
+			rels = parseRelsBytes(rd)
+		}
+	}
 	decoder := xml.NewDecoder(bytes.NewReader(data))
 	if err := r.parseSlideXML(decoder, holder, rels, zr, path, pres); err != nil {
 		return nil
