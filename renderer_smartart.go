@@ -368,11 +368,21 @@ func (r *renderer) smartArtHier(nodes []*SmartArtNode, colorful, twoTone bool, f
 	if len(nodes) == 0 || w < 1 || h < 1 {
 		return
 	}
+	// The depth count adds a level for every assistant band on the deepest
+	// chain: the org chart's assistant row sits between the parent and the
+	// children, so the children shift one row down.
 	var maxDepth func(list []*SmartArtNode) int
 	maxDepth = func(list []*SmartArtNode) int {
 		md := 0
 		for _, node := range list {
-			if d := maxDepth(node.Children); d > md {
+			d := maxDepth(node.Children)
+			for _, c := range node.Children {
+				if c.Asst {
+					d++
+					break
+				}
+			}
+			if d > md {
 				md = d
 			}
 		}
@@ -387,6 +397,12 @@ func (r *renderer) smartArtHier(nodes []*SmartArtNode, colorful, twoTone bool, f
 	bw := int(colW * 0.92)
 	if bw < 24 {
 		bw = 24
+	}
+	// Org-chart cards keep a near-fixed width regardless of the leaf count:
+	// a two-leaf parent's columns would otherwise stretch its card across
+	// half the frame (the Office export's cards read at ~26% of it).
+	if bw > int(float64(w)*0.30) {
+		bw = int(float64(w) * 0.30)
 	}
 	bh := int(rowH * 0.72)
 	if bh > bw*9/10 {
@@ -410,18 +426,38 @@ func (r *renderer) smartArtHier(nodes []*SmartArtNode, colorful, twoTone bool, f
 		if len(n.Children) == 0 {
 			colX := colCursor
 			colCursor += colW
+			// colX is frame-relative; the box centres land in slide space,
+			// so the frame's own x joins here — a frame that doesn't sit at
+			// the slide origin (org-chart's graphicFrame starts a third of
+			// the way in) laid its whole tree off to the left without it.
+			cx := float64(x) + colX + colW/2
 			cy := float64(y) + (float64(depth)+0.5)*rowH
-			boxes = append(boxes, entry{n, depth, colX + colW/2, cy, colX, colX + colW})
+			boxes = append(boxes, entry{n, depth, cx, cy, float64(x) + colX, float64(x) + colX + colW})
 			return
+		}
+		// Assistants hang off the trunk in their own band between this
+		// parent and the children; only the regular children take leaf
+		// columns, and they shift a row down when a band exists.
+		var kids, assts []*SmartArtNode
+		for _, c := range n.Children {
+			if c.Asst {
+				assts = append(assts, c)
+			} else {
+				kids = append(kids, c)
+			}
+		}
+		kidDepth := depth + 1
+		if len(assts) > 0 {
+			kidDepth = depth + 2
 		}
 		var kidCx []float64
 		var kidCy []float64
 		firstL, lastR := 0.0, 0.0
-		for i, c := range n.Children {
-			layout(c, depth+1)
+		for i, c := range kids {
+			layout(c, kidDepth)
 			ch := boxes[len(boxes)-1]
 			kidCx = append(kidCx, ch.cx)
-			kidCy = append(kidCy, float64(y)+(float64(depth+1)+0.5)*rowH)
+			kidCy = append(kidCy, float64(y)+(float64(kidDepth)+0.5)*rowH)
 			if i == 0 {
 				firstL = ch.leafL
 			}
@@ -430,6 +466,20 @@ func (r *renderer) smartArtHier(nodes []*SmartArtNode, colorful, twoTone bool, f
 		cx := (firstL + lastR) / 2
 		cy := float64(y) + (float64(depth)+0.5)*rowH
 		boxes = append(boxes, entry{n, depth, cx, cy, firstL, lastR})
+		// Assistant boxes: one band row between the parent and the children
+		// row, over the first child's column, with a horizontal tie to the
+		// trunk (multiple assistants stack within the band).
+		for j, a := range assts {
+			acy := float64(y) + (float64(depth)+1.5)*rowH + float64(j)*rowH*0.4
+			acx := cx
+			if len(kidCx) > 0 {
+				acx = kidCx[0]
+			}
+			boxes = append(boxes, entry{a, kidDepth, acx, acy, firstL, firstL + colW})
+			if len(assts) == 1 {
+				edges = append(edges, [2]float64{acx + float64(bw)/2, acy}, [2]float64{cx, acy})
+			}
+		}
 		// elbow pieces: parent stub down, bus across, child stubs down
 		busY := float64(y) + (float64(depth)+1.0)*rowH - rowH*0.18
 		parentBot := float64(y) + (float64(depth)+0.5)*rowH + float64(bh)/2
@@ -451,7 +501,7 @@ func (r *renderer) smartArtHier(nodes []*SmartArtNode, colorful, twoTone bool, f
 	sort.SliceStable(boxes, func(i, j int) bool { return boxes[i].depth < boxes[j].depth })
 	for i := range boxes {
 		b := boxes[i]
-		cy := float64(y) + (float64(b.depth)+0.5)*rowH
+		cy := b.cy
 		rect := image.Rect(int(b.cx)-bw/2, int(cy)-bh/2, int(b.cx)+bw/2, int(cy)+bh/2)
 		if rect.Min.X < 0 {
 			rect = rect.Add(image.Pt(-rect.Min.X, 0))
@@ -467,15 +517,31 @@ func (r *renderer) smartArtHier(nodes []*SmartArtNode, colorful, twoTone bool, f
 }
 
 // totalHierLeaves counts the leaves across the top-level subtrees.
+// Assistant nodes hang off the trunk instead of taking a leaf column, so
+// they don't count.
 func totalHierLeaves(nodes []*SmartArtNode) int {
 	n := 0
 	for _, node := range nodes {
-		n += smartArtCountLeaves(node)
+		n += hierLeafCount(node)
 	}
 	if n == 0 {
 		n = 1
 	}
 	return n
+}
+
+func hierLeafCount(n *SmartArtNode) int {
+	if len(n.Children) == 0 {
+		if n.Asst {
+			return 0
+		}
+		return 1
+	}
+	sum := 0
+	for _, c := range n.Children {
+		sum += hierLeafCount(c)
+	}
+	return sum
 }
 
 // smartArtVertTree renders a parent-children hierarchy vertically: each

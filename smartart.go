@@ -67,6 +67,10 @@ type SmartArtModel struct {
 type SmartArtNode struct {
 	Text     string
 	Children []*SmartArtNode
+	// Asst marks a point whose dgm:type is "asst": the org-chart assistant
+	// hangs left of the trunk at half depth instead of taking a leaf column
+	// in the children row.
+	Asst bool
 }
 
 // smartartPoint is one <dgm:pt> of the data part as parsed.
@@ -339,7 +343,7 @@ func buildSmartArtModel(pts []smartartPoint, cxns [][3]string, loType string) (*
 		if p.typ == "parTrans" || p.typ == "sibTrans" || p.typ == "pres" {
 			return nil
 		}
-		n := &SmartArtNode{Text: p.text}
+		n := &SmartArtNode{Text: p.text, Asst: p.typ == "asst"}
 		for _, e := range childLists[id] {
 			if child := build(e.id); child != nil {
 				n.Children = append(n.Children, child)
