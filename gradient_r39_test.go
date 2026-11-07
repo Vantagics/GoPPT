@@ -13,7 +13,8 @@ package gopresentation
 //   - satMod does NOT clamp S to 1 before converting back; the multiplied S
 //     carries through and only the final RGB channels saturate
 //     (ED7D31 satMod 160% → FF7200).
-//   - duplicate stop positions collapse to the LAST stop written there.
+//   - duplicate stop positions survive as a hard step (Office renders the
+//     shared position as an instant switch along the gradient axis).
 //   - path gradients: focus = centre of fillToRect; tile = box grown by the
 //     (possibly negative) tileRect insets; interior focus mixes by
 //     t = |P−F| / D with D the distance to the farthest TILE corner; a focus
@@ -91,27 +92,33 @@ func TestReaderKeepsPathGradientStops(t *testing.T) {
 	if f.TileTo != [4]int{0, -100000, -100000, 0} {
 		t.Errorf("TileTo = %v, want [0 -100000 -100000 0]", f.TileTo)
 	}
-	// The two pos=0 stops collapse to the LAST one (green), so three stops.
-	if len(f.Stops) != 3 {
-		t.Fatalf("stops = %d, want 3 (duplicate pos=0 collapses)", len(f.Stops))
+	// Both pos=0 stops survive: Office renders a shared position as a hard
+	// step along the gradient axis (the minimal-gradient-fill deck's
+	// half-dark card is that step at pos 50000), so the reader keeps the
+	// document order — four stops here.
+	if len(f.Stops) != 4 {
+		t.Fatalf("stops = %d, want 4 (duplicate pos=0 stays as a step)", len(f.Stops))
 	}
-	if f.Stops[0].Pos != 0 || f.Stops[0].Color.ARGB != "FF00B050" {
-		t.Errorf("stop[0] = %d/%s, want 0/FF00B050 (last dup wins)", f.Stops[0].Pos, f.Stops[0].Color.ARGB)
+	if f.Stops[0].Pos != 0 || f.Stops[0].Color.ARGB != "FFC00000" {
+		t.Errorf("stop[0] = %d/%s, want 0/FFC00000", f.Stops[0].Pos, f.Stops[0].Color.ARGB)
 	}
-	if f.Stops[1].Pos != 50000 {
-		t.Errorf("stop[1].Pos = %d, want 50000", f.Stops[1].Pos)
+	if f.Stops[1].Pos != 0 || f.Stops[1].Color.ARGB != "FF00B050" {
+		t.Errorf("stop[1] = %d/%s, want 0/FF00B050", f.Stops[1].Pos, f.Stops[1].Color.ARGB)
+	}
+	if f.Stops[2].Pos != 50000 {
+		t.Errorf("stop[2].Pos = %d, want 50000", f.Stops[2].Pos)
 	}
 	// shade 93% then satMod 130% on 00B050 — the transforms must have been
 	// applied to the stop colour, in document order. The pinned PowerPoint
 	// reading of C0504D shade93 satMod130 is (203,61,58); our chain rounds
 	// to (203,61,57) — within the ±1 the shaded-then-rounded intermediate
 	// costs. Assert the transform happened and the hue stayed green.
-	g := f.Stops[1].Color
+	g := f.Stops[2].Color
 	if g.GetRed() >= 100 || g.GetGreen() <= g.GetRed() {
-		t.Errorf("stop[1] colour = %s, want a darkened, saturated green", g.ARGB)
+		t.Errorf("stop[2] colour = %s, want a darkened, saturated green", g.ARGB)
 	}
-	if f.Stops[2].Pos != 100000 || f.Stops[2].Color.ARGB != "FF0000FF" {
-		t.Errorf("stop[2] = %d/%s, want 100000/FF0000FF", f.Stops[2].Pos, f.Stops[2].Color.ARGB)
+	if f.Stops[3].Pos != 100000 || f.Stops[3].Color.ARGB != "FF0000FF" {
+		t.Errorf("stop[3] = %d/%s, want 100000/FF0000FF", f.Stops[3].Pos, f.Stops[3].Color.ARGB)
 	}
 }
 

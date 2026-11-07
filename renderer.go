@@ -3829,10 +3829,23 @@ func (r *renderer) fillGradientLinear(rect image.Rectangle, fill *Fill) {
 				}
 				outC = ramp[int(seg*4096.0+0.5)]
 			}
-			pix[off] = outC[0]
-			pix[off+1] = outC[1]
-			pix[off+2] = outC[2]
-			pix[off+3] = outC[3]
+			// Alpha-over the existing canvas: a gradient stop's own alpha
+			// blends with what is beneath (the slide background), which is
+			// what the COM export's flattened pixels show — assigning the
+			// RGBA raw left semi-transparent stops reading as dark blocks.
+			a := int(outC[3])
+			if a == 255 {
+				pix[off] = outC[0]
+				pix[off+1] = outC[1]
+				pix[off+2] = outC[2]
+				pix[off+3] = 255
+			} else {
+				ia := 255 - a
+				pix[off] = uint8((int(outC[0])*a + int(pix[off])*ia) / 255)
+				pix[off+1] = uint8((int(outC[1])*a + int(pix[off+1])*ia) / 255)
+				pix[off+2] = uint8((int(outC[2])*a + int(pix[off+2])*ia) / 255)
+				pix[off+3] = 255
+			}
 			off += 4
 		}
 	}
@@ -3970,10 +3983,23 @@ func (r *renderer) fillGradientPath(rect image.Rectangle, fill *Fill) {
 		for px := maxInt(rect.Min.X, bounds.Min.X); px < minInt(rect.Max.X, bounds.Max.X); px++ {
 			pxLocal := float64(px-rect.Min.X) + 0.5
 			outC := gradStopColor(pos, cols, pathGradientT(g, pxLocal, pyLocal))
-			pix[off] = outC[0]
-			pix[off+1] = outC[1]
-			pix[off+2] = outC[2]
-			pix[off+3] = outC[3]
+			// Alpha-over the existing canvas: a gradient stop's own alpha
+			// blends with what is beneath (the slide background), which is
+			// what the COM export's flattened pixels show — assigning the
+			// RGBA raw left semi-transparent stops reading as dark blocks.
+			a := int(outC[3])
+			if a == 255 {
+				pix[off] = outC[0]
+				pix[off+1] = outC[1]
+				pix[off+2] = outC[2]
+				pix[off+3] = 255
+			} else {
+				ia := 255 - a
+				pix[off] = uint8((int(outC[0])*a + int(pix[off])*ia) / 255)
+				pix[off+1] = uint8((int(outC[1])*a + int(pix[off+1])*ia) / 255)
+				pix[off+2] = uint8((int(outC[2])*a + int(pix[off+2])*ia) / 255)
+				pix[off+3] = 255
+			}
 			off += 4
 		}
 	}
@@ -5654,10 +5680,21 @@ func (r *renderer) fillPolygonPathGradient(pts []fpoint, box image.Rectangle, fi
 			for px := x1; px <= x2; px++ {
 				pxLocal := float64(px-box.Min.X) + 0.5
 				outC := gradStopColor(pos, cols, pathGradientT(g, pxLocal, pyLocal))
-				pix[off] = outC[0]
-				pix[off+1] = outC[1]
-				pix[off+2] = outC[2]
-				pix[off+3] = outC[3]
+				// Alpha-over the existing canvas, same law as the linear
+				// and radial pixel loops.
+				a := int(outC[3])
+				if a == 255 {
+					pix[off] = outC[0]
+					pix[off+1] = outC[1]
+					pix[off+2] = outC[2]
+					pix[off+3] = 255
+				} else {
+					ia := 255 - a
+					pix[off] = uint8((int(outC[0])*a + int(pix[off])*ia) / 255)
+					pix[off+1] = uint8((int(outC[1])*a + int(pix[off+1])*ia) / 255)
+					pix[off+2] = uint8((int(outC[2])*a + int(pix[off+2])*ia) / 255)
+					pix[off+3] = 255
+				}
 				off += 4
 			}
 		}

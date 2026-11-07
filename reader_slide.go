@@ -300,27 +300,15 @@ func (r *PPTXReader) readSlideNotes(zr *zip.Reader, slide *Slide, rels []xmlRelF
 // positions keep the LAST colour written there (PowerPoint's reading); the
 // result is sorted by position.
 func dedupeGradStops(colors []Color, positions []int) []GradStop {
-	// A two-stop gradient whose stops share a position still renders as a
-	// full-range two-colour blend in Office — the minimal-gradient-fill
-	// deck's whole point. Spreading them to the start and end lets the
-	// renderer interpolate between the two colours.
-	if len(colors) == 2 && len(positions) == 2 && positions[0] == positions[1] {
-		return []GradStop{
-			{Pos: 0, Color: colors[0]},
-			{Pos: 100000, Color: colors[1]},
-		}
-	}
-	var out []GradStop
-	index := make(map[int]int)
+	// Stops that share a position stay: Office renders the shared position
+	// as a hard step along the gradient axis (the minimal-gradient-fill
+	// deck's half-dark card is exactly that step at pos 50000), so spreading
+	// or collapsing them erased the boundary the file asked for.
+	out := make([]GradStop, 0, len(colors))
 	for i, c := range colors {
-		if idx, ok := index[positions[i]]; ok {
-			out[idx].Color = c
-		} else {
-			index[positions[i]] = len(out)
-			out = append(out, GradStop{Pos: positions[i], Color: c})
-		}
+		out = append(out, GradStop{Pos: positions[i], Color: c})
 	}
-	sort.Slice(out, func(i, j int) bool { return out[i].Pos < out[j].Pos })
+	sort.SliceStable(out, func(i, j int) bool { return out[i].Pos < out[j].Pos })
 	return out
 }
 
