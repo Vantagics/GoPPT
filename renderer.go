@@ -7989,6 +7989,26 @@ func (r *renderer) drawParagraphs(paragraphs []*Paragraph, x, y, w, h int, ancho
 
 		// Draw each run
 		drawX := lineX
+		// Justified alignment (algn="just"): every line but the paragraph's
+		// last stretches its word gaps so both edges land on the column —
+		// the pptx2svg body copy is set this way.
+		justifyPerGap := 0.0
+		if li.hAlign == HorizontalJustify && !li.isLast {
+			right := x + w
+			if para.alignment != nil {
+				right -= r.emuToPixelX(para.alignment.MarginRight)
+			}
+			gaps := 0
+			for _, run := range li.line.runs {
+				gaps += strings.Count(run.text, " ")
+			}
+			if gaps > 0 {
+				justifyPerGap = float64(right-(drawX+li.line.width)) / float64(gaps)
+				if justifyPerGap < 0 {
+					justifyPerGap = 0
+				}
+			}
+		}
 		for _, run := range li.line.runs {
 			if run.text == "\n" || run.text == "" {
 				continue
@@ -8081,6 +8101,50 @@ func (r *renderer) drawParagraphs(paragraphs []*Paragraph, x, y, w, h int, ancho
 				dy := int(dist * math.Sin(rad))
 				blurPx := int(float64(sh.BlurRadius)*12700*r.scaleX + 0.5)
 				r.drawTextShadow(run.text, run.face, drawX+dx, runBaseline+dy, sh, blurPx)
+			}
+
+			if justifyPerGap != 0 && strings.Contains(run.text, " ") {
+				// Justified: draw the run in space-split segments, each gap
+				// carrying its share of the line's slack. The underline and
+				// strike spans ride the whole justified advance.
+				runAdv := 0.0
+				sx := float64(drawX)
+				for _, seg := range strings.SplitAfter(run.text, " ") {
+					if seg == "" {
+						continue
+					}
+					sd := &font.Drawer{
+						Dst:  r.img,
+						Src:  image.NewUniform(drawSrc(fc)),
+						Face: run.face,
+						Dot:  fixed.P(int(sx+0.5), runBaseline),
+					}
+					drawNatural(sd, run.mface(), seg)
+					if run.font != nil && run.font.Bold {
+						sd2 := &font.Drawer{
+							Dst:  r.img,
+							Src:  image.NewUniform(drawSrc(fc)),
+							Face: run.face,
+							Dot:  fixed.P(int(sx+0.5)+1, runBaseline),
+						}
+						drawNatural(sd2, run.mface(), seg)
+					}
+					segW := measureStringWithKern(run.face, seg).Ceil()
+					sx += float64(segW) + justifyPerGap*float64(strings.Count(seg, " "))
+					runAdv += float64(segW)
+				}
+				runAdv += justifyPerGap * float64(strings.Count(run.text, " "))
+				if run.font != nil && run.font.Underline != UnderlineNone {
+					uo, ut := r.underlineGeometry(run.font)
+					uy := runBaseline + uo
+					r.drawUnderline(drawX, drawX+int(runAdv+0.5), uy, fc, run.font.Underline, ut)
+				}
+				if run.font != nil && run.font.Strikethrough {
+					sy := runBaseline - li.line.ascent/3
+					r.drawLine(drawX, sy, drawX+int(runAdv+0.5), sy, fc)
+				}
+				drawX += int(runAdv + 0.5)
+				continue
 			}
 
 			d := &font.Drawer{
