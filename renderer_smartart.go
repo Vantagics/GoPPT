@@ -18,6 +18,20 @@ func smartArtWrap(text string, face font.Face, maxW int) []string {
 	if text == "" {
 		return nil
 	}
+	// A paragraph break inside the point's text body is a hard line break:
+	// each paragraph wraps on its own.
+	var lines []string
+	for _, para := range strings.Split(text, "\n") {
+		lines = append(lines, wrapOneParagraph(para, face, maxW)...)
+	}
+	return lines
+}
+
+func wrapOneParagraph(text string, face font.Face, maxW int) []string {
+	text = strings.TrimSpace(text)
+	if text == "" {
+		return nil
+	}
 	words := strings.Fields(text)
 	if len(words) == 0 {
 		return nil
@@ -368,7 +382,7 @@ func (r *renderer) smartArtCycle(nodes []*SmartArtNode, colorful, twoTone bool, 
 		iy := int(math.Round(ncy - d/2))
 		nodeRect := image.Rect(ix, iy, ix+int(d), iy+int(d))
 		r.fillEllipseAA(nodeRect.Min.X, nodeRect.Min.Y, nodeRect.Dx(), nodeRect.Dy(), smartArtSlot(i, colorful))
-		r.drawStringCentered(node.Text, labelFace, color.RGBA{R: 255, G: 255, B: 255, A: 255}, nodeRect)
+		r.drawStringCentered(strings.ReplaceAll(node.Text, "\n", " "), labelFace, color.RGBA{R: 255, G: 255, B: 255, A: 255}, nodeRect)
 	}
 	// A small chevron rides the ring between each pair of neighbours,
 	// pointing along the flow.
@@ -959,7 +973,7 @@ func (r *renderer) smartArtTwoBox(nodes []*SmartArtNode, colorful bool, face fon
 				break
 			}
 			d := &font.Drawer{Dst: r.img, Src: image.NewUniform(drawSrc(dark)), Face: kidFace, Dot: fixed.P(kx, ky)}
-			d.DrawString("• " + kid.Text)
+			d.DrawString(strings.ReplaceAll("• "+kid.Text, "\n", " "))
 			ky += th
 		}
 		// the arrow rides the gap between pairs, at the header/body overlap

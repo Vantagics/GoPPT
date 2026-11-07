@@ -197,11 +197,12 @@ func parseSmartArtPoints(data []byte) ([]smartartPoint, string, string, bool, er
 					}
 				}
 			}
-			if inT && name == "p" {
-				// a paragraph break inside the point's text body reads as a
-				// space: "Max size (65 pt)" runs across two paragraphs.
-				if len(textParts) > 0 && !strings.HasSuffix(strings.Join(textParts, ""), " ") {
-					textParts = append(textParts, " ")
+			if inT && (name == "p" || name == "br") {
+				// a paragraph break or <a:br/> inside the point's text body is a line
+				// break: "Max size" and "(65 pt)" run across two paragraphs
+				// and Office draws them on two lines.
+				if len(textParts) > 0 && !strings.HasSuffix(strings.Join(textParts, ""), "\n") {
+					textParts = append(textParts, "\n")
 				}
 			}
 			push(name)
