@@ -68,6 +68,9 @@ POI 特性文稿），用 cmd/zz_render + cmd/zz_cmp 与 PowerPoint COM 导出
 | r122 | b859ac6 | cycle 环校准（圈径 28% 短边、环 35%、标签随圈缩放、圈间
   顺时针浅色箭头）+ bullet 路径 wrapRunLineWithIndent 补逐字断行（88 字符
   长串溢出 slide） | cycle 9.74→5.15、autoTxRot 7.81→5.91、font-scale 9.35→8.47 |
+| r123 | c87adc1 | accent-process 两盒对按导出实测：对宽 43%/间隙 14%、头卡
+  8%..42% 高×82% 对宽左对齐、体卡半透明白+accent 边框右下叠 18%、体左上
+  深色 bullet 行、间隙浅色箭头 | smartart-accent-process 10.20→5.69 |
 
 PowerPoint 把粘贴的 SmartArt/图表转成的 "Freeform N" 全部走
 `<a:gdLst>` 公式引用（`<a:pt x="f5"/>`），旧解析器 `strconv.ParseInt("f5")`
@@ -97,9 +100,9 @@ alphaModFix 写回（r108）、母版装饰形状写回（r109）。
 
 ## 已知剩余差距
 
-1. **SmartArt composite 几何**：accent-process 10.2%、org-chart 15.7% —
-   composite 约束求解（office 的 composite 会溢出声明 frame 重新排布，
-   v1 引擎按 frame 网格布局）。
+1. **SmartArt composite 几何**：org-chart 15.7% — composite 约束求解
+   （office 的 composite 会溢出声明 frame 重新排布，v1 引擎按 frame
+   网格布局；accent-process 已收至 5.7%）。
    composite 约束求解（r110 两盒对已收大头）。
 2. **multi-master writer**：writer 创建一个 master/layout/theme；多母版
    文稿（themes 20.8% gen）的 master 2-7 需写回支持。
