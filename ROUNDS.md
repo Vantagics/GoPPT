@@ -82,6 +82,8 @@ POI 特性文稿），用 cmd/zz_render + cmd/zz_cmp 与 PowerPoint COM 导出
   tileRect 构建真 FillGradientPath；母版 titleStyle 梯级也携带 cap="all" | themes 8.91→3.60（max 28.86→24.36） |
 | r127 | b1ae01c | 组织架构图悬挂分支：节点最后一个带子树的子分支整 subtree
   垂直堆叠（运行行号递归、左缘主干+肘线、占一列）——Office 的经典悬挂律 | org-chart2 17.64→14.88 |
+| r128 | eccdd2c | algn="just" 两端对齐：非末行按词间空格分摊行内富余
+  （段内逐 run 分段绘制、粗体/下划线/删除线跨延伸距） | pptx2svg 8.28→8.29（对齐本身已一致，残差为换行点字体度量差） |
 
 PowerPoint 把粘贴的 SmartArt/图表转成的 "Freeform N" 全部走
 `<a:gdLst>` 公式引用（`<a:pt x="f5"/>`），旧解析器 `strconv.ParseInt("f5")`
@@ -124,4 +126,5 @@ alphaModFix 写回（r108）、母版装饰形状写回（r109）。
 6. **ArtisticEffect/pptx2svg/accent-process**（8-10% 级）：艺术效果、
    SVG 图形细节与 accent-process 的 composite 重叠；smartart-simple 残差
    为渐变 stop 的 25% alpha（r100 回退区）。
-7. **文字反锯齿**：结构性差异，不可归零。
+7. **文字反锯齿与换行点**：结构性差异，不可归零（字体度量致个别
+   词掉行，行高随之漂移——customGeo slide28 的表格行高漂移属此类）。
