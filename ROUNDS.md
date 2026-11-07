@@ -65,6 +65,9 @@ POI 特性文稿），用 cmd/zz_render + cmd/zz_cmp 与 PowerPoint COM 导出
   体右下角收 92.5%）+ 打包进 frame 的 19%..63% 段；标签按体段均布 | smartart-linear-rule 11.25→2.52 |
 | r121 | a39abd8 | snake 的 grDir="tR" 分支：data 无 dir 属性且 layout 带 tR 支
   时右到左镜像列序，网格缩至 72% 帧宽居中，尾盒按镜像前列号居中 | rightoleft 10.47→2.62、font-size 16.19→14.97 |
+| r122 | b859ac6 | cycle 环校准（圈径 28% 短边、环 35%、标签随圈缩放、圈间
+  顺时针浅色箭头）+ bullet 路径 wrapRunLineWithIndent 补逐字断行（88 字符
+  长串溢出 slide） | cycle 9.74→5.15、autoTxRot 7.81→5.91、font-scale 9.35→8.47 |
 
 PowerPoint 把粘贴的 SmartArt/图表转成的 "Freeform N" 全部走
 `<a:gdLst>` 公式引用（`<a:pt x="f5"/>`），旧解析器 `strconv.ParseInt("f5")`
@@ -106,6 +109,7 @@ alphaModFix 写回（r108）、母版装饰形状写回（r109）。
    schemeClr 上的色彩变换链路。
 5. **LO 布局模板内容**：font-size 的第二张 auto 卡等 LO 布局自带
    内容 v1 不复绘（r119 已让各 frame 各读各的 data）。
-6. **ArtisticEffect/pptx2svg**（8-10% 级）：艺术效果与 SVG 图形细节；
-   smartart-simple 残差为渐变 stop 的 25% alpha（r100 回退区）。
+6. **ArtisticEffect/pptx2svg/accent-process**（8-10% 级）：艺术效果、
+   SVG 图形细节与 accent-process 的 composite 重叠；smartart-simple 残差
+   为渐变 stop 的 25% alpha（r100 回退区）。
 7. **文字反锯齿**：结构性差异，不可归零。
