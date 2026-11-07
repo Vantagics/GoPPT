@@ -346,14 +346,20 @@ func (r *renderer) smartArtCycle(nodes []*SmartArtNode, colorful, twoTone bool, 
 	}
 	cx := float64(x) + float64(w)/2
 	cy := float64(y) + float64(h)/2
-	radius := float64(minInt(w, h)) / 2 * 0.55
-	// Node size adapts to the node count: the chord between adjacent ring
-	// positions caps the diameter so the nodes never overlap (the autoTxRot
-	// deck's 12 nodes overlapped into a solid wall at a fixed size).
-	d := 2 * radius * math.Sin(math.Pi/float64(n))
-	if d > float64(minInt(w, h))/3.0 {
-		d = float64(minInt(w, h)) / 3.0
+	radius := float64(minInt(w, h)) / 2 * 0.70
+	// Node size: the Office export's circles read at ~28% of the frame's
+	// short side with clear gaps to their neighbours; the chord between
+	// adjacent ring positions still caps the diameter so dense rings (the
+	// autoTxRot deck's 12 nodes) never overlap.
+	d := 2 * radius * math.Sin(math.Pi/float64(n)) * 0.78
+	if d > float64(minInt(w, h))*0.28 {
+		d = float64(minInt(w, h)) * 0.28
 	}
+	// The label scales with its circle (the export's caps read ~28% of it).
+	lf := NewFont()
+	lf.Size = maxInt(10, minInt(64, int(d*0.28)))
+	labelFace := r.getFace(lf)
+	arrowSlot := smartArtBodyMix(smartArtSlot(0, colorful), 0.45)
 	for i, node := range nodes {
 		angle := -math.Pi/2 + 2*math.Pi*float64(i)/float64(n)
 		ncx := cx + radius*math.Cos(angle)
@@ -362,7 +368,25 @@ func (r *renderer) smartArtCycle(nodes []*SmartArtNode, colorful, twoTone bool, 
 		iy := int(math.Round(ncy - d/2))
 		nodeRect := image.Rect(ix, iy, ix+int(d), iy+int(d))
 		r.fillEllipseAA(nodeRect.Min.X, nodeRect.Min.Y, nodeRect.Dx(), nodeRect.Dy(), smartArtSlot(i, colorful))
-		r.drawStringCentered(node.Text, face, color.RGBA{R: 255, G: 255, B: 255, A: 255}, nodeRect)
+		r.drawStringCentered(node.Text, labelFace, color.RGBA{R: 255, G: 255, B: 255, A: 255}, nodeRect)
+	}
+	// A small chevron rides the ring between each pair of neighbours,
+	// pointing along the flow.
+	for i := 0; i < n; i++ {
+		mid := -math.Pi/2 + 2*math.Pi*(float64(i)+0.5)/float64(n)
+		acx := cx + radius*math.Cos(mid)
+		acy := cy + radius*math.Sin(mid)
+		// tangential direction (clockwise flow)
+		tx, ty := -math.Sin(mid), math.Cos(mid)
+		sz := d * 0.30
+		hx, hy := tx*sz/2, ty*sz/2
+		nx, ny := -ty, tx
+		pts := []fpoint{
+			{acx + hx, acy + hy},
+			{acx - hx + nx*sz*0.45, acy - hy + ny*sz*0.45},
+			{acx - hx - nx*sz*0.45, acy - hy - ny*sz*0.45},
+		}
+		r.fillPolygon(pts, arrowSlot)
 	}
 }
 

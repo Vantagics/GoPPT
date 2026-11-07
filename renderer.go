@@ -9305,14 +9305,43 @@ func (r *renderer) wrapRunLineWithIndent(runs []textRun, firstLineWidth, contLin
 
 		segments := splitCJKAware(run.text)
 		if len(segments) <= 1 {
-			if len(currentRuns) > 0 {
-				lines = append(lines, r.buildTextLine(currentRuns))
-				currentRuns = nil
-				currentWidth = 0
-				lineIdx++
+			// A single unbreakable segment takes its own line when it fits;
+			// overlong ones wrap at the character level — the same law the
+			// plain wrapper applies (the font-scale deck's 88-char run
+			// arrives here through the bulleted path, whose indent variant
+			// used to push the whole line off the slide).
+			if runW <= maxW {
+				if len(currentRuns) > 0 {
+					lines = append(lines, r.buildTextLine(currentRuns))
+					currentRuns = nil
+					currentWidth = 0
+					lineIdx++
+				}
+				currentRuns = append(currentRuns, run)
+				currentWidth = runW
+				continue
 			}
-			currentRuns = append(currentRuns, run)
-			currentWidth = runW
+			for _, ch := range run.text {
+				chStr := string(ch)
+				chW := measureStringWithKern(mf, chStr)
+				if currentWidth+chW > getMaxW() && currentWidth > 0 {
+					lines = append(lines, r.buildTextLine(currentRuns))
+					currentRuns = nil
+					currentWidth = 0
+					lineIdx++
+				}
+				currentRuns = append(currentRuns, textRun{
+					text:        chStr,
+					font:        run.font,
+					face:        run.face,
+					measureFace: run.measureFace,
+					width:       int(chW / 64),
+					isBullet:    run.isBullet,
+					winAsc:      run.winAsc,
+					winDesc:     run.winDesc,
+				})
+				currentWidth += chW
+			}
 			continue
 		}
 
