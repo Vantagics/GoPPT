@@ -74,6 +74,9 @@ POI 特性文稿），用 cmd/zz_render + cmd/zz_cmp 与 PowerPoint COM 导出
 | r124 | ca907b1 | 同位渐变 stop = 硬台阶（撤销 r100 的展开——之前把 Go/Office
   看反了：平滑的是我们、阶梯才是 Office）；渐变像素三处改 alpha-over 画布
   合成（80% alpha 暗 stop 呈现为底色上的阴影而非生 RGB） | minimal-gradient 9.29→0.47 |
+| r125 | 9b21678 | 占位符梯级携带 cap="all"（layout lstStyle → Font.CapAll，
+  渲染期大写文本——换行测量与绘制同字形，解析文本与 gen 往返不变）；
+  梯级的 nil-font 跳过与无继承早退两处守卫为 cap-only 定义放行 | ArtisticEffectSample 10.03→9.93 |
 
 PowerPoint 把粘贴的 SmartArt/图表转成的 "Freeform N" 全部走
 `<a:gdLst>` 公式引用（`<a:pt x="f5"/>`），旧解析器 `strconv.ParseInt("f5")`
