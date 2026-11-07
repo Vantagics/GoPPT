@@ -77,6 +77,9 @@ POI 特性文稿），用 cmd/zz_render + cmd/zz_cmp 与 PowerPoint COM 导出
 | r125 | 9b21678 | 占位符梯级携带 cap="all"（layout lstStyle → Font.CapAll，
   渲染期大写文本——换行测量与绘制同字形，解析文本与 gen 往返不变）；
   梯级的 nil-font 跳过与无继承早退两处守卫为 cap-only 定义放行 | ArtisticEffectSample 10.03→9.93 |
+| r126 | 887747b | bgRef 改解析 <a:bgFillStyleLst>（原误用 shape fillStyleLst——
+  两列表每主题都不同）；blipFill 条目退化为 phClr solid；path/fillToRect/
+  tileRect 构建真 FillGradientPath；母版 titleStyle 梯级也携带 cap="all" | themes 8.91→3.60（max 28.86→24.36） |
 
 PowerPoint 把粘贴的 SmartArt/图表转成的 "Freeform N" 全部走
 `<a:gdLst>` 公式引用（`<a:pt x="f5"/>`），旧解析器 `strconv.ParseInt("f5")`
