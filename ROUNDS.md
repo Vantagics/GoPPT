@@ -84,6 +84,9 @@ POI 特性文稿），用 cmd/zz_render + cmd/zz_cmp 与 PowerPoint COM 导出
   垂直堆叠（运行行号递归、左缘主干+肘线、占一列）——Office 的经典悬挂律 | org-chart2 17.64→14.88 |
 | r128 | eccdd2c | algn="just" 两端对齐：非末行按词间空格分摊行内富余
   （段内逐 run 分段绘制、粗体/下划线/删除线跨延伸距） | pptx2svg 8.28→8.29（对齐本身已一致，残差为换行点字体度量差） |
+| r129 | c5377c2 | SmartArt 点文本保留 <a:br/> 为硬换行（LO 用 br 断行而非
+  段落——收集器跨过去拼成一行）；smartArtWrap 按段落分段换行、cycle 标签
+  与两盒 bullet 消费处净化为空格 | smartart-font-size 14.97→14.84 |
 
 PowerPoint 把粘贴的 SmartArt/图表转成的 "Freeform N" 全部走
 `<a:gdLst>` 公式引用（`<a:pt x="f5"/>`），旧解析器 `strconv.ParseInt("f5")`
