@@ -71,6 +71,9 @@ POI 特性文稿），用 cmd/zz_render + cmd/zz_cmp 与 PowerPoint COM 导出
 | r123 | c87adc1 | accent-process 两盒对按导出实测：对宽 43%/间隙 14%、头卡
   8%..42% 高×82% 对宽左对齐、体卡半透明白+accent 边框右下叠 18%、体左上
   深色 bullet 行、间隙浅色箭头 | smartart-accent-process 10.20→5.69 |
+| r124 | ca907b1 | 同位渐变 stop = 硬台阶（撤销 r100 的展开——之前把 Go/Office
+  看反了：平滑的是我们、阶梯才是 Office）；渐变像素三处改 alpha-over 画布
+  合成（80% alpha 暗 stop 呈现为底色上的阴影而非生 RGB） | minimal-gradient 9.29→0.47 |
 
 PowerPoint 把粘贴的 SmartArt/图表转成的 "Freeform N" 全部走
 `<a:gdLst>` 公式引用（`<a:pt x="f5"/>`），旧解析器 `strconv.ParseInt("f5")`
@@ -108,8 +111,6 @@ alphaModFix 写回（r108）、母版装饰形状写回（r109）。
    文稿（themes 20.8% gen）的 master 2-7 需写回支持。
 3. **customGeo 其余页**：最差页自 gdLst/pie/椭圆修复后 14.73%
    （slide28 组合页），已转细节样式。
-4. **radial 渐变**：minimal-gradient 9.3% — lumMod 在 gradient stop 的
-   schemeClr 上的色彩变换链路。
 5. **LO 布局模板内容**：font-size 的第二张 auto 卡等 LO 布局自带
    内容 v1 不复绘（r119 已让各 frame 各读各的 data）。
 6. **ArtisticEffect/pptx2svg/accent-process**（8-10% 级）：艺术效果、
