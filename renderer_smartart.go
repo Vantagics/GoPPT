@@ -463,6 +463,37 @@ func (r *renderer) smartArtHier(nodes []*SmartArtNode, colorful, twoTone bool, f
 	var edges [][2]float64
 	colCursor := 0.0
 
+	// stackRows counts the rows a hanging branch's subtree consumes: each
+	// descendant takes its own row, in sequence.
+	var stackRows func(n *SmartArtNode) int
+	stackRows = func(n *SmartArtNode) int {
+		rows := 1
+		for _, c := range n.Children {
+			rows += stackRows(c)
+		}
+		return rows
+	}
+	// layoutHangingRow draws node's whole subtree as a vertical stack below
+	// its own box: each descendant takes the next row on the same column,
+	// tied to the trunk that descends node's left edge (the classic hanging
+	// org chart law — org-chart2's B2/C3/C4 stack exactly this way). Returns
+	// the next free row.
+	var layoutHangingRow func(n *SmartArtNode, depth int, cx, colL, colR float64) int
+	layoutHangingRow = func(n *SmartArtNode, depth int, cx, colL, colR float64) int {
+		cy := float64(y) + (float64(depth)+0.5)*rowH
+		boxes = append(boxes, entry{n, depth, cx, cy, colL, colR})
+		trunkX := cx - float64(bw)/2
+		nextRow := depth + 1
+		if len(n.Children) > 0 {
+			edges = append(edges, [2]float64{trunkX, cy + float64(bh)/2}, [2]float64{trunkX, float64(y) + (float64(nextRow)+0.5)*rowH})
+		}
+		for _, c := range n.Children {
+			ccy := float64(y) + (float64(nextRow)+0.5)*rowH
+			edges = append(edges, [2]float64{trunkX, ccy}, [2]float64{cx - float64(bw)/2, ccy})
+			nextRow = layoutHangingRow(c, nextRow, cx, colL, colR)
+		}
+		return nextRow
+	}
 	var layout func(n *SmartArtNode, depth int)
 	layout = func(n *SmartArtNode, depth int) {
 		if len(n.Children) == 0 {
@@ -496,6 +527,25 @@ func (r *renderer) smartArtHier(nodes []*SmartArtNode, colorful, twoTone bool, f
 		var kidCy []float64
 		firstL, lastR := 0.0, 0.0
 		for i, c := range kids {
+			if i == len(kids)-1 && len(c.Children) > 0 {
+				// The hanging branch: the last child's whole subtree stacks
+				// vertically below its box on one column (Office's hanging
+				// org chart — org-chart2's B2/C3/C4).
+				colX := colCursor
+				colCursor += colW
+				hcx := float64(x) + colX + colW/2
+				hl, hr := float64(x)+colX, float64(x)+colX+colW
+				idx := len(boxes)
+				layoutHangingRow(c, kidDepth, hcx, hl, hr)
+				ch := boxes[idx]
+				kidCx = append(kidCx, ch.cx)
+				kidCy = append(kidCy, ch.cy)
+				if i == 0 {
+					firstL = ch.leafL
+				}
+				lastR = ch.leafR
+				continue
+			}
 			layout(c, kidDepth)
 			ch := boxes[len(boxes)-1]
 			kidCx = append(kidCx, ch.cx)
@@ -558,9 +608,11 @@ func (r *renderer) smartArtHier(nodes []*SmartArtNode, colorful, twoTone bool, f
 	}
 }
 
-// totalHierLeaves counts the leaves across the top-level subtrees.
+// totalHierLeaves counts the leaf columns across the top-level subtrees.
 // Assistant nodes hang off the trunk instead of taking a leaf column, so
-// they don't count.
+// they don't count; a node's LAST child hangs into a vertical stack, which
+// also takes one column however deep its subtree runs (the org-chart
+// hanging layout).
 func totalHierLeaves(nodes []*SmartArtNode) int {
 	n := 0
 	for _, node := range nodes {
@@ -580,7 +632,12 @@ func hierLeafCount(n *SmartArtNode) int {
 		return 1
 	}
 	sum := 0
-	for _, c := range n.Children {
+	for i, c := range n.Children {
+		if i == len(n.Children)-1 && len(c.Children) > 0 {
+			// the hanging branch: one column for the whole stack
+			sum += 1
+			continue
+		}
 		sum += hierLeafCount(c)
 	}
 	return sum
