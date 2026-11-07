@@ -5244,6 +5244,7 @@ type masterLevelStyle struct {
 	size     int // points; 0 means the master says nothing
 	bold     bool
 	italic   bool
+	capAll   bool
 	align    string
 	marL     int64
 	indent   int64
@@ -5614,6 +5615,8 @@ func parseMasterTextStyles(data []byte, pres *Presentation) *masterTextStyles {
 						cur.bold = attr.Value == "1" || attr.Value == "true"
 					case "i":
 						cur.italic = attr.Value == "1" || attr.Value == "true"
+					case "cap":
+						cur.capAll = attr.Value == "all"
 					}
 				}
 			case "latin":
@@ -5905,7 +5908,13 @@ func applyMasterTextStyles(ph *PlaceholderShape, m *masterTextStyles) {
 
 		for _, elem := range para.elements {
 			tr, ok := elem.(*TextRun)
-			if !ok || tr.font == nil {
+			if !ok {
+				continue
+			}
+			if tr.font == nil && s.capAll {
+				tr.font = NewFont()
+			}
+			if tr.font == nil {
 				continue
 			}
 			if tr.font.Name == "Calibri" && s.fontName != "" {
@@ -5926,6 +5935,9 @@ func applyMasterTextStyles(ph *PlaceholderShape, m *masterTextStyles) {
 			}
 			if s.italic && !tr.font.italicSet {
 				tr.font.Italic = true
+			}
+			if s.capAll {
+				tr.font.CapAll = true
 			}
 			if s.color.ARGB != "" && s.color.ARGB != "FF000000" && !tr.font.runColorSet {
 				tr.font.Color = s.color
@@ -6477,7 +6489,7 @@ func (r *PPTXReader) parseLayoutBackground(data []byte, rels []xmlRelForRead, zr
 					inBgRef = false
 					// fillStyleLst entries are 1-based; a bgRef idx of 1001
 					// is the FIRST body.
-					if f := resolveThemeFillStyle(pres, bgRefIndex-1000, bgRefScheme, bgRefOps); f != nil {
+					if f := resolveThemeBgFillStyle(pres, bgRefIndex-1000, bgRefScheme, bgRefOps); f != nil {
 						return f, nil
 					}
 				}

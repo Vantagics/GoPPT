@@ -50,7 +50,10 @@ type Presentation struct {
 	// body, not reading a solid from it; treating idx>1 as a solid fill was
 	// painting theme-gradient text boxes flat black.
 	themeFillStyles []themeFillStyle
-	themeLnStyles   []themeLnStyle
+	// themeBgFillStyles is the theme's <a:bgFillStyleLst>: a bgRef's
+	// 1001-based idx indexes THIS list.
+	themeBgFillStyles []themeFillStyle
+	themeLnStyles     []themeLnStyle
 	// themeEffectStyles is the theme's <a:effectStyleLst>: the outer shadow
 	// (if any) an <a:effectRef idx="N"> resolves to. Only the shadow is
 	// modelled — the third Office style's camera and bevel have no renderer
@@ -93,6 +96,7 @@ type themeState struct {
 	colors       map[string]string
 	fonts        map[string]string
 	fillStyles   []themeFillStyle
+	bgFillStyles []themeFillStyle
 	lnStyles     []themeLnStyle
 	effectStyles []themeEffectStyle
 }
@@ -127,6 +131,7 @@ func (p *Presentation) applyThemeState(ts *themeState) {
 	p.themeColors = ts.colors
 	p.themeFonts = ts.fonts
 	p.themeFillStyles = ts.fillStyles
+	p.themeBgFillStyles = ts.bgFillStyles
 	p.themeLnStyles = ts.lnStyles
 	p.themeEffectStyles = ts.effectStyles
 }
@@ -139,6 +144,7 @@ func (p *Presentation) activeTheme() *themeState {
 		colors:       p.themeColors,
 		fonts:        p.themeFonts,
 		fillStyles:   p.themeFillStyles,
+		bgFillStyles: p.themeBgFillStyles,
 		lnStyles:     p.themeLnStyles,
 		effectStyles: p.themeEffectStyles,
 	}

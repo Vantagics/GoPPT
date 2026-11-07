@@ -368,7 +368,10 @@ type themeGradStop struct {
 type themeFillStyle struct {
 	solid bool
 	stops []themeGradStop
-	angle int // gradient direction in degrees, OOXML convention
+	angle int    // gradient direction in degrees, OOXML convention
+	path  string // "" = linear; "circle"/"shape"/"rect" for path gradients
+	fillTo [4]int
+	tileTo [4]int
 }
 
 // themeLnStyle is one entry of <a:lnStyleLst>: a line weight and the transforms
@@ -398,6 +401,8 @@ func (r *PPTXReader) parseThemeFormatScheme(data []byte, ts *themeState) {
 
 	var (
 		inFillLst, inLnLst, inGrad bool
+		inBgFillLst                bool
+		curFillIsBg                bool
 		curFill                    *themeFillStyle
 		curLn                      *themeLnStyle
 		curStop                    *themeGradStop
@@ -430,19 +435,73 @@ func (r *PPTXReader) parseThemeFormatScheme(data []byte, ts *themeState) {
 			switch t.Name.Local {
 			case "fillStyleLst":
 				inFillLst = true
+			case "bgFillStyleLst":
+				// The background style list: a bgRef's 1001-based idx is a
+				// 1-based index into THIS list, not the shape fillStyleLst
+				// (the themes deck's textured master backgrounds live here).
+				inBgFillLst = true
 			case "lnStyleLst":
 				inLnLst = true
 			case "gradFill":
-				if inFillLst {
+				if inFillLst || inBgFillLst {
 					inGrad = true
 					curFill = &themeFillStyle{}
+					curFillIsBg = inBgFillLst
+				}
+			case "blipFill":
+				// A bgFillStyleLst entry can be a tiled duotone texture; the
+				// model has no texture fill, so the entry degrades to a solid
+				// of its phClr — the texture's average tone.
+				if inBgFillLst && !inGrad {
+					curFill = &themeFillStyle{solid: true}
+					curFillIsBg = true
+					curFill.stops = append(curFill.stops, themeGradStop{pos: 0})
 				}
 			case "solidFill":
 				if inLnLst && curLn != nil {
 					// the line colour container; ops attach to curLn
-				} else if inFillLst && !inGrad {
+				} else if (inFillLst || inBgFillLst) && !inGrad {
 					curFill = &themeFillStyle{solid: true}
+					curFillIsBg = inBgFillLst
 					curFill.stops = append(curFill.stops, themeGradStop{pos: 0})
+				}
+			case "path":
+				if inGrad && curFill != nil {
+					for _, attr := range t.Attr {
+						if attr.Name.Local == "path" {
+							curFill.path = attr.Value
+						}
+					}
+				}
+			case "fillToRect":
+				if inGrad && curFill != nil {
+					for _, attr := range t.Attr {
+						switch attr.Name.Local {
+						case "l":
+							curFill.fillTo[0], _ = strconv.Atoi(attr.Value)
+						case "t":
+							curFill.fillTo[1], _ = strconv.Atoi(attr.Value)
+						case "r":
+							curFill.fillTo[2], _ = strconv.Atoi(attr.Value)
+						case "b":
+							curFill.fillTo[3], _ = strconv.Atoi(attr.Value)
+						}
+					}
+				}
+			case "tileRect":
+				if inGrad && curFill != nil {
+					for _, attr := range t.Attr {
+						switch attr.Name.Local {
+						case "l":
+							curFill.tileTo[0], _ = strconv.Atoi(attr.Value)
+						case "t":
+							curFill.tileTo[1], _ = strconv.Atoi(attr.Value)
+						case "r":
+							curFill.tileTo[2], _ = strconv.Atoi(attr.Value)
+						case "b":
+							curFill.tileTo[3], _ = strconv.Atoi(attr.Value)
+						}
+					}
 				}
 			case "lin":
 				if inGrad {
@@ -577,15 +636,31 @@ func (r *PPTXReader) parseThemeFormatScheme(data []byte, ts *themeState) {
 				}
 			case "gradFill":
 				if inGrad {
-					ts.fillStyles = append(ts.fillStyles, *curFill)
+					if curFillIsBg {
+						ts.bgFillStyles = append(ts.bgFillStyles, *curFill)
+					} else {
+						ts.fillStyles = append(ts.fillStyles, *curFill)
+					}
 					inGrad = false
 					curFill = nil
 				}
 			case "solidFill":
-				if inFillLst && !inGrad && curFill != nil {
-					ts.fillStyles = append(ts.fillStyles, *curFill)
+				if !inGrad && curFill != nil && (inFillLst || inBgFillLst) {
+					if curFillIsBg {
+						ts.bgFillStyles = append(ts.bgFillStyles, *curFill)
+					} else {
+						ts.fillStyles = append(ts.fillStyles, *curFill)
+					}
 					curFill = nil
 				}
+			case "blipFill":
+				if inBgFillLst && curFill != nil && !inGrad {
+					// close the degraded solid entry the start side opened
+					ts.bgFillStyles = append(ts.bgFillStyles, *curFill)
+					curFill = nil
+				}
+			case "bgFillStyleLst":
+				inBgFillLst = false
 			case "ln":
 				if inLnLst && curLn != nil {
 					ts.lnStyles = append(ts.lnStyles, *curLn)
@@ -722,6 +797,17 @@ func applyColorOps(c Color, ops []themeColorOp) Color {
 // parsed theme the reference degrades to a solid of its own colour, the
 // pre-r30 reading, so synthetic tests and theme-less decks keep working.
 func resolveThemeFillStyle(pres *Presentation, idx int, scheme string, slideOps []themeColorOp) *Fill {
+	return resolveThemeStyleList(pres, pres.themeFillStyles, idx, scheme, slideOps)
+}
+
+// resolveThemeBgFillStyle resolves a bgRef's 1001-based index against the
+// theme's <a:bgFillStyleLst> — the list bgRef actually indexes (a shape
+// style's fillRef indexes fillStyleLst; the two lists differ).
+func resolveThemeBgFillStyle(pres *Presentation, idx int, scheme string, slideOps []themeColorOp) *Fill {
+	return resolveThemeStyleList(pres, pres.themeBgFillStyles, idx, scheme, slideOps)
+}
+
+func resolveThemeStyleList(pres *Presentation, styles []themeFillStyle, idx int, scheme string, slideOps []themeColorOp) *Fill {
 	argb, ok := "", false
 	if pres != nil && pres.themeColors != nil {
 		argb, ok = pres.themeColors[scheme]
@@ -730,10 +816,10 @@ func resolveThemeFillStyle(pres *Presentation, idx int, scheme string, slideOps 
 		return nil
 	}
 	ph := applyColorOps(NewColor(argb), slideOps)
-	if pres == nil || idx < 1 || idx > len(pres.themeFillStyles) {
+	if pres == nil || idx < 1 || idx > len(styles) {
 		return NewFill().SetSolid(ph)
 	}
-	style := pres.themeFillStyles[idx-1]
+	style := styles[idx-1]
 	if len(style.stops) == 0 {
 		return nil
 	}
@@ -744,6 +830,16 @@ func resolveThemeFillStyle(pres *Presentation, idx int, scheme string, slideOps 
 	f := NewFill()
 	if style.solid || len(colors) == 1 {
 		return f.SetSolid(colors[0])
+	}
+	if style.path != "" {
+		// A path-shaped style body (the bgFillStyleLst circle gradients the
+		// themed master backgrounds lean on): keep the full stop list so
+		// the renderer's path-gradient geometry runs it.
+		stops := make([]GradStop, len(colors))
+		for i := range colors {
+			stops[i] = GradStop{Pos: style.stops[i].pos, Color: colors[i]}
+		}
+		return f.SetGradientStops(stops, style.angle, style.path, style.fillTo, style.tileTo)
 	}
 	f.SetGradientLinear(colors[0], colors[len(colors)-1], style.angle)
 	if len(colors) >= 3 {
