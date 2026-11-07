@@ -847,44 +847,81 @@ func (r *renderer) smartArtProcessArrow(nodes []*SmartArtNode, colorful bool, fa
 	}
 }
 
-// smartArtTwoBox draws the accent-process family's layout: each node
-// renders as a blue header box (top-left) with a pale body box (larger,
-// below-right, overlapping) — the office export's header/body pair with
-// a thin border on the body box. The texts go in their respective boxes.
 func (r *renderer) smartArtTwoBox(nodes []*SmartArtNode, colorful bool, face font.Face, x, y, w, h int) {
 	n := len(nodes)
 	if n == 0 || w < 1 || h < 1 {
 		return
 	}
-	cw := w / n
 	white := color.RGBA{R: 255, G: 255, B: 255, A: 255}
-
+	dark := color.RGBA{R: 50, G: 50, B: 50, A: 255}
+	// Geometry measured off the accent-process export: each pair spans ~43%
+	// of the frame with ~14% gaps, the header sits at 8%..42% of the frame
+	// height at 82% of the pair width, and the white bordered body overlaps
+	// it from 29% down to 85%, offset right by 18% of the pair.
+	gap := float64(w) * 0.14 / float64(maxInt(n-1, 1))
+	pairW := (float64(w) - gap*float64(n-1)) / float64(n)
+	radius := int(float64(h) * 0.04)
 	for i, node := range nodes {
-		nx := x + i*cw
+		px := float64(x) + float64(i)*(pairW+gap)
 		slot := smartArtSlot(i, colorful)
-		body := smartArtBody(slot)
-
-		// header box: blue, covers the top-left area (smaller)
-		hdrRect := image.Rect(nx, y, nx+cw*7/8, y+h*45/100)
-		r.fillRectFast(hdrRect, slot)
-		face2, lines := r.smartArtFitFace(node.Text, hdrRect.Dx()-12, hdrRect.Dy()-8)
-		inner := image.Rect(hdrRect.Min.X+6, hdrRect.Min.Y+3, hdrRect.Max.X-6, hdrRect.Max.Y-3)
-		r.smartArtDrawLines(lines, face2, white, inner)
-
-		// body box: pale with a thin border, larger, below-right (overlapping)
-		bodyRect := image.Rect(nx+cw/8, y+h*30/100, nx+cw-4, y+h*88/100)
-		r.fillRectFast(bodyRect, body)
-		r.drawRectBorder(bodyRect, color.RGBA{R: 120, G: 120, B: 120, A: 255}, 1, BorderSolid)
-
-		// children as bullet text lines inside the body box
-		kidY := bodyRect.Min.Y + 8
-		kidFace := NewFont()
-		kidFace.Size = 11
-		kidFace2 := r.getFace(kidFace)
+		hx, hw := px, pairW*0.82
+		hy, hh := float64(y)+float64(h)*0.08, float64(h)*0.34
+		r.fillRoundedRect(int(hx), int(hy), int(hw), int(hh), radius, slot)
+		// header label: left-aligned, centred vertically
+		hFace, hLines := r.smartArtFitFace(node.Text, int(hw*0.75), int(hh*0.8))
+		if len(hLines) > 0 {
+			m := hFace.Metrics()
+			th := (m.Ascent + m.Descent).Ceil()
+			tx := int(hx + pairW*0.11)
+			ty := int(hy+hh/2) - th*len(hLines)/2 + m.Ascent.Ceil()
+			for _, line := range hLines {
+				d := &font.Drawer{Dst: r.img, Src: image.NewUniform(drawSrc(white)), Face: hFace, Dot: fixed.P(tx, ty)}
+				d.DrawString(line)
+				ty += th
+			}
+		}
+		// body: white with the accent's own border, offset down-right so it
+		// overlaps the header's bottom edge
+		bx, bw := px+pairW*0.18, pairW*0.82
+		by, bh := float64(y)+float64(h)*0.29, float64(h)*0.56
+		bRect := image.Rect(int(bx), int(by), int(bx+bw), int(by+bh))
+		// The body sits a touch translucent: the header shows through the
+		// overlap as a pale wash (the export's overlap region is not white).
+		r.fillRoundedRect(bRect.Min.X, bRect.Min.Y, bRect.Dx(), bRect.Dy(), radius, color.RGBA{R: 255, G: 255, B: 255, A: 235})
+		r.drawRoundedRect(bRect.Min.X, bRect.Min.Y, bRect.Dx(), bRect.Dy(), radius, slot, 2)
+		// children as bullet lines at the body's top-left
+		kFace := NewFont()
+		kFace.Size = maxInt(10, int(float64(h)*0.045))
+		kidFace := r.getFace(kFace)
+		m := kidFace.Metrics()
+		th := (m.Ascent + m.Descent).Ceil()
+		kx := int(bx + pairW*0.12)
+		ky := int(by+float64(h)*0.04) + m.Ascent.Ceil()
 		for _, kid := range node.Children {
-			kidRect := image.Rect(bodyRect.Min.X+10, kidY, bodyRect.Max.X-10, kidY+16)
-			r.drawStringCentered("• "+kid.Text, kidFace2, color.RGBA{R: 50, G: 50, B: 50, A: 255}, kidRect)
-			kidY += 16
+			if ky+th > bRect.Max.Y-4 {
+				break
+			}
+			d := &font.Drawer{Dst: r.img, Src: image.NewUniform(drawSrc(dark)), Face: kidFace, Dot: fixed.P(kx, ky)}
+			d.DrawString("• " + kid.Text)
+			ky += th
+		}
+		// the arrow rides the gap between pairs, at the header/body overlap
+		if i < n-1 {
+			agx := px + pairW + gap/2
+			acy := float64(y) + float64(h)*0.42
+			aw := gap * 0.8
+			ahh := float64(h) * 0.045
+			tailW := aw * 0.55
+			mix := smartArtBodyMix(slot, 0.35)
+			r.fillPolygon([]fpoint{
+				{agx - aw/2, acy - ahh/2},
+				{agx - aw/2 + tailW, acy - ahh/2},
+				{agx - aw/2 + tailW, acy - ahh},
+				{agx + aw/2, acy},
+				{agx - aw/2 + tailW, acy + ahh},
+				{agx - aw/2 + tailW, acy + ahh/2},
+				{agx - aw/2, acy + ahh/2},
+			}, mix)
 		}
 	}
 }
