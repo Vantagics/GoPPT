@@ -7009,12 +7009,20 @@ func (r *renderer) buildParaTextRuns(elements []ParagraphElement) []textRun {
 			if e.fieldType == "slidenum" {
 				text = strconv.Itoa(r.slideNumber)
 			}
-			if text == "" {
-				continue
-			}
 			f := e.font
 			if f == nil {
 				f = NewFont()
+			}
+			if f.CapAll {
+				// The layout/master ladder's cap="all" renders every glyph
+				// uppercase (the ArtisticEffectSample title's "WELCOME
+				// PAGE"); uppercasing here keeps the wrap measurement and
+				// the draw on the same glyphs, and leaves the parsed text
+				// (and the writer's round trip) untouched.
+				text = strings.ToUpper(text)
+			}
+			if text == "" {
+				continue
 			}
 			// A linked run is always underlined: PowerPoint takes the
 			// underline from the link, not from the run's u attribute —

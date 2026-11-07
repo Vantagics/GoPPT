@@ -4799,6 +4799,9 @@ type layoutPlaceholder struct {
 	// fontItalic is the same level's i="1" — read beside the bold so the
 	// ladder can lean on it the way Office's own export leans.
 	fontItalic bool
+	// fontCapAll is the same level's cap="all" — the ArtisticEffectSample
+	// title ladder renders every glyph uppercase.
+	fontCapAll bool
 	fontColor  Color
 	// Horizontal alignment from the placeholder's own <a:lstStyle> lvl1pPr
 	// algn attribute. The master's slide-number placeholder is where
@@ -5177,7 +5180,8 @@ func applyPlaceholderFont(ph *PlaceholderShape, def *layoutPlaceholder) {
 		return
 	}
 	if def.fontName == "" && def.fontEA == "" && def.fontSize == 0 && !def.fontBold &&
-		!def.fontItalic && (def.fontColor.ARGB == "" || def.fontColor.ARGB == "FF000000") {
+		!def.fontItalic && !def.fontCapAll &&
+		(def.fontColor.ARGB == "" || def.fontColor.ARGB == "FF000000") {
 		// Exit only when the def carries nothing a colour or style can
 		// inherit: the ooxtheme body placeholder states exactly one thing —
 		// its defRPr solidFill, the grey tx1 with two lum halves — and the
@@ -5187,7 +5191,17 @@ func applyPlaceholderFont(ph *PlaceholderShape, def *layoutPlaceholder) {
 	for _, para := range ph.paragraphs {
 		for _, elem := range para.elements {
 			tr, ok := elem.(*TextRun)
-			if !ok || tr.font == nil {
+			if !ok {
+				continue
+			}
+			// A cap="all" def applies even to runs that declared no rPr at
+			// all (the ArtisticEffectSample title's bare <a:rPr lang/>): the
+			// transform is a rendering law, not a font property another rung
+			// would race with.
+			if tr.font == nil && def.fontCapAll {
+				tr.font = NewFont()
+			}
+			if tr.font == nil {
 				continue
 			}
 			if tr.font.Name == "Calibri" && def.fontName != "" {
@@ -5204,6 +5218,9 @@ func applyPlaceholderFont(ph *PlaceholderShape, def *layoutPlaceholder) {
 			}
 			if def.fontItalic && !tr.font.italicSet {
 				tr.font.Italic = true
+			}
+			if def.fontCapAll {
+				tr.font.CapAll = true
 			}
 			if def.fontColor.ARGB != "" && def.fontColor.ARGB != "FF000000" && !tr.font.runColorSet {
 				tr.font.Color = def.fontColor
@@ -5966,6 +5983,7 @@ func (r *PPTXReader) parsePlaceholderDefs(data []byte, pres *Presentation) []lay
 	var fontSize int
 	var fontBold bool
 	var fontItalic bool
+	var fontCapAll bool
 	var fontColor Color
 	var insetLeft, insetRight, insetTop, insetBottom int64
 	var insetsSet bool
@@ -5996,6 +6014,7 @@ func (r *PPTXReader) parsePlaceholderDefs(data []byte, pres *Presentation) []lay
 				fontSize = 0
 				fontBold = false
 				fontItalic = false
+				fontCapAll = false
 				fontColor = Color{}
 				// Initialize to PowerPoint defaults
 				insetLeft, insetRight = 91440, 91440
@@ -6183,6 +6202,8 @@ func (r *PPTXReader) parsePlaceholderDefs(data []byte, pres *Presentation) []lay
 							// this one level; Office leaned it while the
 							// renderer sat upright.
 							fontItalic = attr.Value == "1"
+						case "cap":
+							fontCapAll = attr.Value == "all"
 						}
 					}
 				}
@@ -6285,6 +6306,7 @@ func (r *PPTXReader) parsePlaceholderDefs(data []byte, pres *Presentation) []lay
 						fontSize:    fontSize,
 						fontBold:    fontBold,
 						fontItalic:  fontItalic,
+						fontCapAll:  fontCapAll,
 						fontColor:   fontColor,
 						insetLeft:   insetLeft,
 						insetRight:  insetRight,

@@ -103,6 +103,9 @@ type Font struct {
 	Size          int    // in points
 	Bold          bool
 	Italic        bool
+	// CapAll carries <a:defRPr cap="all"> from the placeholder ladder: the
+	// run renders every glyph uppercase.
+	CapAll bool
 	Underline     UnderlineType
 	Strikethrough bool
 	Color         Color
