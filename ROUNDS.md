@@ -92,6 +92,9 @@ POI 特性文稿），用 cmd/zz_render + cmd/zz_cmp 与 PowerPoint COM 导出
 | r131 | a86df4b | 占位符装饰保留填充/边框、清空提示文本（原规则整形状
   保留把 Click to edit... 提示叠画在幻灯片标题上；treck 图片标记的
   custGeom 绘制例外不变） | ShapeLineProperties 6.46→5.42 |
+| r132 | 0987c70 | 椭圆渐变直接在画布上 alpha-over 合成（原在透明缓冲上
+  混——75% alpha 的紫 stop 印成暗色；smartart-simple 的 def 圆透过
+  重叠区读出底下的照片） | smartart-simple 6.85→5.66 |
 
 PowerPoint 把粘贴的 SmartArt/图表转成的 "Freeform N" 全部走
 `<a:gdLst>` 公式引用（`<a:pt x="f5"/>`），旧解析器 `strconv.ParseInt("f5")`
