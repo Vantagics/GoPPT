@@ -136,6 +136,9 @@ alphaModFix 写回（r108）、母版装饰形状写回（r109）。
    内容 v1 不复绘（r119 已让各 frame 各读各的 data）。
 6. **ArtisticEffect/pptx2svg/accent-process**（8-10% 级）：艺术效果、
    SVG 图形细节与 accent-process 的 composite 重叠；smartart-simple 残差
-   为渐变 stop 的 25% alpha（r100 回退区）。
+   为 def 圆文字底色与重叠区像素。
+6b. **smartart-rotation 6.87**：径向汇聚大箭头（块状杆+张开头部）已实现
+   但标签需随箭头旋转——引擎无任意角度文字渲染，圆环近似按指标更优故
+   回退（r132 实验）。
 7. **文字反锯齿与换行点**：结构性差异，不可归零（字体度量致个别
    词掉行，行高随之漂移——customGeo slide28 的表格行高漂移属此类）。
