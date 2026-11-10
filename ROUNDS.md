@@ -87,6 +87,8 @@ POI 特性文稿），用 cmd/zz_render + cmd/zz_cmp 与 PowerPoint COM 导出
 | r129 | c5377c2 | SmartArt 点文本保留 <a:br/> 为硬换行（LO 用 br 断行而非
   段落——收集器跨过去拼成一行）；smartArtWrap 按段落分段换行、cycle 标签
   与两盒 bullet 消费处净化为空格 | smartart-font-size 14.97→14.84 |
+| r130 | bf64b2f | 母版 titleStyle 梯级读取渐变文字色（首 stop 作为级别
+  solid 色——KEY02 的 48pt 白字写在图上，原因 solidFill-only 门控掉黑） | KEY02 6.12→5.76 |
 
 PowerPoint 把粘贴的 SmartArt/图表转成的 "Freeform N" 全部走
 `<a:gdLst>` 公式引用（`<a:pt x="f5"/>`），旧解析器 `strconv.ParseInt("f5")`
