@@ -5528,15 +5528,22 @@ func (r *PPTXReader) parseDecorationShapes(data []byte, rels []xmlRelForRead, zr
 	for _, s := range deco.shapes {
 		switch v := s.(type) {
 		case *PlaceholderShape:
-			// A placeholder is a prompt an export never draws — unless the
-			// layout gave it explicit decoration to carry: the treck theme's
-			// picture marker holds a multi-path custGeom over a solid fill,
-			// and Office draws exactly that on every slide using the layout.
-			if v.customPath != nil ||
+			// A placeholder that paints — its own fill, border or drawn art —
+			// renders on every slide, but its TEXT is the editor's prompt:
+			// Office never exports "Click to edit Master title style" over a
+			// slide's real title (the ShapeLineProperties master). Keep the
+			// shape, clear the prompt paragraphs; the treck theme's picture
+			// marker with its multi-path custGeom keeps its drawn art.
+			hasPaint := v.customPath != nil ||
 				(v.fill != nil && v.fill.Type != FillNone) ||
-				(v.border != nil && v.border.Style != BorderNone) {
-				out = append(out, s)
+				(v.border != nil && v.border.Style != BorderNone)
+			if !hasPaint {
+				continue
 			}
+			if v.customPath == nil {
+				v.paragraphs = []*Paragraph{}
+			}
+			out = append(out, s)
 		case *DrawingShape:
 			// A picture placeholder is a prompt, not decoration: an export
 			// does not draw it any more than it draws an empty title.
