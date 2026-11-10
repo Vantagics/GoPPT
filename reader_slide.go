@@ -5560,6 +5560,8 @@ func parseMasterTextStyles(data []byte, pres *Presentation) *masterTextStyles {
 	var cur *masterLevelStyle
 	inDefRPr := false
 	inSolidFill := false
+	inGradFillText := false
+	gradCaptured := false
 	inSpcBef := false
 	spcBefPct := 0
 
@@ -5633,6 +5635,15 @@ func parseMasterTextStyles(data []byte, pres *Presentation) *masterTextStyles {
 				}
 			case "solidFill":
 				inSolidFill = true
+			case "gradFill":
+				// A level style can set its text colour with a gradient (the
+				// KEY02 master's 48pt white-on-image titles); the model is a
+				// solid colour, so the FIRST stop's colour rides on as the
+				// level's colour.
+				if inDefRPr {
+					inGradFillText = true
+					gradCaptured = false
+				}
 			case "spcBef":
 				// Space before each paragraph. PowerPoint's own masters write
 				// it as a percentage of the line (<a:spcPct val="20000"/>),
@@ -5699,21 +5710,23 @@ func parseMasterTextStyles(data []byte, pres *Presentation) *masterTextStyles {
 					}
 				}
 			case "srgbClr":
-				if inSolidFill && cur != nil {
+				if (inSolidFill || (inGradFillText && !gradCaptured)) && cur != nil {
 					for _, attr := range t.Attr {
 						if attr.Name.Local == "val" {
 							cur.color = NewColor("FF" + attr.Value)
+							gradCaptured = true
 						}
 					}
 				}
 			case "schemeClr":
-				if inSolidFill && cur != nil && pres != nil {
+				if (inSolidFill || (inGradFillText && !gradCaptured)) && cur != nil && pres != nil {
 					for _, attr := range t.Attr {
 						if attr.Name.Local != "val" {
 							continue
 						}
 						if argb, ok := pres.themeColors[attr.Value]; ok && argb != "" {
 							cur.color = NewColor(argb)
+							gradCaptured = true
 						}
 					}
 				}
@@ -5725,6 +5738,8 @@ func parseMasterTextStyles(data []byte, pres *Presentation) *masterTextStyles {
 				inDefRPr = false
 			case "solidFill":
 				inSolidFill = false
+			case "gradFill":
+				inGradFillText = false
 			case "spcBef":
 				inSpcBef = false
 			case "lvl1pPr", "lvl2pPr", "lvl3pPr", "lvl4pPr", "lvl5pPr",
