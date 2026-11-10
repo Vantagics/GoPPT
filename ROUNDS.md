@@ -89,6 +89,9 @@ POI 特性文稿），用 cmd/zz_render + cmd/zz_cmp 与 PowerPoint COM 导出
   与两盒 bullet 消费处净化为空格 | smartart-font-size 14.97→14.84 |
 | r130 | bf64b2f | 母版 titleStyle 梯级读取渐变文字色（首 stop 作为级别
   solid 色——KEY02 的 48pt 白字写在图上，原因 solidFill-only 门控掉黑） | KEY02 6.12→5.76 |
+| r131 | a86df4b | 占位符装饰保留填充/边框、清空提示文本（原规则整形状
+  保留把 Click to edit... 提示叠画在幻灯片标题上；treck 图片标记的
+  custGeom 绘制例外不变） | ShapeLineProperties 6.46→5.42 |
 
 PowerPoint 把粘贴的 SmartArt/图表转成的 "Freeform N" 全部走
 `<a:gdLst>` 公式引用（`<a:pt x="f5"/>`），旧解析器 `strconv.ParseInt("f5")`
