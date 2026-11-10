@@ -1016,14 +1016,7 @@ func (r *renderer) renderRichText(s *RichTextShape) {
 					fc = tr.scaleAlpha(fc)
 					tr.fillEllipseAA(ox, oy, w, h, fc)
 				} else {
-					buf := image.NewRGBA(image.Rect(0, 0, maxInt(w, 1), maxInt(h, 1)))
-					br := tr.subRenderer(buf)
-					if s.fill.Type == FillGradientPath {
-						br.fillGradientPath(buf.Bounds(), s.fill)
-					} else {
-						br.fillGradientLinear(buf.Bounds(), s.fill)
-					}
-					tr.fillEllipseImage(ox, oy, w, h, buf)
+					tr.fillEllipseGradientOver(ox, oy, w, h, s.fill)
 				}
 			}
 		} else {
@@ -2166,14 +2159,7 @@ func (r *renderer) renderAutoShapeFill(s *AutoShape, x, y, w, h int) {
 			// box: a theme fill style (fillRef idx=2) on an ellipse drew
 			// the box and printed a rectangle where Office fans an
 			// ellipse (customGeo's slide41).
-			buf := image.NewRGBA(image.Rect(0, 0, maxInt(w, 1), maxInt(h, 1)))
-			br := r.subRenderer(buf)
-			if s.fill.Type == FillGradientPath {
-				br.fillGradientPath(buf.Bounds(), s.fill)
-			} else {
-				br.fillGradientLinear(buf.Bounds(), s.fill)
-			}
-			r.fillEllipseImage(x, y, w, h, buf)
+			r.fillEllipseGradientOver(x, y, w, h, s.fill)
 		}
 	case AutoShapeRoundedRect:
 		radius := roundedRectRadius(w, h, s.adjustValues)
@@ -5061,6 +5047,67 @@ func (r *renderer) fillEllipseImage(x, y, w, h int, src image.Image) {
 			sy := int(float64(py) / float64(h) * srcH)
 			c := src.At(sb.Min.X+sx, sb.Min.Y+sy)
 			r.img.Set(x+px, y+py, drawSrc(color.RGBAModel.Convert(c).(color.RGBA)))
+		}
+	}
+}
+
+// fillEllipseGradientOver paints a gradient inside the ellipse silhouette,
+// compositing every pixel over the existing canvas: a semi-transparent stop
+// reads whatever the shape covers — the smartart-simple def circle's 25%
+// transparency shows the photo beneath it through the overlap.
+func (r *renderer) fillEllipseGradientOver(x, y, w, h int, fill *Fill) {
+	pos, cols := gradientStopsRGBA(fill)
+	if pos == nil || w <= 0 || h <= 0 {
+		return
+	}
+	var ramp [][4]uint8
+	if len(pos) == 2 && pos[1] > pos[0] {
+		ramp = gradEasedRamp(cols[0], cols[1])
+	}
+	rad := float64(fill.Rotation) * math.Pi / 180.0
+	cosA := math.Cos(rad)
+	sinA := math.Sin(rad)
+	ecx, ecy := float64(w)/2, float64(h)/2
+	erx, ery := float64(w)/2, float64(h)/2
+	maxProj := math.Abs(ecx*cosA) + math.Abs(ecy*sinA)
+	if maxProj < 1 {
+		maxProj = 1
+	}
+	invMax := 1.0 / (2 * maxProj)
+	for py := 0; py < h; py++ {
+		for px := 0; px < w; px++ {
+			dxn := (float64(px)+0.5-ecx)/erx
+			dyn := (float64(py)+0.5-ecy)/ery
+			if dxn*dxn+dyn*dyn > 1 {
+				continue
+			}
+			dxf := float64(px) + 0.5 - ecx
+			dyf := float64(py) + 0.5 - ecy
+			t := (dxf*cosA + dyf*sinA + maxProj) * invMax
+			if t < 0 {
+				t = 0
+			} else if t > 1 {
+				t = 1
+			}
+			outC := gradStopColor(pos, cols, t)
+			if ramp != nil {
+				seg := (t - pos[0]) / (pos[1] - pos[0])
+				if seg < 0 {
+					seg = 0
+				} else if seg > 1 {
+					seg = 1
+				}
+				outC = ramp[int(seg*4096.0+0.5)]
+			}
+			a := int(outC[3])
+			ia := 255 - a
+			dst := r.img.RGBAAt(x+px, y+py)
+			r.img.SetRGBA(x+px, y+py, color.RGBA{
+				R: uint8((int(outC[0])*a + int(dst.R)*ia) / 255),
+				G: uint8((int(outC[1])*a + int(dst.G)*ia) / 255),
+				B: uint8((int(outC[2])*a + int(dst.B)*ia) / 255),
+				A: 255,
+			})
 		}
 	}
 }
