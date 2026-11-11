@@ -140,5 +140,10 @@ alphaModFix 写回（r108）、母版装饰形状写回（r109）。
 6b. **smartart-rotation 6.87**：径向汇聚大箭头（块状杆+张开头部）已实现
    但标签需随箭头旋转——引擎无任意角度文字渲染，圆环近似按指标更优故
    回退（r132 实验）。
+6c. **multi-master writer（r133 实验）**：发射已通到 OPC 有效（python-pptx
+   可开、关系目标齐全、layout id 全局唯一），但 PowerPoint 仍报
+   0x80070570 拒开——包接线之外的 OOXML 一致性（母版样式化背景、
+   notesMaster 一致性、每 master 主题保真）是独立工程。读取侧已为
+   其备好每 slide 的 rung 路径戳记（r133 落地保留）。
 7. **文字反锯齿与换行点**：结构性差异，不可归零（字体度量致个别
    词掉行，行高随之漂移——customGeo slide28 的表格行高漂移属此类）。
