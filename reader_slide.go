@@ -28,7 +28,7 @@ func (r *PPTXReader) readSlide(zr *zip.Reader, path string, pres *Presentation, 
 	// The master rung and its theme activate first: a schemeClr or fillRef in
 	// the slide's own markup resolves against the theme of the master the
 	// slide reaches, not against whichever master was parsed previously.
-	r.activateSlideRungs(zr, slideRels, path, pres)
+	r.activateSlideRungs(zr, slideRels, path, pres, slide)
 
 	if err := r.parseSlideXML(decoder, slide, slideRels, zr, path, pres); err != nil {
 		return nil, err
@@ -5419,7 +5419,7 @@ func remapClrMap(data []byte, ts *themeState, root string) {
 // at the rungs this slide reaches, before any of its markup is parsed: a
 // schemeClr in the slide resolves against the theme of the master the slide's
 // layout belongs to, and a placeholder inherits from that master's geometry.
-func (r *PPTXReader) activateSlideRungs(zr *zip.Reader, slideRels []xmlRelForRead, slidePath string, pres *Presentation) {
+func (r *PPTXReader) activateSlideRungs(zr *zip.Reader, slideRels []xmlRelForRead, slidePath string, pres *Presentation, slide *Slide) {
 	layoutPath := ""
 	for _, rel := range slideRels {
 		if rel.Type == relTypeSlideLayout {
@@ -5455,9 +5455,12 @@ func (r *PPTXReader) activateSlideRungs(zr *zip.Reader, slideRels []xmlRelForRea
 	}
 	if st := r.masterStateFor(zr, masterPath, pres); st != nil {
 		pres.applyMasterState(st)
+		slide.themePath = st.themePath
 	} else {
 		pres.applyThemeState(pres.defaultTheme)
 	}
+	slide.layoutPath = layoutPath
+	slide.masterPath = masterPath
 
 	// A layout whose clrMapOvr carries <a:overrideClrMapping> rebinds the
 	// colour names a second time — the treck theme's section-header layout

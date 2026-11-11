@@ -199,6 +199,11 @@ type Slide struct {
 	transition *Transition
 	visible    bool
 	comments   []*Comment
+	// The part paths this slide draws its rungs from — the writer's
+	// multi-master plan groups slides by them.
+	layoutPath string
+	masterPath string
+	themePath  string
 	animations []*Animation
 	background *Fill
 	// hideMasterSp records a root showMasterSp="0": the slide asked for the

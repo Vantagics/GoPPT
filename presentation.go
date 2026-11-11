@@ -119,6 +119,8 @@ type masterState struct {
 	bgImage      *DrawingShape
 	decoShapes   []Shape
 	theme        *themeState
+	// themePath is the theme part the master's rels name.
+	themePath string
 }
 
 // applyThemeState re-points the active theme fields. All consumers read them
