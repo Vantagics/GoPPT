@@ -586,6 +586,7 @@ func (r *PPTXReader) parseSlideXML(decoder *xml.Decoder, slide *Slide, rels []xm
 		inTcTxBody      bool
 		inTcParagraph   bool
 		inTcRun         bool
+		inUFill         bool // inside <a:uFill>: the underline fill, never the text colour
 		inTcText        bool
 		inTcPr          bool
 		inTcPrSolidFill bool
@@ -1185,6 +1186,7 @@ func (r *PPTXReader) parseSlideXML(decoder *xml.Decoder, slide *Slide, rels []xm
 			case "nvSpPr", "nvPicPr", "nvCxnSpPr", "nvGraphicFramePr", "nvGrpSpPr":
 				state.inNvSpPr = true
 			case "tcPr":
+				println("DBG tcPr enter: inTc=", state.inTc, "row=", currentTableRow, "col=", currentTableCol, "rows=", len(currentTable.rows), "rowlen=", func() int { if currentTableRow >= 0 && currentTableRow < len(currentTable.rows) { return len(currentTable.rows[currentTableRow]) }; return -1 }())
 				if state.inTc && currentTable != nil && currentTableRow >= 0 && currentTableCol >= 0 &&
 					currentTableRow < len(currentTable.rows) && currentTableCol < len(currentTable.rows[currentTableRow]) {
 					state.inTcPr = true
@@ -1872,8 +1874,16 @@ func (r *PPTXReader) parseSlideXML(decoder *xml.Decoder, slide *Slide, rels []xm
 						}
 					}
 				}
+			case "uFill":
+				// LO writes <a:uFill> inside rPr: the underline's own fill.
+				if state.inRunProps {
+					state.inUFill = true
+				}
 			case "solidFill":
-				if state.inExtLst {
+				if state.inUFill {
+					// The underline fill colour: the model carries no
+					// per-underline fill, so this reads as nothing.
+				} else if state.inExtLst {
 					// Ignore solidFill inside extLst (e.g. hiddenFill)
 				} else if state.inTcPr && !state.inTcPrLn {
 					// Table cell solid fill
@@ -2120,6 +2130,7 @@ func (r *PPTXReader) parseSlideXML(decoder *xml.Decoder, slide *Slide, rels []xm
 					}
 				} else if state.inTcPrSolidFill {
 					// Table cell fill or border color
+					println("DBG tcPrSolidFill", state.inTcPr, state.inTcRun, state.inRunProps)
 					for _, attr := range t.Attr {
 						if attr.Name.Local == "val" {
 							c := NewColor("FF" + attr.Value)
@@ -2170,6 +2181,7 @@ func (r *PPTXReader) parseSlideXML(decoder *xml.Decoder, slide *Slide, rels []xm
 				} else if state.inSolidFill && state.inRunProps && currentFont != nil {
 					for _, attr := range t.Attr {
 						if attr.Name.Local == "val" {
+							println("DBG run color", attr.Value)
 							currentFont.Color = NewColor("FF" + attr.Value)
 							currentFont.runColorSet = true
 							lastColor = &currentFont.Color
@@ -4315,6 +4327,8 @@ func (r *PPTXReader) parseSlideXML(decoder *xml.Decoder, slide *Slide, rels []xm
 				state.inRunProps = false
 				state.inSolidFill = false
 				state.inRunPropsGradFill = false
+			case "uFill":
+				state.inUFill = false
 			case "defRPr":
 				state.inDefRPr = false
 				state.inSolidFill = false
