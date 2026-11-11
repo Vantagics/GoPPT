@@ -2430,6 +2430,7 @@ func (r *PPTXReader) parseSlideXML(decoder *xml.Decoder, slide *Slide, rels []xm
 							lastColor = fontRefColor
 						} else if state.inSolidFill && state.inRunProps && currentFont != nil {
 							currentFont.Color = c
+							currentFont.runColorSet = true
 							lastColor = &currentFont.Color
 						} else if state.inSolidFill && state.inLn && !state.inRunProps {
 							lineColorExplicit = true
