@@ -663,6 +663,12 @@ func applyBandTextColor(cell *TableCell, pres *Presentation, band tableStyleBand
 			if !ok || tr.font == nil {
 				continue
 			}
+			// A run whose rPr declared a colour keeps it — explicit black is
+			// a choice, not the reader's default (the LO deck's cells write
+			// explicit 000000 over banded fills).
+			if tr.font.runColorSet {
+				continue
+			}
 			if tr.font.Color.ARGB == "" || tr.font.Color.ARGB == "FF000000" {
 				tr.font.Color = c
 			}
