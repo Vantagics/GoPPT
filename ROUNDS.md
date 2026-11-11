@@ -92,6 +92,8 @@ POI 特性文稿），用 cmd/zz_render + cmd/zz_cmp 与 PowerPoint COM 导出
 | r134 | 35bc837 | <a:uFill>（LO 下划线填充）不再读作 run 文字色——LIBRE_OFFICE
   表格的显式黑字被 cell 的白 uFill 覆盖成白字 | LIBRE_OFFICE 6.16→6.09 |
 | r135 | 41bbc73 | 表格样式带色文本不再覆盖显式命色的 run（runColorSet 守卫） | 显式色保真（无指标回归） |
+| r137 | 35f43e8 | schemeClr run 色分支补 runColorSet（原 srgbClr 有而 schemeClr 无——
+  customGeo slide05 标题被 layout 黄色 defRPr 覆盖） | customGeo 7.01→7.00（标题白 ✓） |
 | r131 | a86df4b | 占位符装饰保留填充/边框、清空提示文本（原规则整形状
   保留把 Click to edit... 提示叠画在幻灯片标题上；treck 图片标记的
   custGeom 绘制例外不变） | ShapeLineProperties 6.46→5.42 |
