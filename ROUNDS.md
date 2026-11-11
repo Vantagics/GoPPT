@@ -145,10 +145,12 @@ alphaModFix 写回（r108）、母版装饰形状写回（r109）。
 6b. **smartart-rotation 6.87**：径向汇聚大箭头（块状杆+张开头部）已实现
    但标签需随箭头旋转——引擎无任意角度文字渲染，圆环近似按指标更优故
    回退（r132 实验）。
-6d. **SmartArt 标签字号上限**：fitFace 的 36pt 上限整体提到 65 实证净负
-   （font-size +0.61 但 6 deck 共损 2.7pp——各 deck 的 Office 标签字号由
-   其 layout 声明驱动）；正确做法 = 读取 layout1.xml 的 node 样式 sz
-   并按其设上限（r137 实验，回退）。
+6d. **SmartArt 标签字号（autofit 模型）**：layout 的 ruleLst 声明
+   primFontSz val=5 起步 + 无上限增长规则，且边距以 refType=primFontSz
+   fact=0.3 随字号增长（负反馈）。两次实验均净负：整体提上限 65
+   （font-size +0.61 但 6 deck 共损 2.7pp）、增长+0.6sz/0.2sz 边距反馈
+   近似（同样净负）——需要把 constraint/rule 求解（含边距-字号反馈）
+   移植进 fit 才能收敛。
 6c. **multi-master writer（r133 实验）**：发射已通到 OPC 有效（python-pptx
    可开、关系目标齐全、layout id 全局唯一），但 PowerPoint 仍报
    0x80070570 拒开——包接线之外的 OOXML 一致性（母版样式化背景、
