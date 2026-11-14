@@ -113,31 +113,6 @@ func (w *PPTXWriter) writeTableStyles(zw *zip.Writer) error {
 // --- Slide Master ---
 
 func (w *PPTXWriter) writeSlideMaster(zw *zip.Writer) error {
-	// The master's decoration shapes (bands, logos, artwork from the source
-	// deck) are written into the spTree so they survive the round trip —
-	// the reader renders them on every slide, and losing them strips the
-	// deck's visual identity.
-	var decoXML strings.Builder
-	shapeID := 2
-	// The shape writers use slideNum for relIdx calculations; master deco
-	// shapes have no slide-level rels, so slideNum=1 is safe (the calc
-	// walks the first slide's shapes but the deco shapes aren't in it).
-	for _, shape := range w.presentation.masterDecoShapes {
-		switch s := shape.(type) {
-		case *AutoShape:
-			decoXML.WriteString(w.writeAutoShapeXML(s, &shapeID))
-		case *RichTextShape:
-			decoXML.WriteString(w.writeRichTextShapeXML(s, &shapeID))
-		case *DrawingShape:
-			decoXML.WriteString(w.writeDrawingShapeXML(s, &shapeID, 1))
-		case *LineShape:
-			decoXML.WriteString(w.writeLineShapeXML(s, &shapeID))
-		case *GroupShape:
-			decoXML.WriteString(w.writeGroupShapeXML(s, &shapeID, 1))
-		}
-	}
-	decoStr := decoXML.String()
-
 	content := fmt.Sprintf(`<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
 <p:sldMaster xmlns:a="%s" xmlns:r="%s" xmlns:p="%s">
   <p:cSld>
@@ -160,13 +135,13 @@ func (w *PPTXWriter) writeSlideMaster(zw *zip.Writer) error {
           <a:chExt cx="0" cy="0"/>
         </a:xfrm>
       </p:grpSpPr>
-%s    </p:spTree>
+    </p:spTree>
   </p:cSld>
   <p:clrMap bg1="lt1" tx1="dk1" bg2="lt2" tx2="dk2" accent1="accent1" accent2="accent2" accent3="accent3" accent4="accent4" accent5="accent5" accent6="accent6" hlink="hlink" folHlink="folHlink"/>
   <p:sldLayoutIdLst>
     <p:sldLayoutId id="2147483649" r:id="rId1"/>
   </p:sldLayoutIdLst>
-</p:sldMaster>`, nsDrawingML, nsOfficeDocRels, nsPresentationML, decoStr)
+</p:sldMaster>`, nsDrawingML, nsOfficeDocRels, nsPresentationML)
 
 	if err := writeRawXMLToZip(zw, "ppt/slideMasters/slideMaster1.xml", content); err != nil {
 		return err
@@ -184,29 +159,28 @@ func (w *PPTXWriter) writeSlideMaster(zw *zip.Writer) error {
 // --- Slide Layout ---
 
 func (w *PPTXWriter) writeSlideLayout(zw *zip.Writer) error {
-	return w.writeSlideLayoutN(zw, 1, 1, nil)
+	return w.writeSlideLayoutN(zw, w.layoutPlan[0])
 }
 
-// writeSlideLayoutN emits the layoutIdx-th layout (within the masterIdx-th
-// master's plan) carrying its decoration shapes — the layout deco is where
-// decks like KEY02 keep their whole visual identity — plus the deco
-// pictures' media, wired into the layout's own rels.
-func (w *PPTXWriter) writeSlideLayoutN(zw *zip.Writer, masterIdx, layoutIdx int, decoShapes []Shape) error {
-	
-	var decoXML strings.Builder
+// writeSlideLayoutN emits one layout part with its decoration shapes — the
+// layout deco is where decks like KEY02 keep their whole visual identity —
+// and writes the deco pictures' media alongside, wiring the layout's own
+// rels to them.
+func (w *PPTXWriter) writeSlideLayoutN(zw *zip.Writer, entry layoutPlanEntry) error {
+	decoXML := strings.Builder{}
 	mediaRels := ""
 	shapeID := 2
-	if len(decoShapes) > 0 {
+	if len(entry.decoShapes) > 0 {
 		mediaIdx := 0
 		var body strings.Builder
-		for _, sh := range decoShapes {
+		for _, sh := range entry.decoShapes {
 			switch s := sh.(type) {
 			case *DrawingShape:
 				if s.data != nil {
 					// A deco picture: its media is written beside the layout
 					// part and referenced from the layout's own rels.
 					mediaIdx++
-					mediaName := fmt.Sprintf("imageL%d_%d.%s", masterIdx, mediaIdx, w.getImageExtension(s))
+					mediaName := fmt.Sprintf("imageL%d_%d.%s", entry.index, mediaIdx, w.getImageExtension(s))
 					fw, ferr := zw.Create("ppt/media/" + mediaName)
 					if ferr != nil {
 						return ferr
@@ -215,8 +189,9 @@ func (w *PPTXWriter) writeSlideLayoutN(zw *zip.Writer, masterIdx, layoutIdx int,
 						return werr
 					}
 					relID := fmt.Sprintf("rId%d", 1+mediaIdx)
-				mediaRels += fmt.Sprintf("  <Relationship Id=\"%s\" Type=\"%s\" Target=\"../media/%s\"/>\n", relID, relTypeImage, mediaName)
-					decoXML.WriteString(w.layoutPicXML(s, &shapeID, relID))
+					mediaRels += fmt.Sprintf("  <Relationship Id=\"%s\" Type=\"%s\" Target=\"../media/%s\"/>\n", relID, relTypeImage, mediaName)
+
+
 					continue
 				}
 				decoXML.WriteString(w.writeDrawingShapeXML(s, &shapeID, 1))
@@ -228,6 +203,9 @@ func (w *PPTXWriter) writeSlideLayoutN(zw *zip.Writer, masterIdx, layoutIdx int,
 				decoXML.WriteString(w.writeLineShapeXML(s, &shapeID))
 			case *GroupShape:
 				decoXML.WriteString(w.writeGroupShapeXML(s, &shapeID, 1))
+			case *PlaceholderShape:
+				// A placeholder in the layout deco: its fill/border paints.
+				decoXML.WriteString(w.writeRichTextShapeXML(&s.RichTextShape, &shapeID))
 			}
 		}
 		decoXML.WriteString(body.String())
@@ -257,16 +235,16 @@ func (w *PPTXWriter) writeSlideLayoutN(zw *zip.Writer, masterIdx, layoutIdx int,
   </p:clrMapOvr>
 </p:sldLayout>`, nsDrawingML, nsOfficeDocRels, nsPresentationML, decoXML.String())
 
-	if err := writeRawXMLToZip(zw, "ppt/slideLayouts/slideLayout1.xml", content); err != nil {
+	if err := writeRawXMLToZip(zw, fmt.Sprintf("ppt/slideLayouts/slideLayout%d.xml", entry.index), content); err != nil {
 		return err
 	}
 
 	// Slide layout rels: the master, then the deco pictures' media.
 	rels := fmt.Sprintf(`<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
 <Relationships xmlns="%s">
-  <Relationship Id="rId1" Type="%s" Target="../slideMasters/slideMaster%d.xml"/>
-%s</Relationships>`, nsRelationships, relTypeSlideMaster, masterIdx, mediaRels)
-	return writeRawXMLToZip(zw, "ppt/slideLayouts/_rels/slideLayout1.xml.rels", rels)
+  <Relationship Id="rId1" Type="%s" Target="../slideMasters/slideMaster1.xml"/>
+%s</Relationships>`, nsRelationships, relTypeSlideMaster, mediaRels)
+	return writeRawXMLToZip(zw, fmt.Sprintf("ppt/slideLayouts/_rels/slideLayout%d.xml.rels", entry.index), rels)
 }
 
 // layoutPicXML serialises one decoration picture of a layout part: the same
@@ -326,8 +304,6 @@ func relIDNumber(relID string) int {
 	}
 	return v
 }
-
-
 
 // --- Theme ---
 

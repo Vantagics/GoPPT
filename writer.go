@@ -35,6 +35,54 @@ func NewWriter(p *Presentation, format WriterType) (Writer, error) {
 type PPTXWriter struct {
 	presentation *Presentation
 	relID        int
+	// layoutPlan groups the slides by their layout part for the emission:
+	// one layout part per distinct layout path, each carrying its own deco.
+	layoutPlan []layoutPlanEntry
+}
+
+// layoutPlanEntry is one layout part: the slides grouped under it, its part
+// index (1-based), and its decoration shapes.
+type layoutPlanEntry struct {
+	layoutPath string
+	index      int
+	decoShapes []Shape
+}
+
+// buildLayoutPlan groups the slides by their layout part path and assigns
+// the layout part indexes. A single-layout deck yields one entry.
+func (w *PPTXWriter) buildLayoutPlan() []layoutPlanEntry {
+	var plan []layoutPlanEntry
+	byLayout := map[string]int{}
+	for _, slide := range w.presentation.slides {
+		if slide.layoutPath == "" {
+			continue
+		}
+		li, ok := byLayout[slide.layoutPath]
+		if !ok {
+			li = len(plan) + 1
+			byLayout[slide.layoutPath] = li
+			entry := layoutPlanEntry{layoutPath: slide.layoutPath, index: li}
+			if cached, ok2 := w.presentation.layoutDecoCache[slide.layoutPath]; ok2 {
+				entry.decoShapes = cached.shapes
+			}
+			plan = append(plan, entry)
+		}
+	}
+	if len(plan) == 0 {
+		plan = append(plan, layoutPlanEntry{index: 1})
+	}
+	return plan
+}
+
+// slideLayoutIndex resolves the layout part index a slide's rels point at —
+// 1 when the deck carries no plan.
+func (w *PPTXWriter) slideLayoutIndex(slide *Slide) int {
+	for _, e := range w.layoutPlan {
+		if e.layoutPath == slide.layoutPath {
+			return e.index
+		}
+	}
+	return 1
 }
 
 func (w *PPTXWriter) nextRelID() string {
@@ -71,6 +119,7 @@ func (w *PPTXWriter) WriteTo(writer io.Writer) error {
 	if w.presentation == nil {
 		return fmt.Errorf("presentation is nil")
 	}
+	w.layoutPlan = w.buildLayoutPlan()
 
 	zw := zip.NewWriter(writer)
 
@@ -126,20 +175,15 @@ func (w *PPTXWriter) WriteTo(writer io.Writer) error {
 		return err
 	}
 
-	// Write slide master and layout (the layout carries the deck's deco
-	// shapes — the KEY02/treck layouts hold the whole slide's identity)
-	layoutDeco := []Shape{}
-	if len(w.presentation.slides) > 0 {
-		if cached, ok := w.presentation.layoutDecoCache[w.presentation.slides[0].layoutPath]; ok {
-			layoutDeco = cached.shapes
-		}
-	}
+	// Write slide master and the layout parts the plan names
 	if err := w.writeSlideMaster(zw); err != nil {
 		return err
 	}
 
-	if err := w.writeSlideLayoutN(zw, 1, 1, layoutDeco); err != nil {
-		return err
+	for _, entry := range w.layoutPlan {
+		if err := w.writeSlideLayoutN(zw, entry); err != nil {
+			return err
+		}
 	}
 
 	// Write theme
@@ -149,9 +193,8 @@ func (w *PPTXWriter) WriteTo(writer io.Writer) error {
 
 	// The reader merged the master/layout decoration into each slide's shape
 	// list for rendering. Serialising them as slide content re-parents the
-	// layout's own canvas geometry into the slide (KEY02's EMF brand printed
-	// full-bleed) — the slide parts keep only the slide's own shapes; the
-	// deco stays in the master/layout parts the plan writes.
+	// layout's own canvas geometry into the slide — the slide parts keep
+	// only the slide's own shapes; the deco goes with its layout part.
 	for _, slide := range w.presentation.slides {
 		kept := make([]Shape, 0, len(slide.shapes))
 		for _, sh := range slide.shapes {
