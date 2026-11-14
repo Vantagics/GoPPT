@@ -126,18 +126,40 @@ func (w *PPTXWriter) WriteTo(writer io.Writer) error {
 		return err
 	}
 
-	// Write slide master and layout
+	// Write slide master and layout (the layout carries the deck's deco
+	// shapes — the KEY02/treck layouts hold the whole slide's identity)
+	layoutDeco := []Shape{}
+	if len(w.presentation.slides) > 0 {
+		if cached, ok := w.presentation.layoutDecoCache[w.presentation.slides[0].layoutPath]; ok {
+			layoutDeco = cached.shapes
+		}
+	}
 	if err := w.writeSlideMaster(zw); err != nil {
 		return err
 	}
 
-	if err := w.writeSlideLayout(zw); err != nil {
+	if err := w.writeSlideLayoutN(zw, 1, 1, layoutDeco); err != nil {
 		return err
 	}
 
 	// Write theme
 	if err := w.writeTheme(zw); err != nil {
 		return err
+	}
+
+	// The reader merged the master/layout decoration into each slide's shape
+	// list for rendering. Serialising them as slide content re-parents the
+	// layout's own canvas geometry into the slide (KEY02's EMF brand printed
+	// full-bleed) — the slide parts keep only the slide's own shapes; the
+	// deco stays in the master/layout parts the plan writes.
+	for _, slide := range w.presentation.slides {
+		kept := make([]Shape, 0, len(slide.shapes))
+		for _, sh := range slide.shapes {
+			if !sh.base().deco {
+				kept = append(kept, sh)
+			}
+		}
+		slide.shapes = kept
 	}
 
 	// Write slides

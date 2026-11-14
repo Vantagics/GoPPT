@@ -59,6 +59,10 @@ func (t ShapeType) String() string {
 
 // BaseShape contains common shape properties.
 type BaseShape struct {
+	// deco marks a shape the reader merged in from the master/layout
+	// decoration: it renders with the slide but the writer must not emit it
+	// as slide content (the master/layout parts already carry it).
+	deco           bool
 	name           string
 	description    string
 	hidden         bool  // <p:cNvPr hidden="1">: PowerPoint does not draw the shape

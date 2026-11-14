@@ -184,6 +184,55 @@ func (w *PPTXWriter) writeSlideMaster(zw *zip.Writer) error {
 // --- Slide Layout ---
 
 func (w *PPTXWriter) writeSlideLayout(zw *zip.Writer) error {
+	return w.writeSlideLayoutN(zw, 1, 1, nil)
+}
+
+// writeSlideLayoutN emits the layoutIdx-th layout (within the masterIdx-th
+// master's plan) carrying its decoration shapes — the layout deco is where
+// decks like KEY02 keep their whole visual identity — plus the deco
+// pictures' media, wired into the layout's own rels.
+func (w *PPTXWriter) writeSlideLayoutN(zw *zip.Writer, masterIdx, layoutIdx int, decoShapes []Shape) error {
+	
+	var decoXML strings.Builder
+	mediaRels := ""
+	shapeID := 2
+	if len(decoShapes) > 0 {
+		mediaIdx := 0
+		var body strings.Builder
+		for _, sh := range decoShapes {
+			switch s := sh.(type) {
+			case *DrawingShape:
+				if s.data != nil {
+					// A deco picture: its media is written beside the layout
+					// part and referenced from the layout's own rels.
+					mediaIdx++
+					mediaName := fmt.Sprintf("imageL%d_%d.%s", masterIdx, mediaIdx, w.getImageExtension(s))
+					fw, ferr := zw.Create("ppt/media/" + mediaName)
+					if ferr != nil {
+						return ferr
+					}
+					if _, werr := fw.Write(s.data); werr != nil {
+						return werr
+					}
+					relID := fmt.Sprintf("rId%d", 1+mediaIdx)
+				mediaRels += fmt.Sprintf("  <Relationship Id=\"%s\" Type=\"%s\" Target=\"../media/%s\"/>\n", relID, relTypeImage, mediaName)
+					decoXML.WriteString(w.layoutPicXML(s, &shapeID, relID))
+					continue
+				}
+				decoXML.WriteString(w.writeDrawingShapeXML(s, &shapeID, 1))
+			case *AutoShape:
+				decoXML.WriteString(w.writeAutoShapeXML(s, &shapeID))
+			case *RichTextShape:
+				decoXML.WriteString(w.writeRichTextShapeXML(s, &shapeID))
+			case *LineShape:
+				decoXML.WriteString(w.writeLineShapeXML(s, &shapeID))
+			case *GroupShape:
+				decoXML.WriteString(w.writeGroupShapeXML(s, &shapeID, 1))
+			}
+		}
+		decoXML.WriteString(body.String())
+	}
+
 	content := fmt.Sprintf(`<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
 <p:sldLayout xmlns:a="%s" xmlns:r="%s" xmlns:p="%s" type="blank" preserve="1">
   <p:cSld name="Blank">
@@ -201,24 +250,84 @@ func (w *PPTXWriter) writeSlideLayout(zw *zip.Writer) error {
           <a:chExt cx="0" cy="0"/>
         </a:xfrm>
       </p:grpSpPr>
-    </p:spTree>
+%s    </p:spTree>
   </p:cSld>
   <p:clrMapOvr>
     <a:masterClrMapping/>
   </p:clrMapOvr>
-</p:sldLayout>`, nsDrawingML, nsOfficeDocRels, nsPresentationML)
+</p:sldLayout>`, nsDrawingML, nsOfficeDocRels, nsPresentationML, decoXML.String())
 
 	if err := writeRawXMLToZip(zw, "ppt/slideLayouts/slideLayout1.xml", content); err != nil {
 		return err
 	}
 
-	// Slide layout rels
+	// Slide layout rels: the master, then the deco pictures' media.
 	rels := fmt.Sprintf(`<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
 <Relationships xmlns="%s">
-  <Relationship Id="rId1" Type="%s" Target="../slideMasters/slideMaster1.xml"/>
-</Relationships>`, nsRelationships, relTypeSlideMaster)
+  <Relationship Id="rId1" Type="%s" Target="../slideMasters/slideMaster%d.xml"/>
+%s</Relationships>`, nsRelationships, relTypeSlideMaster, masterIdx, mediaRels)
 	return writeRawXMLToZip(zw, "ppt/slideLayouts/_rels/slideLayout1.xml.rels", rels)
 }
+
+// layoutPicXML serialises one decoration picture of a layout part: the same
+// picture body writeDrawingShapeXML emits, with the relationship id the
+// layout's own rels assign.
+func (w *PPTXWriter) layoutPicXML(s *DrawingShape, shapeID *int, relID string) string {
+	id := *shapeID
+	*shapeID++
+
+	name := s.name
+	if name == "" {
+		name = fmt.Sprintf("Picture %d", id)
+	}
+	shadowXML := shapeEffectXML(s.shadow, s.softEdgeRad, "          ")
+	prst := s.presetGeom
+	if prst == "" {
+		prst = "rect"
+	}
+	return fmt.Sprintf(`      <p:pic>
+        <p:nvPicPr>
+          <p:cNvPr id="%d" name="%s" descr="%s"%s/>
+          <p:cNvPicPr>
+            <a:picLocks noChangeAspect="1"/>
+          </p:cNvPicPr>
+          <p:nvPr/>
+        </p:nvPicPr>
+        <p:blipFill>
+          %s
+          <a:stretch>
+            <a:fillRect/>
+          </a:stretch>
+        </p:blipFill>
+        <p:spPr>
+          <a:xfrm%s>
+            <a:off x="%d" y="%d"/>
+            <a:ext cx="%d" cy="%d"/>
+          </a:xfrm>
+          <a:prstGeom prst="%s">
+            <a:avLst/>
+          </a:prstGeom>%s
+        </p:spPr>
+      </p:pic>
+`, id, xmlEscape(name), xmlEscape(s.description), hiddenAttr(&s.BaseShape),
+		blipFillChildrenXML(relIDNumber(relID), s.alpha, s.cropLeft, s.cropTop, s.cropRight, s.cropBottom, s.lumBright, s.lumContrast, s.hasDuotone, s.duotoneA, s.duotoneB),
+		xfrmAttrs(&s.BaseShape),
+		s.offsetX, s.offsetY, s.width, s.height,
+		prst, shadowXML)
+}
+
+// relIDNumber reads the numeric part of an rId string.
+func relIDNumber(relID string) int {
+	v := 0
+	for _, ch := range relID {
+		if ch >= '0' && ch <= '9' {
+			v = v*10 + int(ch-'0')
+		}
+	}
+	return v
+}
+
+
 
 // --- Theme ---
 

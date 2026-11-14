@@ -4934,6 +4934,14 @@ func (r *PPTXReader) applyLayoutInheritance(zr *zip.Reader, slide *Slide, rels [
 		merged = append(merged, masterDeco...)
 		merged = append(merged, layoutDecoShapes...)
 		merged = append(merged, slide.shapes[offset:]...)
+		// Mark the merged decoration: they render with the slide, but the
+		// writer must keep emitting them from the master/layout parts only.
+		for _, ds := range masterDeco {
+			ds.base().deco = true
+		}
+		for _, ds := range layoutDecoShapes {
+			ds.base().deco = true
+		}
 		slide.shapes = merged
 	}
 
