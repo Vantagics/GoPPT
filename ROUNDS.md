@@ -92,6 +92,10 @@ POI 特性文稿），用 cmd/zz_render + cmd/zz_cmp 与 PowerPoint COM 导出
 | r134 | 35bc837 | <a:uFill>（LO 下划线填充）不再读作 run 文字色——LIBRE_OFFICE
   表格的显式黑字被 cell 的白 uFill 覆盖成白字 | LIBRE_OFFICE 6.16→6.09 |
 | r135 | 41bbc73 | 表格样式带色文本不再覆盖显式命色的 run（runColorSet 守卫） | 显式色保真（无指标回归） |
+| r138 | e2ef335 | 装饰形状 deco 标记：slide 部件只发自有形状、layout 部件携带
+  自身装饰（deco 图片媒体旁路发射+layout rels 接线） | 21 deck gen 改善
+  （smartart 族 16.8-37.4→0.2-0.9、KEY02 96.3→4.6、ArtisticEffectSample
+  10.0→4.6、pptx2svg 8.3→3.2）；4 deck 因单 layout 归属轻微回退 |
 | r137 | 35f43e8 | schemeClr run 色分支补 runColorSet（原 srgbClr 有而 schemeClr 无——
   customGeo slide05 标题被 layout 黄色 defRPr 覆盖） | customGeo 7.01→7.00（标题白 ✓） |
 | r131 | a86df4b | 占位符装饰保留填充/边框、清空提示文本（原规则整形状
@@ -151,12 +155,11 @@ alphaModFix 写回（r108）、母版装饰形状写回（r109）。
    （font-size +0.61 但 6 deck 共损 2.7pp）、增长+0.6sz/0.2sz 边距反馈
    近似（同样净负）——需要把 constraint/rule 求解（含边距-字号反馈）
    移植进 fit 才能收敛。
-6e. **gen 回归（KEY02 96、2411 -14.7，r109 起）**：round-trip 把 layout
-   背景 blipFill 与 EMF 回退图升格为 slide 图片，但用了 layout 的旧尺寸
-   （4:3 的 12192000×6858000 ≠ deck 的 16:9）且 EMF 无有效几何——
-   PowerPoint 按原生尺寸渲染成满幅品牌图。修复需：bgImage 尺寸取 slide
-   sldSz（非 layout 声明值）+ AlternateContent 回退 pic 的几何处理 +
-   master 级媒体发射。6c 的 multi-master 同族。
+6e. **gen 回归（KEY02 96、2411 -14.7，r109 起）已修（r138）**：装饰形状
+   被并进 slide.shapes 后 writer 把它们当 slide 内容重复发射——布局自身
+   画布几何被改挂到 slide 上。deco 标记 + writer 过滤 + layout 部件携带
+   自身装饰（含媒体与 rels）。剩余：多 layout deck 的装饰归属其首个
+   layout（2411 +14.7、themes +6.9——writer 单 layout 模型的限制）。
 6c. **multi-master writer（r133 实验）**：发射已通到 OPC 有效（python-pptx
    可开、关系目标齐全、layout id 全局唯一），但 PowerPoint 仍报
    0x80070570 拒开——包接线之外的 OOXML 一致性（母版样式化背景、
