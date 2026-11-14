@@ -190,6 +190,7 @@ func (w *PPTXWriter) writeSlideLayoutN(zw *zip.Writer, entry layoutPlanEntry) er
 					}
 					relID := fmt.Sprintf("rId%d", 1+mediaIdx)
 					mediaRels += fmt.Sprintf("  <Relationship Id=\"%s\" Type=\"%s\" Target=\"../media/%s\"/>\n", relID, relTypeImage, mediaName)
+					decoXML.WriteString(w.layoutPicXML(s, &shapeID, relID))
 
 
 					continue

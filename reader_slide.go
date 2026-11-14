@@ -2181,8 +2181,7 @@ func (r *PPTXReader) parseSlideXML(decoder *xml.Decoder, slide *Slide, rels []xm
 				} else if state.inSolidFill && state.inRunProps && currentFont != nil {
 					for _, attr := range t.Attr {
 						if attr.Name.Local == "val" {
-							println("DBG run color", attr.Value)
-							currentFont.Color = NewColor("FF" + attr.Value)
+														currentFont.Color = NewColor("FF" + attr.Value)
 							currentFont.runColorSet = true
 							lastColor = &currentFont.Color
 						}
