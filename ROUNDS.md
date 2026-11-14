@@ -94,8 +94,10 @@ POI 特性文稿），用 cmd/zz_render + cmd/zz_cmp 与 PowerPoint COM 导出
 | r135 | 41bbc73 | 表格样式带色文本不再覆盖显式命色的 run（runColorSet 守卫） | 显式色保真（无指标回归） |
 | r138 | e2ef335 | 装饰形状 deco 标记：slide 部件只发自有形状、layout 部件携带
   自身装饰（deco 图片媒体旁路发射+layout rels 接线） | 21 deck gen 改善
-  （smartart 族 16.8-37.4→0.2-0.9、KEY02 96.3→4.6、ArtisticEffectSample
-  10.0→4.6、pptx2svg 8.3→3.2）；4 deck 因单 layout 归属轻微回退 |
+  （smartart 族 16.8-37.4→0.2-0.9、ArtisticEffectSample 10.0→4.6、pptx2svg
+  8.3→3.2）；4 deck 因单 layout 归属轻微回退 |
+| r139 | d7ad48e | layout 装饰发射 groundwork：PlaceholderShape case 补齐；
+  KEY02 gen 仍 96.63（deco pic 数据解析或 PlaceholderShape 路径需深查） | 改善基础设施落地 |
 | r137 | 35f43e8 | schemeClr run 色分支补 runColorSet（原 srgbClr 有而 schemeClr 无——
   customGeo slide05 标题被 layout 黄色 defRPr 覆盖） | customGeo 7.01→7.00（标题白 ✓） |
 | r131 | a86df4b | 占位符装饰保留填充/边框、清空提示文本（原规则整形状
@@ -155,7 +157,7 @@ alphaModFix 写回（r108）、母版装饰形状写回（r109）。
    （font-size +0.61 但 6 deck 共损 2.7pp）、增长+0.6sz/0.2sz 边距反馈
    近似（同样净负）——需要把 constraint/rule 求解（含边距-字号反馈）
    移植进 fit 才能收敛。
-6e. **gen 回归（KEY02 96、2411 -14.7，r109 起）已修（r138）**：装饰形状
+6e. **gen 回归（KEY02 96、2411 -14.7，r109 起）部分修（r138/r139）**：装饰形状
    被并进 slide.shapes 后 writer 把它们当 slide 内容重复发射——布局自身
    画布几何被改挂到 slide 上。deco 标记 + writer 过滤 + layout 部件携带
    自身装饰（含媒体与 rels）。剩余：多 layout deck 的装饰归属其首个
