@@ -98,6 +98,9 @@ POI 特性文稿），用 cmd/zz_render + cmd/zz_cmp 与 PowerPoint COM 导出
   8.3→3.2）；4 deck 因单 layout 归属轻微回退 |
 | r139 | d7ad48e | layout 装饰发射 groundwork：PlaceholderShape case 补齐；
   KEY02 gen 仍 96.63（deco pic 数据解析或 PlaceholderShape 路径需深查） | 改善基础设施落地 |
+| r140 | ddebe48 | **补上丢失的 layoutPicXML 行**（r139 的发射循环写了媒体与 rels
+  但 continue 跳过了 decoXML.WriteString(w.layoutPicXML(...))——装饰图片
+  XML 从未进入 layout spTree） | KEY02 gen 96.34→**4.59**、2411→16.91 |
 | r137 | 35f43e8 | schemeClr run 色分支补 runColorSet（原 srgbClr 有而 schemeClr 无——
   customGeo slide05 标题被 layout 黄色 defRPr 覆盖） | customGeo 7.01→7.00（标题白 ✓） |
 | r131 | a86df4b | 占位符装饰保留填充/边框、清空提示文本（原规则整形状
