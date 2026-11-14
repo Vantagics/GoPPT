@@ -1,6 +1,7 @@
 package gopresentation
 
 import (
+	"regexp"
 	"bytes"
 	"encoding/xml"
 	"errors"
@@ -23,6 +24,9 @@ import (
 type SmartArtModel struct {
 	// Algo is the layout family: "lin", "snake", "cycle" or "hier".
 	Algo string
+	// BgColor is the diagram's own background colour from <dgm:bg> — the
+	// coloured cross/panel behind the node shapes. Empty means no bg.
+	BgColor string
 	// Root's children are the content nodes hanging off the doc point.
 	Root *SmartArtNode
 	// Colorful marks the deck's quick style as per-node accent cycling
@@ -87,6 +91,28 @@ var errSmartArtNoModel = errors.New("smartart: no usable data model")
 
 // parseSmartArtModel reads a data part into a SmartArtModel. An error means
 // no usable tree was found and the caller keeps its stand-in.
+// parseSmartArtBgColor extracts the diagram's own background colour from
+// <dgm:bg><a:solidFill><a:srgbClr val="…"/> — the coloured cross/panel
+// behind the node shapes (the background-drawingml-fallback deck's green).
+func parseSmartArtBgColor(data []byte) string {
+	i := bytes.Index(data, []byte("<dgm:bg>"))
+	if i < 0 {
+		return ""
+	}
+	j := bytes.Index(data[i:], []byte("</dgm:bg>"))
+	if j < 0 {
+		return ""
+	}
+	seg := data[i : i+j]
+	m := bgColorRe.FindSubmatch(seg)
+	if m == nil {
+		return ""
+	}
+	return "FF" + strings.ToUpper(string(m[1]))
+}
+
+var bgColorRe = regexp.MustCompile(`srgbClr val="([0-9A-Fa-f]{6})"`)
+
 func parseSmartArtModel(data []byte) (*SmartArtModel, error) {
 	pts, loType, loCat, colorful, err := parseSmartArtPoints(data)
 	if err != nil {
@@ -100,6 +126,7 @@ func parseSmartArtModel(data []byte) (*SmartArtModel, error) {
 	if err != nil {
 		return nil, err
 	}
+	model.BgColor = parseSmartArtBgColor(data)
 	model.Colorful = colorful
 	model.Process = strings.Contains(loCat, "process")
 	model.ProcessTwoBox = strings.HasPrefix(loType, "process")
@@ -383,7 +410,8 @@ func buildSmartArtModel(pts []smartartPoint, cxns [][3]string, loType string) (*
 	if len(filtered) == 0 {
 		return nil, errSmartArtNoModel
 	}
-	return &SmartArtModel{Algo: smartArtFamily(loType), Root: &SmartArtNode{Children: filtered}}, nil
+	m := &SmartArtModel{Algo: smartArtFamily(loType), Root: &SmartArtNode{Children: filtered}}
+	return m, nil
 }
 
 // smartArtFamily maps the deck's declared layout family to one of the four

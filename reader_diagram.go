@@ -150,6 +150,24 @@ func (r *PPTXReader) stashDiagramParts(zr *zip.Reader, slidePath string, rels []
 	}
 	if dg != nil {
 		dg.diagram = st
+		// The diagram's own background fill from <dgm:bg>: prepend a
+		// filled rect to the group so it renders behind the node shapes
+		// (the background-drawingml-fallback deck's green cross).
+		dataPath := st.auxPaths[0]
+		if dataBytes, ok := st.parts[dataPath]; ok {
+			if bg := parseSmartArtBgColor(dataBytes.data); bg != "" {
+				rect := NewAutoShape()
+				rect.shapeType = AutoShapeRectangle
+				rect.SetOffsetX(dg.offsetX)
+				rect.SetOffsetY(dg.offsetY)
+				rect.SetWidth(dg.width)
+				rect.SetHeight(dg.height)
+				rect.fill = NewFill()
+				rect.fill.Type = FillSolid
+				rect.fill.Color = NewColor(bg)
+				dg.shapes = append([]Shape{rect}, dg.shapes...)
+			}
+		}
 	} else if holder != nil {
 		holder.diagram = st
 	}
