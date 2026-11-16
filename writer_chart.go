@@ -41,6 +41,14 @@ func getCategories(series []*ChartSeries) []string {
 }
 
 func (w *PPTXWriter) writeChartPart(zw *zip.Writer, chart *ChartShape, chartIdx int) error {
+	defer func() {
+		// The chart's own rels file: PowerPoint requires it to exist for any
+		// chart part, even when the chart has no external data references.
+		rels := `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">
+</Relationships>`
+		writeRawXMLToZip(zw, fmt.Sprintf("ppt/charts/_rels/chart%d.xml.rels", chartIdx), rels)
+	}()
 	ct := chart.plotArea.chartType
 	if ct == nil {
 		return nil
