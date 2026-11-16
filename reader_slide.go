@@ -5418,6 +5418,12 @@ func (r *PPTXReader) masterStateFor(zr *zip.Reader, masterPath string, pres *Pre
 		}
 		pres.masterClrMapCache[masterPath] = cm
 	}
+	if tx := masterTxStylesXML(data); tx != "" {
+		if pres.masterTxStylesCache == nil {
+			pres.masterTxStylesCache = make(map[string]string)
+		}
+		pres.masterTxStylesCache[masterPath] = tx
+	}
 
 	st.placeholders = r.parsePlaceholderDefs(data, pres)
 	st.textStyles = parseMasterTextStyles(data, pres)
@@ -5529,6 +5535,50 @@ func (r *PPTXReader) activateSlideRungs(zr *zip.Reader, slideRels []xmlRelForRea
 			copied.effectStyles = pres.themeEffectStyles
 			remapClrMap([]byte(override), copied, "overrideClrMapping")
 			pres.themeColors = clone
+		}
+	}
+}
+
+// masterTxStylesXML returns a master part's raw <p:txStyles> element body
+// (including both tags), or "" when the master styles nothing.
+func masterTxStylesXML(data []byte) string {
+	decoder := xml.NewDecoder(bytes.NewReader(data))
+	in := 0
+	buf := new(bytes.Buffer)
+	for {
+		token, err := decoder.Token()
+		if err != nil {
+			return ""
+		}
+		switch t := token.(type) {
+		case xml.StartElement:
+			if t.Name.Local == "txStyles" && in == 0 {
+				in = 1
+				buf.WriteString("<p:txStyles>")
+				continue
+			}
+			if in > 0 {
+				in++
+				name := t.Name.Local
+				attrs := ""
+				for _, attr := range t.Attr {
+					attrs += " " + attr.Name.Local + "=" + strconv.Quote(attr.Value)
+				}
+				buf.WriteString("<" + name + attrs + ">")
+			}
+		case xml.EndElement:
+			if t.Name.Local == "txStyles" && in > 0 {
+				buf.WriteString("</p:txStyles>")
+				return buf.String()
+			}
+			if in > 0 {
+				in--
+				buf.WriteString("</" + t.Name.Local + ">")
+			}
+		case xml.CharData:
+			if in > 0 {
+				buf.Write(t)
+			}
 		}
 	}
 }

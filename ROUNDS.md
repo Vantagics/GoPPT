@@ -178,6 +178,14 @@ alphaModFix 写回（r108）、母版装饰形状写回（r109）。
    失败根源即此，非 OPC 接线）。python-pptx 可开、PowerPoint COM 严格
    Open 通过（designs=4）。
    10 个 gen deck 复测零回退。剩余 slide8 24%（Trek 贴图 tile）。
+6h. **r146 master txStyles 逐字回写 + 运行级 cap="all"（slide10 4.6→3.3）**：
+   读取时暂存各 master 的原始 <p:txStyles>（title/body/other 的 lvl1-9
+   阶梯，Trek titleStyle cap="all"），writer 逐字发射回 master 部件；
+   占位符阶梯解析出的 font.CapAll 在运行 rPr 里发射 cap="all"——Go 渲染
+   大写、写出文件里却没有声明，Office 渲染字面大小写（slide8 标题）。
+   slide8 剩余：Trek bgRef 1003 是 theme bgFillStyleLst[2] 的 duotone
+   blipFill 贴图（媒体在 theme 自己的 rels 里）——需要 theme 媒体部件
+   + 贴图渲染 + bg blipFill 回写三件套（新特性，Roadmap）。
 6f. **r144 多 layout writer 接线 + 填充 alpha（themes gen 20.65→19.12）**：
    之前 slide rels 硬编码指向 slideLayout1——多 layout deck（themes 的
    8 个 layout）写出的 layout 部件全是孤儿，slide 全部落在空 layout1 上。

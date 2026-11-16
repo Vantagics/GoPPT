@@ -88,6 +88,10 @@ type Presentation struct {
 	// keyed by the master part path — the writer needs the mapping to emit a
 	// master part whose bg1/tx1 resolve the way the source's did.
 	masterClrMapCache map[string]string
+	// masterTxStylesCache stores each master's raw <p:txStyles> element —
+	// the title/body/other style ladder the slide's placeholders inherit
+	// (the Trek master's titleStyle carries cap="all"), re-emitted verbatim.
+	masterTxStylesCache map[string]string
 	// layoutBgCache stores each layout's own background fill (from
 	// <p:bg><p:bgPr> in the layout part), keyed by layout part path.
 	layoutBgCache    map[string]*Fill

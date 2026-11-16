@@ -182,6 +182,16 @@ func (w *PPTXWriter) writeSlideMasterN(zw *zip.Writer, mp masterPlan) error {
 	// The theme rel lands after the layouts and the media.
 	themeRel := len(mp.entries) + strings.Count(mediaRels, "<Relationship ") + 1
 
+	// The master's text-style ladder rides back verbatim: slide placeholders
+	// inherit cap, bullet and font defaults from it (the Trek master's
+	// titleStyle cap="all" capitalises its slides' titles).
+	txStylesXML := ""
+	if st != nil {
+		if tx := w.presentation.masterTxStylesCache[mp.masterPath]; tx != "" {
+			txStylesXML = "  " + tx + "\n"
+		}
+	}
+
 	content := fmt.Sprintf(`<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
 <p:sldMaster xmlns:a="%s" xmlns:r="%s" xmlns:p="%s">
   <p:cSld>
@@ -204,7 +214,7 @@ func (w *PPTXWriter) writeSlideMasterN(zw *zip.Writer, mp masterPlan) error {
   %s
   <p:sldLayoutIdLst>
 %s  </p:sldLayoutIdLst>
-</p:sldMaster>`, nsDrawingML, nsOfficeDocRels, nsPresentationML, bgXML, decoXML, clrMap, layoutList)
+%s</p:sldMaster>`, nsDrawingML, nsOfficeDocRels, nsPresentationML, bgXML, decoXML, clrMap, layoutList, txStylesXML)
 
 	if err := writeRawXMLToZip(zw, fmt.Sprintf("ppt/slideMasters/slideMaster%d.xml", mp.index), content); err != nil {
 		return err

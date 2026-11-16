@@ -897,6 +897,12 @@ func (w *PPTXWriter) runPropsXMLAt(tr *TextRun, inner string) string {
 	if font.Strikethrough {
 		attrs += ` strike="sngStrike"`
 	}
+	// cap="all" rides in from the placeholder ladder (the Trek master's
+	// titleStyle): the Go renderer uppercases the runs, so the written deck
+	// must declare it or Office renders the title in its literal case.
+	if font.CapAll {
+		attrs += ` cap="all"`
+	}
 	if font.Superscript {
 		// PowerPoint's own value: a 30% raise.
 		attrs += ` baseline="30000"`
