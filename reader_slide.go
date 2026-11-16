@@ -1186,8 +1186,7 @@ func (r *PPTXReader) parseSlideXML(decoder *xml.Decoder, slide *Slide, rels []xm
 			case "nvSpPr", "nvPicPr", "nvCxnSpPr", "nvGraphicFramePr", "nvGrpSpPr":
 				state.inNvSpPr = true
 			case "tcPr":
-				println("DBG tcPr enter: inTc=", state.inTc, "row=", currentTableRow, "col=", currentTableCol, "rows=", len(currentTable.rows), "rowlen=", func() int { if currentTableRow >= 0 && currentTableRow < len(currentTable.rows) { return len(currentTable.rows[currentTableRow]) }; return -1 }())
-				if state.inTc && currentTable != nil && currentTableRow >= 0 && currentTableCol >= 0 &&
+								if state.inTc && currentTable != nil && currentTableRow >= 0 && currentTableCol >= 0 &&
 					currentTableRow < len(currentTable.rows) && currentTableCol < len(currentTable.rows[currentTableRow]) {
 					state.inTcPr = true
 					// The cell's insets and vertical anchor live on the tag
