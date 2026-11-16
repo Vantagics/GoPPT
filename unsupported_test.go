@@ -152,8 +152,10 @@ func TestReaderKeepsStandInForUnreadableChart(t *testing.T) {
 		t.Fatal("fixture package has no chart part; the test would not exercise the path")
 	}
 	// Remove the target but keep the frame and its relationship, which is what a
-	// truncated or hand-edited file looks like.
+	// truncated or hand-edited file looks like. The chart's own rels file is
+	// removed too — the r142 writer emits it for every chart part.
 	delete(parts, chartPart)
+	delete(parts, strings.Replace(chartPart, "ppt/charts/", "ppt/charts/_rels/", 1) + ".rels")
 
 	pres, err := Open(writeTempPPTX(t, buildZip(t, parts)))
 	if err != nil {

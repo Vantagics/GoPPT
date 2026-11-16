@@ -136,6 +136,9 @@ func (w *PPTXWriter) writeChartPart(zw *zip.Writer, chart *ChartShape, chartIdx 
 
 	content := fmt.Sprintf(`<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
 <c:chartSpace xmlns:c="http://schemas.openxmlformats.org/drawingml/2006/chart" xmlns:a="%s" xmlns:r="%s">
+  <c:date1904 val="0"/>
+  <c:lang val="en-US"/>
+  <c:roundedCorners val="0"/>
   <c:chart>
 %s    <c:plotArea>
       <c:layout/>
@@ -143,6 +146,16 @@ func (w *PPTXWriter) writeChartPart(zw *zip.Writer, chart *ChartShape, chartIdx 
 %s    <c:plotVisOnly val="1"/>
     <c:dispBlanksAs val="%s"/>
   </c:chart>
+  <c:txPr>
+    <a:bodyPr/>
+    <a:lstStyle/>
+    <a:p>
+      <a:pPr>
+        <a:defRPr/>
+      </a:pPr>
+      <a:endParaRPr lang="en-US"/>
+    </a:p>
+  </c:txPr>
 %s</c:chartSpace>`,
 		nsDrawingML, nsOfficeDocRels,
 		titleXML,
