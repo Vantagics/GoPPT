@@ -168,6 +168,18 @@ func (w *PPTXWriter) writeContentTypes(zw *zip.Writer) error {
 		})
 	}
 
+	// One layout part per distinct source layout: every part the plan emits
+	// must be declared, or PowerPoint flags the undeclared part as damage.
+	for _, entry := range w.layoutPlan {
+		if entry.index == 1 {
+			continue // slideLayout1 is declared in the literal list above
+		}
+		ct.Overrides = append(ct.Overrides, xmlOverride{
+			PartName:    fmt.Sprintf("/ppt/slideLayouts/slideLayout%d.xml", entry.index),
+			ContentType: ctSlideLayout,
+		})
+	}
+
 	// SmartArt frames re-emit the parts they stashed at read time: data
 	// model, layout, quick style, colours, the cached drawing and the
 	// drawing's relationship file. Each override was recorded when the part
@@ -625,4 +637,19 @@ func colorRGB(c Color) string {
 		return c.ARGB
 	}
 	return "000000"
+}
+
+// srgbClrXML serialises one colour with its alpha plane: the reader stores
+// transparency in the ARGB's first byte, and DrawingML carries it as a
+// separate <a:alpha> child in 0..100000 units. Opaque colours (FF) and short
+// hex write as the plain element. Dropping the plane turned a 10%-white
+// layout band into opaque white — a full-height bar painted over every slide
+// it decorated (the themes deck's L23 gen went 1.3%→92% that way).
+func srgbClrXML(c Color) string {
+	if len(c.ARGB) >= 8 && c.ARGB[:2] != "FF" {
+		a := 0
+		fmt.Sscanf(c.ARGB[:2], "%02x", &a)
+		return fmt.Sprintf(`<a:srgbClr val="%s"><a:alpha val="%d"/></a:srgbClr>`, colorRGB(c), a*100000/255)
+	}
+	return fmt.Sprintf(`<a:srgbClr val="%s"/>`, colorRGB(c))
 }

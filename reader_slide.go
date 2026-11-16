@@ -4948,6 +4948,14 @@ func (r *PPTXReader) applyLayoutInheritance(zr *zip.Reader, slide *Slide, rels [
 
 	// Also parse layout background
 	layoutBg, bgImage := r.parseLayoutBackground(data, layoutRels, zr, layoutPath, pres)
+	// Store the layout's own background fill for the writer's per-layout
+	// emission (the themes deck's layouts each declare their own bg).
+	if layoutBg != nil {
+		if pres.layoutBgCache == nil {
+			pres.layoutBgCache = make(map[string]*Fill)
+		}
+		pres.layoutBgCache[layoutPath] = layoutBg
+	}
 
 	// Apply layout background if slide has no background; otherwise fall to
 	// the master rung, which PowerPoint also shows through when neither the

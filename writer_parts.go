@@ -113,6 +113,19 @@ func (w *PPTXWriter) writeTableStyles(zw *zip.Writer) error {
 // --- Slide Master ---
 
 func (w *PPTXWriter) writeSlideMaster(zw *zip.Writer) error {
+	// The master lists every layout part the plan emits — a slide pointing at
+	// a layout the master does not declare is a repair prompt in PowerPoint.
+	layoutList := ""
+	masterRels := ""
+	for _, entry := range w.layoutPlan {
+		layoutList += fmt.Sprintf("    <p:sldLayoutId id=\"%d\" r:id=\"rId%d\"/>\n", 2147483648+entry.index, entry.index)
+		masterRels += fmt.Sprintf("  <Relationship Id=\"rId%d\" Type=\"%s\" Target=\"../slideLayouts/slideLayout%d.xml\"/>\n", entry.index, relTypeSlideLayout, entry.index)
+	}
+	themeRel := len(w.layoutPlan) + 1
+	if themeRel < 2 {
+		themeRel = 2
+	}
+
 	content := fmt.Sprintf(`<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
 <p:sldMaster xmlns:a="%s" xmlns:r="%s" xmlns:p="%s">
   <p:cSld>
@@ -139,20 +152,18 @@ func (w *PPTXWriter) writeSlideMaster(zw *zip.Writer) error {
   </p:cSld>
   <p:clrMap bg1="lt1" tx1="dk1" bg2="lt2" tx2="dk2" accent1="accent1" accent2="accent2" accent3="accent3" accent4="accent4" accent5="accent5" accent6="accent6" hlink="hlink" folHlink="folHlink"/>
   <p:sldLayoutIdLst>
-    <p:sldLayoutId id="2147483649" r:id="rId1"/>
-  </p:sldLayoutIdLst>
-</p:sldMaster>`, nsDrawingML, nsOfficeDocRels, nsPresentationML)
+%s  </p:sldLayoutIdLst>
+</p:sldMaster>`, nsDrawingML, nsOfficeDocRels, nsPresentationML, layoutList)
 
 	if err := writeRawXMLToZip(zw, "ppt/slideMasters/slideMaster1.xml", content); err != nil {
 		return err
 	}
 
-	// Slide master rels
+	// Slide master rels: every layout, then the theme.
 	rels := fmt.Sprintf(`<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
 <Relationships xmlns="%s">
-  <Relationship Id="rId1" Type="%s" Target="../slideLayouts/slideLayout1.xml"/>
-  <Relationship Id="rId2" Type="%s" Target="../theme/theme1.xml"/>
-</Relationships>`, nsRelationships, relTypeSlideLayout, relTypeTheme)
+%s  <Relationship Id="rId%d" Type="%s" Target="../theme/theme1.xml"/>
+</Relationships>`, nsRelationships, masterRels, themeRel, relTypeTheme)
 	return writeRawXMLToZip(zw, "ppt/slideMasters/_rels/slideMaster1.xml.rels", rels)
 }
 
@@ -167,6 +178,14 @@ func (w *PPTXWriter) writeSlideLayout(zw *zip.Writer) error {
 // and writes the deco pictures' media alongside, wiring the layout's own
 // rels to them.
 func (w *PPTXWriter) writeSlideLayoutN(zw *zip.Writer, entry layoutPlanEntry) error {
+	// The layout's own background: read decks like the themes corpus keep a
+	// per-layout <p:bg><p:bgPr> whose fill differs per layout — without it
+	// every layout round-trips onto the master's white.
+	bgXML := ""
+	if entry.bgFill != nil && entry.bgFill.Type != FillPicture && entry.bgFill.Type != FillNone {
+		bgXML = fmt.Sprintf("    <p:bg>\n      <p:bgPr>\n%s      <a:effectLst/>\n      </p:bgPr>\n    </p:bg>\n", w.writeFillXML(entry.bgFill))
+	}
+
 	decoXML := strings.Builder{}
 	mediaRels := ""
 	shapeID := 2
@@ -205,8 +224,12 @@ func (w *PPTXWriter) writeSlideLayoutN(zw *zip.Writer, entry layoutPlanEntry) er
 			case *GroupShape:
 				decoXML.WriteString(w.writeGroupShapeXML(s, &shapeID, 1))
 			case *PlaceholderShape:
-				// A placeholder in the layout deco: its fill/border paints.
-				decoXML.WriteString(w.writeRichTextShapeXML(&s.RichTextShape, &shapeID))
+				// Layout placeholders are skipped: PowerPoint renders a
+				// layout placeholder only when the slide instantiates it,
+				// so writing it as a plain shape paints decoration the
+				// original never shows (the themes deck's L23 went 1.3%→92%
+				// that way). The paint a slide actually inherits is resolved
+				// into the slide's own placeholder by the reader's ladder.
 			}
 		}
 		decoXML.WriteString(body.String())
@@ -215,7 +238,7 @@ func (w *PPTXWriter) writeSlideLayoutN(zw *zip.Writer, entry layoutPlanEntry) er
 	content := fmt.Sprintf(`<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
 <p:sldLayout xmlns:a="%s" xmlns:r="%s" xmlns:p="%s" type="blank" preserve="1">
   <p:cSld name="Blank">
-    <p:spTree>
+%s    <p:spTree>
       <p:nvGrpSpPr>
         <p:cNvPr id="1" name=""/>
         <p:cNvGrpSpPr/>
@@ -234,7 +257,7 @@ func (w *PPTXWriter) writeSlideLayoutN(zw *zip.Writer, entry layoutPlanEntry) er
   <p:clrMapOvr>
     <a:masterClrMapping/>
   </p:clrMapOvr>
-</p:sldLayout>`, nsDrawingML, nsOfficeDocRels, nsPresentationML, decoXML.String())
+</p:sldLayout>`, nsDrawingML, nsOfficeDocRels, nsPresentationML, bgXML, decoXML.String())
 
 	if err := writeRawXMLToZip(zw, fmt.Sprintf("ppt/slideLayouts/slideLayout%d.xml", entry.index), content); err != nil {
 		return err

@@ -162,6 +162,23 @@ alphaModFix 写回（r108）、母版装饰形状写回（r109）。
    （font-size +0.61 但 6 deck 共损 2.7pp）、增长+0.6sz/0.2sz 边距反馈
    近似（同样净负）——需要把 constraint/rule 求解（含边距-字号反馈）
    移植进 fit 才能收敛。
+6f. **r144 多 layout writer 接线 + 填充 alpha（themes gen 20.65→19.12）**：
+   之前 slide rels 硬编码指向 slideLayout1——多 layout deck（themes 的
+   8 个 layout）写出的 layout 部件全是孤儿，slide 全部落在空 layout1 上。
+   修：slide rels 按布局计划指向各自 layout；contentTypes 声明每个
+   layoutN；master sldLayoutIdLst 列全（缺声明=PowerPoint 报修复）。
+   layout 的 <p:bg><p:bgPr> 填充按 layout 部件发射（layoutBgCache）。
+   三个机制修复：
+   (a) 占位符 deco 不写入 layout——Office 只渲染被 slide 实例化的
+       layout 占位符（themes L23 43 个 ph 形状写成普通形状后 slide7
+       1.3%→92%）；paint 由读取侧 ladder 解析进 slide 自有占位符。
+   (b) solid/gradient 填充发 <a:alpha>——ARGB 首字节 < FF 时（L23 的
+       10% 白带 19FFFFFF 曾写成不透明白，slide6 56→2.6）。
+   (c) slide 根发 showMasterSp="0"（"overridden background" slide 靠它
+       压制 layout 图形，slide7 92→1.3）。
+   10 个 gen deck 深对比（多 layout/透明填充/deco/bg）零回退；
+   全量测试过。剩余：slide4/5 75% 属多主题（每 master 一个 clrScheme，
+   writer 硬编码 Office 主题）= 6c 多 master 工程。
 6e. **gen 回归（KEY02 96、2411 -14.7，r109 起）部分修（r138/r139）**：装饰形状
    被并进 slide.shapes 后 writer 把它们当 slide 内容重复发射——布局自身
    画布几何被改挂到 slide 上。deco 标记 + writer 过滤 + layout 部件携带

@@ -75,6 +75,9 @@ type Presentation struct {
 	// whether the master's decoration shows through it.
 	masterDecoShapes []Shape
 	layoutDecoCache  map[string]layoutDeco
+	// layoutBgCache stores each layout's own background fill (from
+	// <p:bg><p:bgPr> in the layout part), keyed by layout part path.
+	layoutBgCache    map[string]*Fill
 	// masterStates holds one masterState per master part path, and
 	// defaultTheme is the fallback theme parsed from theme1.xml/theme2.xml
 	// for slides that reach no master with a readable theme. A deck carries

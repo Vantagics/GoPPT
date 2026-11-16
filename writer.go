@@ -46,6 +46,9 @@ type layoutPlanEntry struct {
 	layoutPath string
 	index      int
 	decoShapes []Shape
+	// bgFill is the layout part's own background fill (<p:bg><p:bgPr>),
+	// read back from the source deck for the emission.
+	bgFill *Fill
 }
 
 // buildLayoutPlan groups the slides by their layout part path and assigns
@@ -65,6 +68,9 @@ func (w *PPTXWriter) buildLayoutPlan() []layoutPlanEntry {
 			if cached, ok2 := w.presentation.layoutDecoCache[slide.layoutPath]; ok2 {
 				entry.decoShapes = cached.shapes
 			}
+			// The layout's own <p:bg> fill rides with the entry so the
+			// written layout part declares the same background it rendered.
+			entry.bgFill = w.presentation.layoutBgCache[slide.layoutPath]
 			plan = append(plan, entry)
 		}
 	}

@@ -231,8 +231,17 @@ func (w *PPTXWriter) writeSlide(zw *zip.Writer, slide *Slide, slideNum int, hlin
 		bgXML += "        <a:effectLst/>\n      </p:bgPr>\n    </p:bg>\n"
 	}
 
+	// showMasterSp="0" is the slide asking for the master/layout background
+	// graphics to be suppressed — the themes deck's "overridden background"
+	// slide relies on it, and without the attribute the layout's decoration
+	// paints over the slide's own dark fill.
+	suppress := ""
+	if slide.hideMasterSp {
+		suppress = ` showMasterSp="0"`
+	}
+
 	content := fmt.Sprintf(`<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
-<p:sld xmlns:a="%s" xmlns:r="%s" xmlns:p="%s">
+<p:sld xmlns:a="%s" xmlns:r="%s" xmlns:p="%s"%s>
   <p:cSld>
 %s    <p:spTree>
       <p:nvGrpSpPr>
@@ -253,7 +262,7 @@ func (w *PPTXWriter) writeSlide(zw *zip.Writer, slide *Slide, slideNum int, hlin
   <p:clrMapOvr>
     <a:masterClrMapping/>
   </p:clrMapOvr>
-%s</p:sld>`, nsDrawingML, nsOfficeDocRels, nsPresentationML, bgXML, result, transitionXML(slide.transition))
+%s</p:sld>`, nsDrawingML, nsOfficeDocRels, nsPresentationML, suppress, bgXML, result, transitionXML(slide.transition))
 
 	return writeRawXMLToZip(zw, fmt.Sprintf("ppt/slides/slide%d.xml", slideNum), content)
 }
@@ -340,9 +349,13 @@ func transitionElementXML(t *Transition, effect transitionEffect, withDuration b
 
 func (w *PPTXWriter) writeSlideRels(zw *zip.Writer, slide *Slide, slideNum int, hlinkRelMap map[*TextRun]string) error {
 	var rels strings.Builder
+	// Each slide points at the layout part its source slide used — the plan
+	// emits one layout per distinct source layout, so a deck read from a
+	// multi-layout file keeps every slide wired to its own layout.
+	layoutIdx := w.slideLayoutIndex(slide)
 	fmt.Fprintf(&rels, `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
 <Relationships xmlns="%s">
-  <Relationship Id="rId1" Type="%s" Target="../slideLayouts/slideLayout1.xml"/>`, nsRelationships, relTypeSlideLayout)
+  <Relationship Id="rId1" Type="%s" Target="../slideLayouts/slideLayout%d.xml"/>`, nsRelationships, relTypeSlideLayout, layoutIdx)
 
 	relIdx := 2
 	// The bg image DrawingShape (skipped in the shapes loop) gets rId2 here
@@ -1742,7 +1755,7 @@ func (w *PPTXWriter) writeFillXML(f *Fill) string {
 	}
 	switch f.Type {
 	case FillSolid:
-		return fmt.Sprintf("          <a:solidFill><a:srgbClr val=\"%s\"/></a:solidFill>\n", colorRGB(f.Color))
+		return fmt.Sprintf("          <a:solidFill>%s</a:solidFill>\n", srgbClrXML(f.Color))
 	case FillGradientLinear:
 		stops := f.Stops
 		if len(stops) < 2 {
@@ -1781,7 +1794,7 @@ func (w *PPTXWriter) writeFillXML(f *Fill) string {
 func gradStopsXML(stops []GradStop) string {
 	var b strings.Builder
 	for _, s := range stops {
-		fmt.Fprintf(&b, "              <a:gs pos=\"%d\"><a:srgbClr val=\"%s\"/></a:gs>\n", s.Pos, colorRGB(s.Color))
+		fmt.Fprintf(&b, "              <a:gs pos=\"%d\">%s</a:gs>\n", s.Pos, srgbClrXML(s.Color))
 	}
 	return b.String()
 }
