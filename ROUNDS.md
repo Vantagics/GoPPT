@@ -174,3 +174,10 @@ alphaModFix 写回（r108）、母版装饰形状写回（r109）。
    其备好每 slide 的 rung 路径戳记（r133 落地保留）。
 7. **文字反锯齿与换行点**：结构性差异，不可归零（字体度量致个别
    词掉行，行高随之漂移——customGeo slide28 的表格行高漂移属此类）。
+8. **writer 图表写出完整性**：radar/scatter chart RT-FAIL——r142 已补
+   date1904/lang/roundedCorners/txPr + chart rels 发射；剩余需
+   externalData 引用+嵌入 Excel（reader-writer 全链路新特性）。
+9. **文字弯曲+3D 挤出**：tdf140865Wordart3D 7.62——prstTxWarp + sp3d
+   的逐字符曲线定位与 3D 挤出渲染。
+10. **图像艺术效果**：ArtisticEffectSample 9.93——a14:imgProps 的
+   模糊/玻璃等图像滤镜渲染。
