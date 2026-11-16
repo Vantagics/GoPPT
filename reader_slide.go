@@ -5570,7 +5570,12 @@ func masterTxStylesXML(data []byte) string {
 			}
 			if in > 0 {
 				in++
-				name := t.Name.Local
+				// Every child of <p:txStyles> is DrawingML: the a: prefix is
+				// what keeps the re-serialised ladder in the right namespace.
+				// Writing bare local names put the styles in no namespace,
+				// and Office parsed them into elements it ignores — the
+				// alterman deck's body spacing drifted that way.
+				name := "a:" + t.Name.Local
 				attrs := ""
 				for _, attr := range t.Attr {
 					attrs += " " + attr.Name.Local + "=" + strconv.Quote(attr.Value)
@@ -5584,7 +5589,7 @@ func masterTxStylesXML(data []byte) string {
 			}
 			if in > 0 {
 				in--
-				buf.WriteString("</" + t.Name.Local + ">")
+				buf.WriteString("</a:" + t.Name.Local + ">")
 			}
 		case xml.CharData:
 			if in > 0 {
