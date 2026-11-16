@@ -178,6 +178,12 @@ alphaModFix 写回（r108）、母版装饰形状写回（r109）。
    失败根源即此，非 OPC 接线）。python-pptx 可开、PowerPoint COM 严格
    Open 通过（designs=4）。
    10 个 gen deck 复测零回退。剩余 slide8 24%（Trek 贴图 tile）。
+6k. **r149 线条填充的 <a:alpha>（tdf149588 6.33→0.76）**：tdf149588 的
+   弧线是 noFill + 透明线条（ln solidFill schemeClr accent1 lumMod60/
+   lumOff40 + alpha=0）——参考渲染里弧线完全不可见。我们的渲染把线条
+   画成不透明粉/蓝（accent1 60% 亮度）。r144 的 alpha 修复只覆盖了
+   writeFillXML 与渐变 stop；线条边框写出（writeBorderXMLWithEnds、
+   DrawingShape 的 lnXML）仍用裸 colorRGB。改为 srgbClrXML。
 6j. **r148 组的 chOff/chExt 逐字回写（alterman 9.52→7.65，group-rot 4.21→0.66，
    sample_pptx_grouping_issues→0.00）**：writer 把组的 off/ext 同时发到
    chOff/chExt——而读取侧给渲染解析了子形状坐标后仍保留原 child space。

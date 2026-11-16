@@ -1170,8 +1170,8 @@ func (w *PPTXWriter) writeDrawingShapeXML(s *DrawingShape, shapeID *int, slideNu
 	// 7pt white mat around a framed screenshot); the writer used to drop it.
 	lnXML := ""
 	if s.border != nil && s.border.Style != BorderNone {
-		lnXML = fmt.Sprintf(`<a:ln w="%d" cap="sq"><a:solidFill><a:srgbClr val="%s"/></a:solidFill></a:ln>`,
-			maxInt(s.border.Width, 1)*12700, colorRGB(s.border.Color))
+		lnXML = fmt.Sprintf(`<a:ln w="%d" cap="sq"><a:solidFill>%s</a:solidFill></a:ln>`,
+			maxInt(s.border.Width, 1)*12700, srgbClrXML(s.border.Color))
 	}
 
 	prst := s.presetGeom
@@ -1874,8 +1874,8 @@ func (w *PPTXWriter) writeBorderXMLWithEnds(b *Border, head, tail *LineEnd) stri
 	case BorderDot:
 		dashXML = "<a:prstDash val=\"dot\"/>"
 	}
-	return fmt.Sprintf("          <a:ln w=\"%d\"><a:solidFill><a:srgbClr val=\"%s\"/></a:solidFill>%s%s</a:ln>\n",
-		widthEMU, colorRGB(b.Color), dashXML, lineEndXML(head, tail, ""))
+	return fmt.Sprintf("          <a:ln w=\"%d\"><a:solidFill>%s</a:solidFill>%s%s</a:ln>\n",
+		widthEMU, srgbClrXML(b.Color), dashXML, lineEndXML(head, tail, ""))
 }
 
 // writeDiagramParts copies every SmartArt frame's stashed parts into the
