@@ -178,6 +178,23 @@ alphaModFix 写回（r108）、母版装饰形状写回（r109）。
    失败根源即此，非 OPC 接线）。python-pptx 可开、PowerPoint COM 严格
    Open 通过（designs=4）。
    10 个 gen deck 复测零回退。剩余 slide8 24%（Trek 贴图 tile）。
+6m. **r144–r150 全量 gen 普测（stdout 口径，cmp.log 是历史脚本遗留、
+   勿再当现状读）**：67 deck 均值 1.13%。榜首：alterman 7.65（7px 文字
+   恒定偏移，见 6l(a)）、tdf140865Wordart3D 7.63、LIBRE 5.55、KEY02 4.40、
+   ShapeLineProperties 4.16、master-slides 3.94、table-with-theme 3.92、
+   themes 3.85、2411 3.83、group 3.00。今日已清零/大幅收敛：
+   themes 22.76→3.85、custgeom-nofill-path 35.90→0.00、
+   tdf149588 6.33→0.76、minimal-gradient 13.06→0.19、fill-color-list→0、
+   ooxtheme 6.44→0.61、group-rot→0.66、sample_pptx_grouping_issues→0、
+   alterman 9.54→7.65、ArtisticEffectSample gen 3.66→1.11。
+6l. **下一批归因（待做）**：(a) alterman 的残余 ~2.5%/张是文字整体
+   上移 7px（1200px 渲染高）的恒定偏移——写出几何与源逐 EMU 相同，
+   属渲染端字体度量/像素取整（已知项 7 的形态）。(b) themes slide8
+   24%：Trek bgRef 1003 = theme bgFillStyleLst[2] 的 duotone blipFill
+   贴图，媒体在 theme 自己的 rels（theme/_rels/themeN.xml.rels）——
+   需要 theme 媒体缓存 + bgRef→FillPicture 解析 + 渲染端贴图 duotone
+   + master bg blipFill 回写四件套。(c) tdf140865Wordart3D 7.63 =
+   prstTxWarp/sp3d（roadmap 9）。
 6k. **r149 线条填充的 <a:alpha>（tdf149588 6.33→0.76）**：tdf149588 的
    弧线是 noFill + 透明线条（ln solidFill schemeClr accent1 lumMod60/
    lumOff40 + alpha=0）——参考渲染里弧线完全不可见。我们的渲染把线条
