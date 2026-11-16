@@ -75,6 +75,19 @@ type Presentation struct {
 	// whether the master's decoration shows through it.
 	masterDecoShapes []Shape
 	layoutDecoCache  map[string]layoutDeco
+	// layoutMasterCache maps a layout part path to the master part path the
+	// layout's rels name — a deck carries one master per theme, and the
+	// writer puts each layout under its own master.
+	layoutMasterCache map[string]string
+	// masterThemeXMLCache stashes each theme part's raw bytes, keyed by the
+	// theme part path: the writer re-emits them verbatim so a deck's colour
+	// schemes, fonts and fill styles survive the round trip instead of
+	// degrading to the built-in Office theme.
+	masterThemeXMLCache map[string][]byte
+	// masterClrMapCache stores each master's raw <p:clrMap> element string,
+	// keyed by the master part path — the writer needs the mapping to emit a
+	// master part whose bg1/tx1 resolve the way the source's did.
+	masterClrMapCache map[string]string
 	// layoutBgCache stores each layout's own background fill (from
 	// <p:bg><p:bgPr> in the layout part), keyed by layout part path.
 	layoutBgCache    map[string]*Fill

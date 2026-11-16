@@ -5388,6 +5388,14 @@ func (r *PPTXReader) masterStateFor(zr *zip.Reader, masterPath string, pres *Pre
 			r.parseThemeFonts(b, ts)
 			r.parseThemeFormatScheme(b, ts)
 			st.theme = ts
+			// The raw theme part rides along: the writer re-emits it
+			// verbatim, keeping the deck's own colour scheme and fill
+			// styles instead of the writer's built-in Office theme.
+			if pres.masterThemeXMLCache == nil {
+				pres.masterThemeXMLCache = make(map[string][]byte)
+			}
+			pres.masterThemeXMLCache[target] = b
+			st.themePath = target
 			break
 		}
 	}
@@ -5404,6 +5412,12 @@ func (r *PPTXReader) masterStateFor(zr *zip.Reader, masterPath string, pres *Pre
 	// so the map folds straight into the colour table here: the static
 	// aliases the theme parser installed were the default map.
 	remapClrMap(data, st.theme, "clrMap")
+	if cm := masterClrMapXML(data); cm != "" {
+		if pres.masterClrMapCache == nil {
+			pres.masterClrMapCache = make(map[string]string)
+		}
+		pres.masterClrMapCache[masterPath] = cm
+	}
 
 	st.placeholders = r.parsePlaceholderDefs(data, pres)
 	st.textStyles = parseMasterTextStyles(data, pres)
@@ -5482,6 +5496,12 @@ func (r *PPTXReader) activateSlideRungs(zr *zip.Reader, slideRels []xmlRelForRea
 		pres.applyThemeState(pres.defaultTheme)
 		return
 	}
+	// Record which master this layout serves so the writer can rebuild the
+	// master/layout ladder with every layout under its own master part.
+	if pres.layoutMasterCache == nil {
+		pres.layoutMasterCache = make(map[string]string)
+	}
+	pres.layoutMasterCache[layoutPath] = masterPath
 	if st := r.masterStateFor(zr, masterPath, pres); st != nil {
 		pres.applyMasterState(st)
 		slide.themePath = st.themePath
@@ -5509,6 +5529,29 @@ func (r *PPTXReader) activateSlideRungs(zr *zip.Reader, slideRels []xmlRelForRea
 			copied.effectStyles = pres.themeEffectStyles
 			remapClrMap([]byte(override), copied, "overrideClrMapping")
 			pres.themeColors = clone
+		}
+	}
+}
+
+// masterClrMapXML returns a master part's raw <p:clrMap> element, or "" when
+// the master maps nothing. Like layoutClrMapOverride it serialises the
+// element's attributes straight back out so the writer can emit the same
+// mapping without a third decoding of it.
+func masterClrMapXML(data []byte) string {
+	decoder := xml.NewDecoder(bytes.NewReader(data))
+	for {
+		token, err := decoder.Token()
+		if err != nil {
+			return ""
+		}
+		if t, ok := token.(xml.StartElement); ok && t.Name.Local == "clrMap" {
+			buf := new(bytes.Buffer)
+			buf.WriteString("<p:clrMap")
+			for _, attr := range t.Attr {
+				buf.WriteString(" " + attr.Name.Local + "=" + strconv.Quote(attr.Value))
+			}
+			buf.WriteString("/>")
+			return buf.String()
 		}
 	}
 }

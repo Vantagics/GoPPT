@@ -168,8 +168,9 @@ func (w *PPTXWriter) writeContentTypes(zw *zip.Writer) error {
 		})
 	}
 
-	// One layout part per distinct source layout: every part the plan emits
-	// must be declared, or PowerPoint flags the undeclared part as damage.
+	// One layout part per distinct source layout, and one master/theme pair
+	// per distinct source master: every part the plan emits must be
+	// declared, or PowerPoint flags the undeclared part as damage.
 	for _, entry := range w.layoutPlan {
 		if entry.index == 1 {
 			continue // slideLayout1 is declared in the literal list above
@@ -177,6 +178,20 @@ func (w *PPTXWriter) writeContentTypes(zw *zip.Writer) error {
 		ct.Overrides = append(ct.Overrides, xmlOverride{
 			PartName:    fmt.Sprintf("/ppt/slideLayouts/slideLayout%d.xml", entry.index),
 			ContentType: ctSlideLayout,
+		})
+	}
+	nMasters := len(w.masterPlan)
+	if nMasters == 0 {
+		nMasters = 1
+	}
+	for m := 2; m <= nMasters; m++ {
+		ct.Overrides = append(ct.Overrides, xmlOverride{
+			PartName:    fmt.Sprintf("/ppt/slideMasters/slideMaster%d.xml", m),
+			ContentType: ctSlideMaster,
+		})
+		ct.Overrides = append(ct.Overrides, xmlOverride{
+			PartName:    fmt.Sprintf("/ppt/theme/theme%d.xml", m),
+			ContentType: ctTheme,
 		})
 	}
 
@@ -423,13 +438,20 @@ func (w *PPTXWriter) writePresentationRels(zw *zip.Writer) error {
 	}
 
 	relIdx := 1
-	// Slide master
-	rels.Relationships = append(rels.Relationships, xmlRelationship{
-		ID:     fmt.Sprintf("rId%d", relIdx),
-		Type:   relTypeSlideMaster,
-		Target: "slideMasters/slideMaster1.xml",
-	})
-	relIdx++
+	// One relationship per master part, in the plan's order — the
+	// presentation's sldMasterIdLst names rId1..N as its masters.
+	nMasters := len(w.masterPlan)
+	if nMasters == 0 {
+		nMasters = 1
+	}
+	for m := 1; m <= nMasters; m++ {
+		rels.Relationships = append(rels.Relationships, xmlRelationship{
+			ID:     fmt.Sprintf("rId%d", relIdx),
+			Type:   relTypeSlideMaster,
+			Target: fmt.Sprintf("slideMasters/slideMaster%d.xml", m),
+		})
+		relIdx++
+	}
 
 	// Slides
 	for i := range w.presentation.slides {

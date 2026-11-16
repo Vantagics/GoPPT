@@ -162,6 +162,22 @@ alphaModFix 写回（r108）、母版装饰形状写回（r109）。
    （font-size +0.61 但 6 deck 共损 2.7pp）、增长+0.6sz/0.2sz 边距反馈
    近似（同样净负）——需要把 constraint/rule 求解（含边距-字号反馈）
    移植进 fit 才能收敛。
+6g. **r145 多 master/多 theme writer（themes gen 19.12→4.32，slide4 75→1.9）**：
+   themes deck 是 7 master/7 theme（每 master 一个主题）。writer 现按
+   masterPlan 发射每 master 部件：clrMap（master 可把 bg1 映到 dk1，Trek）、
+   自有 bg（bgRef 1002 解析出的 Austin 渐变）、母版装饰形状（Rectangle 65
+   白卡等）、sldLayoutIdLst 列自己的 layout；layout rels 指向各自 master；
+   presentation.xml sldMasterIdLst + rels + contentTypes 全接线；theme 部件
+   按读取时缓存的原始字节逐字回写（Austin/Trek/Tradeshow 的 clrScheme/
+   fontScheme/fmtScheme 不再退化为硬编码 Office 主题）。占位 deco 以真
+   <p:ph> 占位符回写（Office 只在 slide 实例化时绘制，slide4 的白色标题卡
+   由此继承）。layout 根发 showMasterSp="0"（"layout turns off graphics"
+   slide，51→2.6）。
+   **0x80070570 修复要点**：sldMasterId 与 sldLayoutId 的 id 必须全包唯一——
+   layout 段占 2147483648+idx，master 段放 2147483648+1000+idx（r133 的
+   失败根源即此，非 OPC 接线）。python-pptx 可开、PowerPoint COM 严格
+   Open 通过（designs=4）。
+   10 个 gen deck 复测零回退。剩余 slide8 24%（Trek 贴图 tile）。
 6f. **r144 多 layout writer 接线 + 填充 alpha（themes gen 20.65→19.12）**：
    之前 slide rels 硬编码指向 slideLayout1——多 layout deck（themes 的
    8 个 layout）写出的 layout 部件全是孤儿，slide 全部落在空 layout1 上。

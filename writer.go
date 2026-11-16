@@ -38,6 +38,9 @@ type PPTXWriter struct {
 	// layoutPlan groups the slides by their layout part for the emission:
 	// one layout part per distinct layout path, each carrying its own deco.
 	layoutPlan []layoutPlanEntry
+	// masterPlan groups the layout plan by master part: one master part per
+	// distinct source master, each with its own theme.
+	masterPlan []masterPlan
 }
 
 // layoutPlanEntry is one layout part: the slides grouped under it, its part
@@ -49,6 +52,46 @@ type layoutPlanEntry struct {
 	// bgFill is the layout part's own background fill (<p:bg><p:bgPr>),
 	// read back from the source deck for the emission.
 	bgFill *Fill
+	// masterPath is the master part this layout serves (its own rels named
+	// it); masterIdx is the 1-based part index the writer assigns it. A deck
+	// carries one master per theme — the themes corpus has seven.
+	masterPath string
+	masterIdx  int
+	// hideMasterSp is the layout root's showMasterSp="0": the layout asked
+	// for the master's background graphics to be suppressed on every slide
+	// that uses it.
+	hideMasterSp bool
+}
+
+// masterPlan is one master part: the layouts grouped under it, its part
+// index (1-based), and the source part path the reader stamped.
+type masterPlan struct {
+	masterPath string
+	index      int
+	entries    []layoutPlanEntry
+}
+
+// buildMasterPlan groups the layout plan by master part path, in order of
+// first appearance. A deck read without master stamps (a fresh Presentation)
+// yields no entries; the writer emits the single fallback master then.
+func (w *PPTXWriter) buildMasterPlan(plan []layoutPlanEntry) []masterPlan {
+	var masters []masterPlan
+	byMaster := map[string]int{}
+	for i := range plan {
+		e := &plan[i]
+		if e.masterPath == "" {
+			continue
+		}
+		mi, ok := byMaster[e.masterPath]
+		if !ok {
+			mi = len(masters) + 1
+			byMaster[e.masterPath] = mi
+			masters = append(masters, masterPlan{masterPath: e.masterPath, index: mi})
+		}
+		masters[mi-1].entries = append(masters[mi-1].entries, *e)
+		e.masterIdx = mi
+	}
+	return masters
 }
 
 // buildLayoutPlan groups the slides by their layout part path and assigns
@@ -71,6 +114,10 @@ func (w *PPTXWriter) buildLayoutPlan() []layoutPlanEntry {
 			// The layout's own <p:bg> fill rides with the entry so the
 			// written layout part declares the same background it rendered.
 			entry.bgFill = w.presentation.layoutBgCache[slide.layoutPath]
+			entry.masterPath = w.presentation.layoutMasterCache[slide.layoutPath]
+			if cached, ok2 := w.presentation.layoutDecoCache[slide.layoutPath]; ok2 {
+				entry.hideMasterSp = cached.hideMasterSp
+			}
 			plan = append(plan, entry)
 		}
 	}
@@ -126,6 +173,7 @@ func (w *PPTXWriter) WriteTo(writer io.Writer) error {
 		return fmt.Errorf("presentation is nil")
 	}
 	w.layoutPlan = w.buildLayoutPlan()
+	w.masterPlan = w.buildMasterPlan(w.layoutPlan)
 
 	zw := zip.NewWriter(writer)
 

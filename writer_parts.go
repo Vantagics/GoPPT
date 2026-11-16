@@ -11,8 +11,22 @@ import (
 func (w *PPTXWriter) writePresentation(zw *zip.Writer) error {
 	layout := w.presentation.layout
 
+	// One sldMasterId per master part: a deck carries one master per theme
+	// and every slide resolves through its layout to its own master.
+	masterList := ""
+	nMasters := len(w.masterPlan)
+	if nMasters == 0 {
+		nMasters = 1
+	}
+	// Master ids live above the layout id band: sldMasterId and sldLayoutId
+	// ids must be unique across the whole package, and the layout lists
+	// claim 2147483648+index below 1000.
+	for m := 1; m <= nMasters; m++ {
+		masterList += fmt.Sprintf("    <p:sldMasterId id=\"%d\" r:id=\"rId%d\"/>\n", 2147483648+1000+m, m)
+	}
+
 	slideList := ""
-	relIdx := 2 // rId1 is slideMaster
+	relIdx := nMasters + 1 // rId1..nMasters are the slideMasters
 	for i := range w.presentation.slides {
 		slideList += fmt.Sprintf(`    <p:sldId id="%d" r:id="rId%d"/>
 `, 256+i, relIdx)
@@ -22,8 +36,7 @@ func (w *PPTXWriter) writePresentation(zw *zip.Writer) error {
 	content := fmt.Sprintf(`<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
 <p:presentation xmlns:a="%s" xmlns:r="%s" xmlns:p="%s">
   <p:sldMasterIdLst>
-    <p:sldMasterId id="2147483648" r:id="rId1"/>
-  </p:sldMasterIdLst>
+%s  </p:sldMasterIdLst>
   <p:sldIdLst>
 %s  </p:sldIdLst>
   <p:sldSz cx="%d" cy="%d" type="%s"/>
@@ -31,7 +44,7 @@ func (w *PPTXWriter) writePresentation(zw *zip.Writer) error {
   <p:defaultTextStyle/>
 </p:presentation>`,
 		nsDrawingML, nsOfficeDocRels, nsPresentationML,
-		slideList,
+		masterList, slideList,
 		layout.CX, layout.CY, layout.Name,
 		layout.CY, layout.CX, // notes are rotated
 	)
@@ -113,28 +126,66 @@ func (w *PPTXWriter) writeTableStyles(zw *zip.Writer) error {
 // --- Slide Master ---
 
 func (w *PPTXWriter) writeSlideMaster(zw *zip.Writer) error {
-	// The master lists every layout part the plan emits — a slide pointing at
-	// a layout the master does not declare is a repair prompt in PowerPoint.
+	masters := w.masterPlan
+	if len(masters) == 0 {
+		masters = []masterPlan{{index: 1}}
+	}
+	for _, mp := range masters {
+		if err := w.writeSlideMasterN(zw, mp); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// writeSlideMasterN emits one master part for the layouts grouped under it:
+// the master's own clrMap (a master can send bg1 at dk2 — the whole deck's
+// background turns dark), its decoration shapes, one sldLayoutId per layout,
+// and its rels wiring the layouts plus the master's own theme.
+func (w *PPTXWriter) writeSlideMasterN(zw *zip.Writer, mp masterPlan) error {
+	st := w.presentation.masterStates[mp.masterPath]
+
+	// The colour mapping: without the source's mapping Office resolves the
+	// written master's bg1 against the built-in lt1/dk1 defaults and the
+	// mapped decks' backgrounds come out wrong.
+	clrMap := `<p:clrMap bg1="lt1" tx1="dk1" bg2="lt2" tx2="dk2" accent1="accent1" accent2="accent2" accent3="accent3" accent4="accent4" accent5="accent5" accent6="accent6" hlink="hlink" folHlink="folHlink"/>`
+	if cm, ok := w.presentation.masterClrMapCache[mp.masterPath]; ok && cm != "" {
+		clrMap = cm
+	}
+
+	// The master's own background: an explicit <p:bgPr> fill rides back as
+	// one; otherwise the template's bgRef 1001 (solid bg1) stands in.
+	bgXML := "    <p:bg>\n      <p:bgRef idx=\"1001\">\n        <a:schemeClr val=\"bg1\"/>\n      </p:bgRef>\n    </p:bg>\n"
+	if st != nil && st.background != nil && st.background.Type != FillNone && st.background.Type != FillPicture {
+		bgXML = fmt.Sprintf("    <p:bg>\n      <p:bgPr>\n%s        <a:effectLst/>\n      </p:bgPr>\n    </p:bg>\n", w.writeFillXML(st.background))
+	}
+
+	// The master's decoration shapes — the furniture every slide of this
+	// master draws — plus their media. relBase skips the layout rels.
+	shapeID := 2
+	var masterDeco []Shape
+	if st != nil {
+		masterDeco = st.decoShapes
+	}
+	decoXML, mediaRels, err := w.emitDecoShapes(zw, masterDeco, fmt.Sprintf("imageM%d", mp.index), len(mp.entries)+1, &shapeID)
+	if err != nil {
+		return err
+	}
+
 	layoutList := ""
 	masterRels := ""
-	for _, entry := range w.layoutPlan {
-		layoutList += fmt.Sprintf("    <p:sldLayoutId id=\"%d\" r:id=\"rId%d\"/>\n", 2147483648+entry.index, entry.index)
-		masterRels += fmt.Sprintf("  <Relationship Id=\"rId%d\" Type=\"%s\" Target=\"../slideLayouts/slideLayout%d.xml\"/>\n", entry.index, relTypeSlideLayout, entry.index)
+	for i, e := range mp.entries {
+		layoutList += fmt.Sprintf("    <p:sldLayoutId id=\"%d\" r:id=\"rId%d\"/>\n", 2147483648+e.index, i+1)
+		masterRels += fmt.Sprintf("  <Relationship Id=\"rId%d\" Type=\"%s\" Target=\"../slideLayouts/slideLayout%d.xml\"/>\n", i+1, relTypeSlideLayout, e.index)
 	}
-	themeRel := len(w.layoutPlan) + 1
-	if themeRel < 2 {
-		themeRel = 2
-	}
+
+	// The theme rel lands after the layouts and the media.
+	themeRel := len(mp.entries) + strings.Count(mediaRels, "<Relationship ") + 1
 
 	content := fmt.Sprintf(`<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
 <p:sldMaster xmlns:a="%s" xmlns:r="%s" xmlns:p="%s">
   <p:cSld>
-    <p:bg>
-      <p:bgRef idx="1001">
-        <a:schemeClr val="bg1"/>
-      </p:bgRef>
-    </p:bg>
-    <p:spTree>
+%s    <p:spTree>
       <p:nvGrpSpPr>
         <p:cNvPr id="1" name=""/>
         <p:cNvGrpSpPr/>
@@ -148,29 +199,86 @@ func (w *PPTXWriter) writeSlideMaster(zw *zip.Writer) error {
           <a:chExt cx="0" cy="0"/>
         </a:xfrm>
       </p:grpSpPr>
-    </p:spTree>
+%s    </p:spTree>
   </p:cSld>
-  <p:clrMap bg1="lt1" tx1="dk1" bg2="lt2" tx2="dk2" accent1="accent1" accent2="accent2" accent3="accent3" accent4="accent4" accent5="accent5" accent6="accent6" hlink="hlink" folHlink="folHlink"/>
+  %s
   <p:sldLayoutIdLst>
 %s  </p:sldLayoutIdLst>
-</p:sldMaster>`, nsDrawingML, nsOfficeDocRels, nsPresentationML, layoutList)
+</p:sldMaster>`, nsDrawingML, nsOfficeDocRels, nsPresentationML, bgXML, decoXML, clrMap, layoutList)
 
-	if err := writeRawXMLToZip(zw, "ppt/slideMasters/slideMaster1.xml", content); err != nil {
+	if err := writeRawXMLToZip(zw, fmt.Sprintf("ppt/slideMasters/slideMaster%d.xml", mp.index), content); err != nil {
 		return err
 	}
 
-	// Slide master rels: every layout, then the theme.
+	// Slide master rels: every layout of this master, then the media, then
+	// the theme.
 	rels := fmt.Sprintf(`<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
 <Relationships xmlns="%s">
-%s  <Relationship Id="rId%d" Type="%s" Target="../theme/theme1.xml"/>
-</Relationships>`, nsRelationships, masterRels, themeRel, relTypeTheme)
-	return writeRawXMLToZip(zw, "ppt/slideMasters/_rels/slideMaster1.xml.rels", rels)
+%s%s  <Relationship Id="rId%d" Type="%s" Target="../theme/theme%d.xml"/>
+</Relationships>`, nsRelationships, masterRels, mediaRels, themeRel, relTypeTheme, mp.index)
+	return writeRawXMLToZip(zw, fmt.Sprintf("ppt/slideMasters/_rels/slideMaster%d.xml.rels", mp.index), rels)
 }
 
 // --- Slide Layout ---
 
 func (w *PPTXWriter) writeSlideLayout(zw *zip.Writer) error {
 	return w.writeSlideLayoutN(zw, w.layoutPlan[0])
+}
+
+// emitDecoShapes serialises the decoration shapes of a master or layout
+// part: the shapes' XML body plus the pictures' media written beside the
+// part, returned as the relationship entries the part's own rels must
+// carry. relBase is the first relationship number the media may use — a
+// layout's rId1 goes to its master, a master's rIds go to its layouts
+// first.
+func (w *PPTXWriter) emitDecoShapes(zw *zip.Writer, shapes []Shape, mediaPrefix string, relBase int, shapeID *int) (string, string, error) {
+	if len(shapes) == 0 {
+		return "", "", nil
+	}
+	var body strings.Builder
+	rels := strings.Builder{}
+	mediaIdx := 0
+	for _, sh := range shapes {
+		switch s := sh.(type) {
+		case *DrawingShape:
+			if s.data != nil {
+				// A deco picture: its media is written beside the part and
+				// referenced from the part's own rels.
+				mediaIdx++
+				mediaName := fmt.Sprintf("%s_%d.%s", mediaPrefix, mediaIdx, w.getImageExtension(s))
+				fw, ferr := zw.Create("ppt/media/" + mediaName)
+				if ferr != nil {
+					return "", "", ferr
+				}
+				if _, werr := fw.Write(s.data); werr != nil {
+					return "", "", werr
+				}
+				relID := fmt.Sprintf("rId%d", relBase+mediaIdx-1)
+				rels.WriteString(fmt.Sprintf("  <Relationship Id=\"%s\" Type=\"%s\" Target=\"../media/%s\"/>\n", relID, relTypeImage, mediaName))
+				body.WriteString(w.layoutPicXML(s, shapeID, relID))
+				continue
+			}
+			body.WriteString(w.writeDrawingShapeXML(s, shapeID, 1))
+		case *AutoShape:
+			body.WriteString(w.writeAutoShapeXML(s, shapeID))
+		case *RichTextShape:
+			body.WriteString(w.writeRichTextShapeXML(s, shapeID))
+		case *LineShape:
+			body.WriteString(w.writeLineShapeXML(s, shapeID))
+		case *GroupShape:
+			body.WriteString(w.writeGroupShapeXML(s, shapeID, 1))
+		case *PlaceholderShape:
+			// A painted master/layout placeholder is written back as a REAL
+			// placeholder (the <p:ph> element): Office paints it only where
+			// a slide instantiates it and the slide inherits its paint
+			// natively. Written as a plain shape it painted on every slide
+			// (the themes deck's L23 went 1.3%→92% that way); written as
+			// nothing the inherited paint was lost (the Austin master's
+			// white title card, slide4 75%).
+			body.WriteString(w.writePlaceholderShapeXML(s, shapeID))
+		}
+	}
+	return body.String(), rels.String(), nil
 }
 
 // writeSlideLayoutN emits one layout part with its decoration shapes — the
@@ -186,57 +294,20 @@ func (w *PPTXWriter) writeSlideLayoutN(zw *zip.Writer, entry layoutPlanEntry) er
 		bgXML = fmt.Sprintf("    <p:bg>\n      <p:bgPr>\n%s      <a:effectLst/>\n      </p:bgPr>\n    </p:bg>\n", w.writeFillXML(entry.bgFill))
 	}
 
-	decoXML := strings.Builder{}
-	mediaRels := ""
 	shapeID := 2
-	if len(entry.decoShapes) > 0 {
-		mediaIdx := 0
-		var body strings.Builder
-		for _, sh := range entry.decoShapes {
-			switch s := sh.(type) {
-			case *DrawingShape:
-				if s.data != nil {
-					// A deco picture: its media is written beside the layout
-					// part and referenced from the layout's own rels.
-					mediaIdx++
-					mediaName := fmt.Sprintf("imageL%d_%d.%s", entry.index, mediaIdx, w.getImageExtension(s))
-					fw, ferr := zw.Create("ppt/media/" + mediaName)
-					if ferr != nil {
-						return ferr
-					}
-					if _, werr := fw.Write(s.data); werr != nil {
-						return werr
-					}
-					relID := fmt.Sprintf("rId%d", 1+mediaIdx)
-					mediaRels += fmt.Sprintf("  <Relationship Id=\"%s\" Type=\"%s\" Target=\"../media/%s\"/>\n", relID, relTypeImage, mediaName)
-					decoXML.WriteString(w.layoutPicXML(s, &shapeID, relID))
+	decoXML, mediaRels, err := w.emitDecoShapes(zw, entry.decoShapes, fmt.Sprintf("imageL%d", entry.index), 2, &shapeID)
+	if err != nil {
+		return err
+	}
 
-
-					continue
-				}
-				decoXML.WriteString(w.writeDrawingShapeXML(s, &shapeID, 1))
-			case *AutoShape:
-				decoXML.WriteString(w.writeAutoShapeXML(s, &shapeID))
-			case *RichTextShape:
-				decoXML.WriteString(w.writeRichTextShapeXML(s, &shapeID))
-			case *LineShape:
-				decoXML.WriteString(w.writeLineShapeXML(s, &shapeID))
-			case *GroupShape:
-				decoXML.WriteString(w.writeGroupShapeXML(s, &shapeID, 1))
-			case *PlaceholderShape:
-				// Layout placeholders are skipped: PowerPoint renders a
-				// layout placeholder only when the slide instantiates it,
-				// so writing it as a plain shape paints decoration the
-				// original never shows (the themes deck's L23 went 1.3%→92%
-				// that way). The paint a slide actually inherits is resolved
-				// into the slide's own placeholder by the reader's ladder.
-			}
-		}
-		decoXML.WriteString(body.String())
+	// The layout's own suppression of the master graphics rides on the root.
+	suppress := ""
+	if entry.hideMasterSp {
+		suppress = ` showMasterSp="0"`
 	}
 
 	content := fmt.Sprintf(`<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
-<p:sldLayout xmlns:a="%s" xmlns:r="%s" xmlns:p="%s" type="blank" preserve="1">
+<p:sldLayout xmlns:a="%s" xmlns:r="%s" xmlns:p="%s"%s type="blank" preserve="1">
   <p:cSld name="Blank">
 %s    <p:spTree>
       <p:nvGrpSpPr>
@@ -257,17 +328,22 @@ func (w *PPTXWriter) writeSlideLayoutN(zw *zip.Writer, entry layoutPlanEntry) er
   <p:clrMapOvr>
     <a:masterClrMapping/>
   </p:clrMapOvr>
-</p:sldLayout>`, nsDrawingML, nsOfficeDocRels, nsPresentationML, bgXML, decoXML.String())
+</p:sldLayout>`, nsDrawingML, nsOfficeDocRels, nsPresentationML, suppress, bgXML, decoXML)
 
 	if err := writeRawXMLToZip(zw, fmt.Sprintf("ppt/slideLayouts/slideLayout%d.xml", entry.index), content); err != nil {
 		return err
 	}
 
-	// Slide layout rels: the master, then the deco pictures' media.
+	// Slide layout rels: the layout's own master, then the deco pictures'
+	// media.
+	masterIdx := entry.masterIdx
+	if masterIdx == 0 {
+		masterIdx = 1
+	}
 	rels := fmt.Sprintf(`<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
 <Relationships xmlns="%s">
-  <Relationship Id="rId1" Type="%s" Target="../slideMasters/slideMaster1.xml"/>
-%s</Relationships>`, nsRelationships, relTypeSlideMaster, mediaRels)
+  <Relationship Id="rId1" Type="%s" Target="../slideMasters/slideMaster%d.xml"/>
+%s</Relationships>`, nsRelationships, relTypeSlideMaster, masterIdx, mediaRels)
 	return writeRawXMLToZip(zw, fmt.Sprintf("ppt/slideLayouts/_rels/slideLayout%d.xml.rels", entry.index), rels)
 }
 
@@ -332,7 +408,33 @@ func relIDNumber(relID string) int {
 // --- Theme ---
 
 func (w *PPTXWriter) writeTheme(zw *zip.Writer) error {
-	content := fmt.Sprintf(`<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+	masters := w.masterPlan
+	if len(masters) == 0 {
+		masters = []masterPlan{{index: 1}}
+	}
+	for _, mp := range masters {
+		// The source theme part rides back verbatim: the reader stashed its
+		// raw bytes so a deck's colour scheme, fonts and fill styles survive
+		// the round trip instead of degrading to the built-in Office theme.
+		if st := w.presentation.masterStates[mp.masterPath]; st != nil && st.themePath != "" {
+			if raw, ok := w.presentation.masterThemeXMLCache[st.themePath]; ok && len(raw) > 0 {
+				if err := writeRawXMLToZip(zw, fmt.Sprintf("ppt/theme/theme%d.xml", mp.index), string(raw)); err != nil {
+					return err
+				}
+				continue
+			}
+		}
+		if err := writeRawXMLToZip(zw, fmt.Sprintf("ppt/theme/theme%d.xml", mp.index), defaultThemeXML()); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// defaultThemeXML is the built-in Office theme the writer emits when the
+// source deck carried no theme part the reader could stash.
+func defaultThemeXML() string {
+	return fmt.Sprintf(`<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
 <a:theme xmlns:a="%s" name="Office Theme">
   <a:themeElements>
     <a:clrScheme name="Office">
@@ -399,5 +501,4 @@ func (w *PPTXWriter) writeTheme(zw *zip.Writer) error {
   <a:objectDefaults/>
   <a:extraClrSchemeLst/>
 </a:theme>`, nsDrawingML)
-	return writeRawXMLToZip(zw, "ppt/theme/theme1.xml", content)
 }
