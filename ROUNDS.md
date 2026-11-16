@@ -178,6 +178,18 @@ alphaModFix 写回（r108）、母版装饰形状写回（r109）。
    失败根源即此，非 OPC 接线）。python-pptx 可开、PowerPoint COM 严格
    Open 通过（designs=4）。
    10 个 gen deck 复测零回退。剩余 slide8 24%（Trek 贴图 tile）。
+6i. **r147 占位符 idx 匹配分档 + custGeom 逐子路径 fill（custgeom-nofill-path
+   35.9→0.00 全对）**：两条 Office 法则落地。(a) layout 档的占位符匹配
+   只认 idx——slide 的 pic idx=3 不继承 layout 的 pic idx=8 的 custGeom
+   填充（曾把 9x5m 黄块画到 slide 上）；master 档保留 type 回退
+   （00022693 slide17 的 idx=7 body 仍继承 master body 几何）。
+   matchPlaceholderDef 加 typeFallback 参数。(b) 带画的非文字占位符
+   （pic custGeom 黄块）Office 当普通形状渲染——writer 分文字/非文字：
+   文字占位符回写真 <p:ph>，非文字回写普通形状。(c) custGeom 写出按
+   子路径拆 <a:path>，子路径 fill="none" 逐字回写（读取侧 subPathNoFill
+   已存，写出侧一直合并成一个 path 把透明区也填了）。
+   TestReaderKeepsStandInForUnreadableChart 修随机失败（firstPartMatching
+   走 map 顺序不定，r142 加 rels 后一半概率删错件；改为全删）。
 6h. **r146 master txStyles 逐字回写 + 运行级 cap="all"（slide10 4.6→3.3）**：
    读取时暂存各 master 的原始 <p:txStyles>（title/body/other 的 lvl1-9
    阶梯，Trek titleStyle cap="all"），writer 逐字发射回 master 部件；

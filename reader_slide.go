@@ -4999,8 +4999,8 @@ func (r *PPTXReader) applyLayoutInheritance(zr *zip.Reader, slide *Slide, rels [
 		picPh := (*DrawingShape)(nil)
 		var match, masterMatch *layoutPlaceholder
 		if isPh {
-			match = matchPlaceholderDef(layoutPHs, ph)
-			masterMatch = matchPlaceholderDef(pres.masterPlaceholders, ph)
+			match = matchPlaceholderDef(layoutPHs, ph, false)
+			masterMatch = matchPlaceholderDef(pres.masterPlaceholders, ph, true)
 		} else if ds, isDS := shape.(*DrawingShape); isDS && (ds.phIdx > 0 || ds.phType != "") {
 			// A picture placeholder: no text to inherit, but the geometry
 			// rung still applies — the corpus deck whose only shape is a
@@ -5008,8 +5008,8 @@ func (r *PPTXReader) applyLayoutInheritance(zr *zip.Reader, slide *Slide, rels [
 			// invisible, until this ladder answered it.
 			picPh = ds
 			mock := &PlaceholderShape{phIdx: ds.phIdx, phType: PlaceholderType(ds.phType)}
-			match = matchPlaceholderDef(layoutPHs, mock)
-			masterMatch = matchPlaceholderDef(pres.masterPlaceholders, mock)
+			match = matchPlaceholderDef(layoutPHs, mock, false)
+			masterMatch = matchPlaceholderDef(pres.masterPlaceholders, mock, true)
 		} else {
 			continue
 		}
@@ -5114,12 +5114,23 @@ func (r *PPTXReader) applyLayoutInheritance(zr *zip.Reader, slide *Slide, rels [
 // aliases a ctrTitle placeholder matched nothing on the master rung and lost
 // the master's anchor="ctr" (slide1's title sat 32px too low because it
 // rendered top-anchored).
-func matchPlaceholderDef(defs []layoutPlaceholder, ph *PlaceholderShape) *layoutPlaceholder {
+func matchPlaceholderDef(defs []layoutPlaceholder, ph *PlaceholderShape, typeFallback bool) *layoutPlaceholder {
 	if ph.phIdx > 0 {
 		for i := range defs {
 			if defs[i].phIdx == ph.phIdx {
 				return &defs[i]
 			}
+		}
+		// A placeholder that declared an index matches nothing on the LAYOUT
+		// rung when the layout defines no such index: a layout's idx
+		// disambiguates same-type placeholders, so pic idx=8 is a different
+		// box from the slide's pic idx=3 and its paint does not flow over
+		// (the custgeom-nofill-path slide inherited a yellow 9x5m custGeom
+		// fill that way — a rectangle the original never draws). The MASTER
+		// rung keeps the type walk: its body is the type-level default the
+		// slide's idx=7 body still inherits from (deck 00022693 slide17).
+		if !typeFallback {
+			return nil
 		}
 	}
 	for i := range defs {

@@ -18,16 +18,22 @@ func TestMatchPlaceholderDefByIndex(t *testing.T) {
 	}
 	ph := NewPlaceholderShape("") // idx-only: no type in the slide markup
 	ph.phIdx = 1
-	got := matchPlaceholderDef(defs, ph)
+	got := matchPlaceholderDef(defs, ph, true)
 	if got == nil || got.phType != "body" || got.phIdx != 1 {
 		t.Fatalf("idx-only placeholder matched %+v, want body idx=1", got)
 	}
 	// An index with no carrier still falls through to the type walk.
 	ph2 := NewPlaceholderShape(PlaceholderType("body"))
 	ph2.phIdx = 7
-	got2 := matchPlaceholderDef(defs, ph2)
+	got2 := matchPlaceholderDef(defs, ph2, true)
 	if got2 == nil || got2.phType != "body" {
 		t.Fatalf("unmatched idx fell through to type walk, got %+v", got2)
+	}
+	// The LAYOUT rung is stricter: idx disambiguates same-type placeholders,
+	// so an unmatched idx inherits nothing there (the custgeom-nofill-path
+	// slide's pic idx=3 must not take the layout's pic idx=8 custGeom paint).
+	if got3 := matchPlaceholderDef(defs, ph2, false); got3 != nil {
+		t.Fatalf("layout rung matched %+v across indexes, want nil", got3)
 	}
 }
 

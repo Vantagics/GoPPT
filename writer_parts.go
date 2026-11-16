@@ -235,6 +235,19 @@ func (w *PPTXWriter) writeSlideLayout(zw *zip.Writer) error {
 	return w.writeSlideLayoutN(zw, w.layoutPlan[0])
 }
 
+// isTextPlaceholder reports whether the placeholder type is one of the
+// text prompts Office never paints from a layout: titles, bodies and the
+// footer trio. A non-text placeholder (picture, table, chart) with explicit
+// paint renders as itself.
+func isTextPlaceholder(t PlaceholderType) bool {
+	switch t {
+	case PlaceholderTitle, PlaceholderBody, PlaceholderCtrTitle, PlaceholderSubTitle,
+		PlaceholderDate, PlaceholderFooter, PlaceholderSlideNum:
+		return true
+	}
+	return false
+}
+
 // emitDecoShapes serialises the decoration shapes of a master or layout
 // part: the shapes' XML body plus the pictures' media written beside the
 // part, returned as the relationship entries the part's own rels must
@@ -278,14 +291,25 @@ func (w *PPTXWriter) emitDecoShapes(zw *zip.Writer, shapes []Shape, mediaPrefix 
 		case *GroupShape:
 			body.WriteString(w.writeGroupShapeXML(s, shapeID, 1))
 		case *PlaceholderShape:
-			// A painted master/layout placeholder is written back as a REAL
-			// placeholder (the <p:ph> element): Office paints it only where
-			// a slide instantiates it and the slide inherits its paint
-			// natively. Written as a plain shape it painted on every slide
-			// (the themes deck's L23 went 1.3%→92% that way); written as
-			// nothing the inherited paint was lost (the Austin master's
-			// white title card, slide4 75%).
-			body.WriteString(w.writePlaceholderShapeXML(s, shapeID))
+			// A painted master/layout TEXT placeholder is written back as a
+			// REAL placeholder (the <p:ph> element): Office treats those as
+			// edit-time prompts — it paints them only where a slide
+			// instantiates one, and the slide inherits the paint natively.
+			// Written as a plain shape it painted on every slide (the themes
+			// deck's L23 went 1.3%→92% that way); written as nothing the
+			// inherited paint was lost (the Austin master's white title card,
+			// slide4 75%).
+			//
+			// A NON-text placeholder with paint (a picture placeholder drawn
+			// with a custGeom fill — the custgeom-nofill-path deck's yellow
+			// marker) renders as itself in the original: Office paints it
+			// whether or not a slide instantiates it, so it goes back as a
+			// plain shape.
+			if isTextPlaceholder(s.phType) {
+				body.WriteString(w.writePlaceholderShapeXML(s, shapeID))
+			} else {
+				body.WriteString(w.writeRichTextShapeXML(&s.RichTextShape, shapeID))
+			}
 		}
 	}
 	return body.String(), rels.String(), nil

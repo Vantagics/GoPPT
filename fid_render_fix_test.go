@@ -1598,7 +1598,7 @@ func TestCtrTitleInheritsFromMasterTitle(t *testing.T) {
 		{phType: "body", phIdx: 1},
 	}
 	ctr := &PlaceholderShape{phType: "ctrTitle"}
-	def := matchPlaceholderDef(master, ctr)
+	def := matchPlaceholderDef(master, ctr, true)
 	if def == nil || def.phType != "title" {
 		t.Fatalf("ctrTitle matched %v, want the master's title placeholder", def)
 	}
@@ -1606,7 +1606,7 @@ func TestCtrTitleInheritsFromMasterTitle(t *testing.T) {
 		t.Fatalf("ctrTitle inherited anchor %q, want ctr", def.anchor)
 	}
 	sub := &PlaceholderShape{phType: "subTitle"}
-	if def := matchPlaceholderDef(master, sub); def == nil || def.phType != "body" {
+	if def := matchPlaceholderDef(master, sub, true); def == nil || def.phType != "body" {
 		t.Fatalf("subTitle matched %v, want the master's body placeholder", def)
 	}
 	// An exact match still wins over an alias.
@@ -1614,14 +1614,14 @@ func TestCtrTitleInheritsFromMasterTitle(t *testing.T) {
 		{phType: "title", anchorSet: true, anchor: TextAnchorMiddle},
 		{phType: "ctrTitle", anchorSet: true, anchor: TextAnchorTop},
 	}
-	if def := matchPlaceholderDef(masterExact, ctr); def == nil || def.anchor != TextAnchorTop {
+	if def := matchPlaceholderDef(masterExact, ctr, true); def == nil || def.anchor != TextAnchorTop {
 		t.Fatalf("exact ctrTitle match lost to the alias: %v", def)
 	}
 	// A plain title still matches by exact type, and an unrelated type stays unmatched.
-	if def := matchPlaceholderDef(master, &PlaceholderShape{phType: "title"}); def == nil || def.phType != "title" {
+	if def := matchPlaceholderDef(master, &PlaceholderShape{phType: "title"}, true); def == nil || def.phType != "title" {
 		t.Fatalf("title matched %v, want exact", def)
 	}
-	if def := matchPlaceholderDef(master, &PlaceholderShape{phType: "sldNum"}); def != nil {
+	if def := matchPlaceholderDef(master, &PlaceholderShape{phType: "sldNum"}, true); def != nil {
 		t.Fatalf("sldNum matched %v, want nil", def)
 	}
 }

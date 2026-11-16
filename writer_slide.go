@@ -1056,11 +1056,31 @@ func custGeomXML(cp *CustomGeomPath, indent string) string {
 	fmt.Fprintf(&b, "%s<a:cxnLst/>\n", inner)
 	fmt.Fprintf(&b, "%s<a:rect l=\"0\" t=\"0\" r=\"0\" b=\"0\"/>\n", inner)
 	fmt.Fprintf(&b, "%s<a:pathLst>\n", inner)
-	fmt.Fprintf(&b, "%s  <a:path w=\"%d\" h=\"%d\">\n", inner, w, h)
-	for _, cmd := range cp.Commands {
+	// One <a:path> per subpath: a moveTo starts a new subpath, and each
+	// source <a:path> element carries its own fill — the corpus's markers
+	// draw a fill="none" region inside a filled outline, and merging the
+	// subpaths back into one element filled the transparent region too.
+	sub := -1
+	for i, cmd := range cp.Commands {
+		if cmd.Type == "moveTo" || i == 0 {
+			if i > 0 || cmd.Type != "moveTo" {
+				if sub >= 0 {
+					fmt.Fprintf(&b, "%s  </a:path>\n", inner)
+				}
+			}
+			sub++
+			noFill := sub < len(cp.subPathNoFill) && cp.subPathNoFill[sub]
+			attr := ""
+			if noFill {
+				attr = " fill=\"none\""
+			}
+			fmt.Fprintf(&b, "%s  <a:path w=\"%d\" h=\"%d\"%s>\n", inner, w, h, attr)
+		}
 		b.WriteString(pathCommandXML(cmd, inner+"    "))
 	}
-	fmt.Fprintf(&b, "%s  </a:path>\n", inner)
+	if sub >= 0 {
+		fmt.Fprintf(&b, "%s  </a:path>\n", inner)
+	}
 	fmt.Fprintf(&b, "%s</a:pathLst>\n", inner)
 	fmt.Fprintf(&b, "%s</a:custGeom>", indent)
 	return b.String()
