@@ -2086,6 +2086,16 @@ func (w *PPTXWriter) writeGroupShapeXML(g *GroupShape, shapeID *int, slideNum in
 		}
 	}
 
+	// The child coordinate space is the group's own chOff/chExt, not the
+	// resolved slide-space extents: the source's children carry coordinates
+	// in that space (the alterman deck's groups scale a 1920x2496 child
+	// space up 1587x), and writing the resolved extents there mapped every
+	// child to a speck at the top-left corner.
+	chOffX, chOffY, chExtX, chExtY := g.offsetX, g.offsetY, g.width, g.height
+	if g.childExtX != 0 || g.childExtY != 0 {
+		chOffX, chOffY, chExtX, chExtY = g.childOffX, g.childOffY, g.childExtX, g.childExtY
+	}
+
 	return fmt.Sprintf(`      <p:grpSp>
         <p:nvGrpSpPr>
           <p:cNvPr id="%d" name="%s"%s/>
@@ -2104,7 +2114,7 @@ func (w *PPTXWriter) writeGroupShapeXML(g *GroupShape, shapeID *int, slideNum in
 `, id, xmlEscape(name), hiddenAttr(&g.BaseShape),
 		xfrmAttrs(&g.BaseShape),
 		g.offsetX, g.offsetY, g.width, g.height,
-		g.offsetX, g.offsetY, g.width, g.height,
+		chOffX, chOffY, chExtX, chExtY,
 		childXML.String())
 }
 

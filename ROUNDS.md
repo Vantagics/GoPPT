@@ -178,6 +178,15 @@ alphaModFix 写回（r108）、母版装饰形状写回（r109）。
    失败根源即此，非 OPC 接线）。python-pptx 可开、PowerPoint COM 严格
    Open 通过（designs=4）。
    10 个 gen deck 复测零回退。剩余 slide8 24%（Trek 贴图 tile）。
+6j. **r148 组的 chOff/chExt 逐字回写（alterman 9.52→7.65，group-rot 4.21→0.66，
+   sample_pptx_grouping_issues→0.00）**：writer 把组的 off/ext 同时发到
+   chOff/chExt——而读取侧给渲染解析了子形状坐标后仍保留原 child space。
+   源组的 child space 常与组尺寸不同（alterman 的组把 1920x2496 的
+   子空间放大 1587x），恒等 chOff/chExt 把每个子形状映射成左上角的
+   一枚小点——组的填充形状全部消失（白框）。现在 chOff/chExt 发
+   g.childOff/childExt（childExt=0 时回退 off/ext，覆盖 writer 自建组）。
+   6 组系 deck 复测：group-rot 0.66、sample_pptx_grouping_issues 0.00、
+   group-connector-descr 0.37、group-shadow 1.68，无回退。
 6i. **r147 占位符 idx 匹配分档 + custGeom 逐子路径 fill（custgeom-nofill-path
    35.9→0.00 全对）**：两条 Office 法则落地。(a) layout 档的占位符匹配
    只认 idx——slide 的 pic idx=3 不继承 layout 的 pic idx=8 的 custGeom
