@@ -160,6 +160,21 @@ func (w *PPTXWriter) writeSlideMasterN(zw *zip.Writer, mp masterPlan) error {
 		bgXML = fmt.Sprintf("    <p:bg>\n      <p:bgPr>\n%s        <a:effectLst/>\n      </p:bgPr>\n    </p:bg>\n", w.writeFillXML(st.background))
 	}
 
+	// The master's placeholder shapes ride back verbatim: they are the
+	// inheritance definitions (geometry, bodyPr flags like compatLnSpc="1",
+	// per-level lstStyles) the slides' placeholders resolve through. The
+	// deco filter drops every unpainted one on the render side, but without
+	// them Office re-pitches text (the alterman deck's body lines lost the
+	// legacy 1.2em spacing and drifted a whole band).
+	phXML := ""
+	if st != nil {
+		phXML = w.presentation.masterPhCache[mp.masterPath]
+	}
+	phBlock := ""
+	if phXML != "" {
+		phBlock = phXML + "\n"
+	}
+
 	// The master's decoration shapes — the furniture every slide of this
 	// master draws — plus their media. relBase skips the layout rels.
 	shapeID := 2
@@ -209,12 +224,12 @@ func (w *PPTXWriter) writeSlideMasterN(zw *zip.Writer, mp masterPlan) error {
           <a:chExt cx="0" cy="0"/>
         </a:xfrm>
       </p:grpSpPr>
-%s    </p:spTree>
+%s%s    </p:spTree>
   </p:cSld>
   %s
   <p:sldLayoutIdLst>
 %s  </p:sldLayoutIdLst>
-%s</p:sldMaster>`, nsDrawingML, nsOfficeDocRels, nsPresentationML, bgXML, decoXML, clrMap, layoutList, txStylesXML)
+%s</p:sldMaster>`, nsDrawingML, nsOfficeDocRels, nsPresentationML, bgXML, phBlock, decoXML, clrMap, layoutList, txStylesXML)
 
 	if err := writeRawXMLToZip(zw, fmt.Sprintf("ppt/slideMasters/slideMaster%d.xml", mp.index), content); err != nil {
 		return err

@@ -650,6 +650,10 @@ type bodyPrAttrs struct {
 	rIns           int64
 	tIns           int64
 	bIns           int64
+	// compatLnSpc writes bodyPr's compatLnSpc="1" — the legacy 1.2em line
+	// spacing inherited through the placeholder ladder. Without it Office
+	// re-pitches the body's lines to the tighter modern metrics.
+	compatLnSpc bool
 }
 
 // bodyPrXML serialises a shape's <a:bodyPr>.
@@ -683,6 +687,9 @@ func bodyPrXML(a bodyPrAttrs) string {
 	}
 	if a.anchor != "" && a.anchor != TextAnchorNone {
 		fmt.Fprintf(&b, ` anchor="%s"`, xmlEscape(string(a.anchor)))
+	}
+	if a.compatLnSpc {
+		fmt.Fprintf(&b, ` compatLnSpc="1"`)
 	}
 
 	child := autoFitXML(a.autoFit, a.fontScale, a.lnSpcReduction)
@@ -935,7 +942,12 @@ func (w *PPTXWriter) runPropsXMLAt(tr *TextRun, inner string) string {
 	}
 
 	latin := ""
-	if font.Name != "" {
+	if font.Name != "" && (font.fontNameSet || font.Name != "Calibri") {
+		// "Calibri" is the library default a run carries when its markup
+		// named no font at all. Writing it explicitly replaces the theme's
+		// +mn-lt with Calibri, whose line metrics are tighter — the whole
+		// body's line pitch shrank a notch (the alterman deck drifted
+		// 64px→58px lines that way). A run that stated a font keeps it.
 		latin = fmt.Sprintf(`
 %s<a:latin typeface="%s"/>`, inner, xmlEscape(font.Name))
 	}
@@ -2180,6 +2192,7 @@ func (w *PPTXWriter) writePlaceholderShapeXML(s *PlaceholderShape, shapeID *int)
 			rIns:           s.insetRight,
 			tIns:           s.insetTop,
 			bIns:           s.insetBottom,
+			compatLnSpc:    s.compatLnSpc,
 		}),
 		paragraphsXML.String())
 }

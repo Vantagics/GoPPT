@@ -120,6 +120,13 @@ type Font struct {
 	// false and unstated were indistinguishable to it.
 	boldSet   bool
 	italicSet bool
+	// fontNameSet records that the run's own <a:latin> stated a typeface.
+	// Without it the writer emitted the library default ("Calibri") on runs
+	// that never named a font — an explicit Calibri replaces the theme's
+	// +mn-lt and its tighter line metrics shrink the whole body's line
+	// pitch (the alterman deck's body drifted a line pitch of 64px→58px
+	// that way).
+	fontNameSet bool
 	// runSizeSet / runColorSet likewise mark size and colour the run's own
 	// markup stated. The style ladder cannot tell a stated value from the
 	// library's substitution (18/10 for an unstated sz, black for an

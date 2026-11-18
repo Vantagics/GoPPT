@@ -178,6 +178,20 @@ alphaModFix 写回（r108）、母版装饰形状写回（r109）。
    失败根源即此，非 OPC 接线）。python-pptx 可开、PowerPoint COM 严格
    Open 通过（designs=4）。
    10 个 gen deck 复测零回退。剩余 slide8 24%（Trek 贴图 tile）。
+6n. **r151 master 占位符逐字回写 + compatLnSpc 走梯 + fontNameSet
+   （master-slides 3.94→2.01）**：master 的占位符 <p:sp>（继承定义——
+   几何/bodyPr/每级 lstStyle）逐字缓存回写进 master 部件（deco 过滤器
+   曾丢光无画占位符）；compatLnSpc="1"（legacy 1.2em 行距）沿
+   占位符梯子传播到 slide 占位符并在 bodyPr 回发；fontNameSet 标记
+   记录运行自述的字体——写侧不再把库默认 Calibri 发成显式字体
+   （显式字体会顶掉主题 +mn-lt 并改变行距度量）。
+   **alterman 残余 7.59（未破）**：body 行距 58px vs 参考 64px（24pt
+   Arial：1.0875em vs 1.2em）——二分矩阵：源 txBody/主题/布局/
+   defaultTextStyle 逐个换入我们的包均 58；我们的 slide20 放进源包
+   即 64；master body ph/txStyles 已逐字一致、compatLnSpc 已回发仍 58。
+   毒源在包级剩余差异（master 的 OLE graphicFrame vs pics、spTree
+   顺序、bg schemeClr-vs-srgb 或 Office 的包级兼容模式判定）——
+   待专轮。
 6m. **r144–r150 全量 gen 普测（stdout 口径，cmp.log 是历史脚本遗留、
    勿再当现状读）**：67 deck 均值 1.13%。榜首：alterman 7.65（7px 文字
    恒定偏移，见 6l(a)）、tdf140865Wordart3D 7.63、LIBRE 5.55、KEY02 4.40、

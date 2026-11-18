@@ -88,6 +88,13 @@ type Presentation struct {
 	// keyed by the master part path — the writer needs the mapping to emit a
 	// master part whose bg1/tx1 resolve the way the source's did.
 	masterClrMapCache map[string]string
+	// masterPhCache stores each master's raw placeholder <p:sp> elements
+	// (joined), keyed by the master part path. Placeholders are the
+	// inheritance definitions — geometry, bodyPr flags like
+	// compatLnSpc="1" (the legacy line spacing the alterman deck's body
+	// pitch depends on) and per-level lstStyles — and the writer re-emits
+	// them verbatim; the deco filter had dropped every unpainted one.
+	masterPhCache map[string]string
 	// masterTxStylesCache stores each master's raw <p:txStyles> element —
 	// the title/body/other style ladder the slide's placeholders inherit
 	// (the Trek master's titleStyle carries cap="all"), re-emitted verbatim.

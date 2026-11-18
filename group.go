@@ -68,6 +68,11 @@ type PlaceholderShape struct {
 	RichTextShape
 	phType PlaceholderType
 	phIdx  int
+	// compatLnSpc is the placeholder bodyPr's compatLnSpc="1" inherited
+	// through the master/layout placeholder ladder — the legacy 1.2em line
+	// spacing. The writer re-emits it or Office re-pitches the body's
+	// lines to the tighter modern metrics.
+	compatLnSpc bool
 }
 
 // ShapeTypePlaceholder is the shape type for placeholders.

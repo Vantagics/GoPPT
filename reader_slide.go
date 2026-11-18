@@ -2825,6 +2825,7 @@ func (r *PPTXReader) parseSlideXML(decoder *xml.Decoder, slide *Slide, rels []xm
 				if state.inRunProps && currentFont != nil {
 					if n := typefaceOf(pres, t.Attr); n != "" {
 						currentFont.Name = n
+						currentFont.fontNameSet = true
 					}
 				} else if state.inDefRPr && state.inLstStyleLvl1 && lstStyleFont != nil {
 					if n := typefaceOf(pres, t.Attr); n != "" {
@@ -4836,6 +4837,12 @@ type layoutPlaceholder struct {
 	// empty.
 	anchorSet bool
 	anchor    TextAnchorType
+	// compatLnSpc is the placeholder bodyPr's compatLnSpc="1" — the legacy
+	// 1.2em line spacing. Office applies it through the placeholder ladder:
+	// without it the round-tripped deck's body lines re-pitch to the
+	// tighter modern metrics (the alterman deck's body drifted a whole
+	// band).
+	compatLnSpc bool
 	// lvlBullet is the bullet declaration of the placeholder's own
 	// <a:lstStyle> lvlNpPr, the rung between the slide's own <a:pPr> and
 	// the master's <p:txStyles>. set distinguishes any declaration from
@@ -5071,6 +5078,16 @@ func (r *PPTXReader) applyLayoutInheritance(zr *zip.Reader, slide *Slide, rels [
 			applyPlaceholderAnchor(ph, match)
 			applyPlaceholderAnchor(ph, masterMatch)
 
+			// The legacy line-spacing flag rides the ladder like the
+			// anchors: the slide's own bodyPr rarely restates it, and
+			// Office re-pitches the body's lines without it.
+			if match != nil && match.compatLnSpc {
+				ph.compatLnSpc = true
+			}
+			if masterMatch != nil && masterMatch.compatLnSpc {
+				ph.compatLnSpc = true
+			}
+
 			// Bullets: the layout placeholder's own <a:lstStyle> rung, then
 			// the master placeholder's, then the master's <p:txStyles> table.
 			// Each rung only fills paragraphs that declared nothing; a
@@ -5244,7 +5261,7 @@ func applyPlaceholderFont(ph *PlaceholderShape, def *layoutPlaceholder) {
 			if tr.font == nil {
 				continue
 			}
-			if tr.font.Name == "Calibri" && def.fontName != "" {
+			if !tr.font.fontNameSet && def.fontName != "" {
 				tr.font.Name = def.fontName
 			}
 			if tr.font.NameEA == "" && def.fontEA != "" {
@@ -5435,6 +5452,12 @@ func (r *PPTXReader) masterStateFor(zr *zip.Reader, masterPath string, pres *Pre
 		}
 		pres.masterTxStylesCache[masterPath] = tx
 	}
+	if ph := masterPlaceholdersXML(data); ph != "" {
+		if pres.masterPhCache == nil {
+			pres.masterPhCache = make(map[string]string)
+		}
+		pres.masterPhCache[masterPath] = ph
+	}
 
 	st.placeholders = r.parsePlaceholderDefs(data, pres)
 	st.textStyles = parseMasterTextStyles(data, pres)
@@ -5548,6 +5571,56 @@ func (r *PPTXReader) activateSlideRungs(zr *zip.Reader, slideRels []xmlRelForRea
 			pres.themeColors = clone
 		}
 	}
+}
+
+// masterPlaceholdersXML returns a master part's placeholder <p:sp> elements
+// (those whose nvSpPr carries <p:ph>), concatenated in document order, or ""
+// when the master defines none. They are the shapes a slide's placeholders
+// inherit geometry and bodyPr flags through — the alterman master's body
+// placeholder carries compatLnSpc="1", whose absence re-pitched every body
+// line of the round-tripped deck.
+func masterPlaceholdersXML(data []byte) string {
+	i := bytes.Index(data, []byte("<p:spTree>"))
+	if i < 0 {
+		return ""
+	}
+	end := bytes.Index(data[i:], []byte("</p:spTree>"))
+	if end < 0 {
+		return ""
+	}
+	tree := data[i : i+end]
+	var b bytes.Buffer
+	for _, m := range phSpMatches(tree) {
+		sp := m
+		if bytes.Contains(sp, []byte("<p:ph")) {
+			b.Write(sp)
+			b.WriteString("\n")
+		}
+	}
+	return b.String()
+}
+
+// phSpMatches finds the top-level <p:sp>...</p:sp> blocks of a spTree body.
+// Placeholder shapes never nest other shapes, so the non-greedy match is
+// exact; groups are skipped (their children stay with the group).
+func phSpMatches(tree []byte) [][]byte {
+	var out [][]byte
+	pos := 0
+	for {
+		start := bytes.Index(tree[pos:], []byte("<p:sp>"))
+		if start < 0 {
+			break
+		}
+		start += pos
+		end := bytes.Index(tree[start:], []byte("</p:sp>"))
+		if end < 0 {
+			break
+		}
+		end += start + len("</p:sp>")
+		out = append(out, tree[start:end])
+		pos = end
+	}
+	return out
 }
 
 // masterTxStylesXML returns a master part's raw <p:txStyles> element body
@@ -6080,7 +6153,7 @@ func applyMasterTextStyles(ph *PlaceholderShape, m *masterTextStyles) {
 			if tr.font == nil {
 				continue
 			}
-			if tr.font.Name == "Calibri" && s.fontName != "" {
+			if !tr.font.fontNameSet && s.fontName != "" {
 				tr.font.Name = s.fontName
 			}
 			if tr.font.NameEA == "" && s.fontEA != "" {
@@ -6166,6 +6239,7 @@ func (r *PPTXReader) parsePlaceholderDefs(data []byte, pres *Presentation) []lay
 	var phAnchorSet bool
 	var phAlign string
 	var phAlignSet bool
+	var phCompatLnSpc bool
 	var curLvl int
 	var lvlBullet [10]layoutLvlBullet
 
@@ -6199,6 +6273,7 @@ func (r *PPTXReader) parsePlaceholderDefs(data []byte, pres *Presentation) []lay
 				phAnchorSet = false
 				phAlign = ""
 				phAlignSet = false
+				phCompatLnSpc = false
 				curLvl = 0
 				lvlBullet = [10]layoutLvlBullet{}
 			case "nvSpPr":
@@ -6281,6 +6356,8 @@ func (r *PPTXReader) parsePlaceholderDefs(data []byte, pres *Presentation) []lay
 								insetBottom = v
 								insetsSet = true
 							}
+						case "compatLnSpc":
+							phCompatLnSpc = attr.Value == "1" || attr.Value == "true"
 						case "anchor":
 							// Only the three anchors the model carries; the
 							// schema's remaining values ("just", "dist",
@@ -6492,6 +6569,7 @@ func (r *PPTXReader) parsePlaceholderDefs(data []byte, pres *Presentation) []lay
 						anchor:      phAnchor,
 						alignH:      phAlign,
 						alignSet:    phAlignSet,
+						compatLnSpc: phCompatLnSpc,
 						lvlBullet:   lvlBullet,
 					})
 				}
