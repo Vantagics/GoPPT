@@ -153,12 +153,6 @@ func (w *PPTXWriter) writeSlideMasterN(zw *zip.Writer, mp masterPlan) error {
 		clrMap = cm
 	}
 
-	// The master's own background: an explicit <p:bgPr> fill rides back as
-	// one; otherwise the template's bgRef 1001 (solid bg1) stands in.
-	bgXML := "    <p:bg>\n      <p:bgRef idx=\"1001\">\n        <a:schemeClr val=\"bg1\"/>\n      </p:bgRef>\n    </p:bg>\n"
-	if st != nil && st.background != nil && st.background.Type != FillNone && st.background.Type != FillPicture {
-		bgXML = fmt.Sprintf("    <p:bg>\n      <p:bgPr>\n%s        <a:effectLst/>\n      </p:bgPr>\n    </p:bg>\n", w.writeFillXML(st.background))
-	}
 
 	// The master's placeholder shapes ride back verbatim: they are the
 	// inheritance definitions (geometry, bodyPr flags like compatLnSpc="1",
@@ -186,6 +180,42 @@ func (w *PPTXWriter) writeSlideMasterN(zw *zip.Writer, mp masterPlan) error {
 	if err != nil {
 		return err
 	}
+	mediaCount := strings.Count(mediaRels, "<Relationship ")
+
+	// The master's own background. A texture bgImage (the bgRef's duotone
+	// blipFill resolved at read time) writes as a bgPr blipFill with its
+	// media beside the part; an explicit <p:bgPr> fill rides back as one;
+	// otherwise the template's bgRef 1001 (solid bg1) stands in.
+	bgXML := "    <p:bg>\n      <p:bgRef idx=\"1001\">\n        <a:schemeClr val=\"bg1\"/>\n      </p:bgRef>\n    </p:bg>\n"
+	bgMediaRels := ""
+	bgImage := (*DrawingShape)(nil)
+	if st != nil {
+		bgImage = st.bgImage
+	}
+	if bgImage != nil && bgImage.data != nil {
+		bgRelID := len(mp.entries) + mediaCount + 1
+		mediaName := fmt.Sprintf("imageM%d_bg.%s", mp.index, bgImage.mimeType[strings.Index(bgImage.mimeType, "/")+1:])
+		fw, ferr := zw.Create("ppt/media/" + mediaName)
+		if ferr != nil {
+			return ferr
+		}
+		if _, werr := fw.Write(bgImage.data); werr != nil {
+			return werr
+		}
+		bgMediaRels += fmt.Sprintf("  <Relationship Id=\"rId%d\" Type=\"%s\" Target=\"../media/%s\"/>\n", bgRelID, relTypeImage, mediaName)
+		blip := fmt.Sprintf("<a:blip r:embed=\"rId%d\"/>", bgRelID)
+		if bgImage.hasDuotone {
+			blip = fmt.Sprintf("<a:blip r:embed=\"rId%d\"><a:duotone><a:srgbClr val=\"%s\"/><a:srgbClr val=\"%s\"/></a:duotone></a:blip>",
+				bgRelID, colorRGB(bgImage.duotoneA), colorRGB(bgImage.duotoneB))
+		}
+		tileEl := "<a:stretch><a:fillRect/></a:stretch>"
+		if bgImage.tile {
+			tileEl = "<a:tile/>"
+		}
+		bgXML = fmt.Sprintf("    <p:bg>\n      <p:bgPr>\n        <a:blipFill>\n          %s\n          %s\n        </a:blipFill>\n        <a:effectLst/>\n      </p:bgPr>\n    </p:bg>\n", blip, tileEl)
+	} else if st != nil && st.background != nil && st.background.Type != FillNone && st.background.Type != FillPicture {
+		bgXML = fmt.Sprintf("    <p:bg>\n      <p:bgPr>\n%s        <a:effectLst/>\n      </p:bgPr>\n    </p:bg>\n", w.writeFillXML(st.background))
+	}
 
 	layoutList := ""
 	masterRels := ""
@@ -194,8 +224,8 @@ func (w *PPTXWriter) writeSlideMasterN(zw *zip.Writer, mp masterPlan) error {
 		masterRels += fmt.Sprintf("  <Relationship Id=\"rId%d\" Type=\"%s\" Target=\"../slideLayouts/slideLayout%d.xml\"/>\n", i+1, relTypeSlideLayout, e.index)
 	}
 
-	// The theme rel lands after the layouts and the media.
-	themeRel := len(mp.entries) + strings.Count(mediaRels, "<Relationship ") + 1
+	// The theme rel lands after the layouts and every media part.
+	themeRel := len(mp.entries) + mediaCount + strings.Count(bgMediaRels, "<Relationship ") + 1
 
 	// The master's text-style ladder rides back verbatim: slide placeholders
 	// inherit cap, bullet and font defaults from it (the Trek master's
@@ -239,8 +269,8 @@ func (w *PPTXWriter) writeSlideMasterN(zw *zip.Writer, mp masterPlan) error {
 	// the theme.
 	rels := fmt.Sprintf(`<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
 <Relationships xmlns="%s">
-%s%s  <Relationship Id="rId%d" Type="%s" Target="../theme/theme%d.xml"/>
-</Relationships>`, nsRelationships, masterRels, mediaRels, themeRel, relTypeTheme, mp.index)
+%s%s%s  <Relationship Id="rId%d" Type="%s" Target="../theme/theme%d.xml"/>
+</Relationships>`, nsRelationships, masterRels, mediaRels, bgMediaRels, themeRel, relTypeTheme, mp.index)
 	return writeRawXMLToZip(zw, fmt.Sprintf("ppt/slideMasters/_rels/slideMaster%d.xml.rels", mp.index), rels)
 }
 

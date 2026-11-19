@@ -155,6 +155,8 @@ func (w *PPTXWriter) writeSlide(zw *zip.Writer, slide *Slide, slideNum int, hlin
 	bgHasImage := false
 	bgIsTile := false
 	bgAlpha := 0
+	var bgDuotoneA, bgDuotoneB Color
+	bgHasDuotone := false
 	if len(slide.shapes) > 0 {
 		if ds, ok := slide.shapes[0].(*DrawingShape); ok && ds.data != nil &&
 			ds.offsetX == 0 && ds.offsetY == 0 &&
@@ -163,6 +165,14 @@ func (w *PPTXWriter) writeSlide(zw *zip.Writer, slide *Slide, slideNum int, hlin
 			bgHasImage = true
 			bgIsTile = ds.tile
 			bgAlpha = ds.alpha
+			// The bgRef's duotone (the themes deck's texture backgrounds)
+			// rides on the same drawing: dropping it left Office to render
+			// the bare — nearly white — texture over the slide.
+			if ds.hasDuotone {
+				bgHasDuotone = true
+				bgDuotoneA = ds.duotoneA
+				bgDuotoneB = ds.duotoneB
+			}
 		}
 	}
 
@@ -218,11 +228,14 @@ func (w *PPTXWriter) writeSlide(zw *zip.Writer, slide *Slide, slideNum int, hlin
 			tileEl = "<a:tile/>"
 		}
 		bgXML = "    <p:bg>\n      <p:bgPr>\n        <a:blipFill>\n"
-		if bgAlpha > 0 {
-			bgXML += fmt.Sprintf("          <a:blip r:embed=\"rId2\"><a:alphaModFix amt=\"%d\"/></a:blip>\n", bgAlpha)
-		} else {
-			bgXML += "          <a:blip r:embed=\"rId2\"/>\n"
+		blipEl := "          <a:blip r:embed=\"rId2\"/>\n"
+		if bgHasDuotone {
+			blipEl = fmt.Sprintf("          <a:blip r:embed=\"rId2\"><a:duotone><a:srgbClr val=\"%s\"/><a:srgbClr val=\"%s\"/></a:duotone></a:blip>\n",
+				colorRGB(bgDuotoneA), colorRGB(bgDuotoneB))
+		} else if bgAlpha > 0 {
+			blipEl = fmt.Sprintf("          <a:blip r:embed=\"rId2\"><a:alphaModFix amt=\"%d\"/></a:blip>\n", bgAlpha)
 		}
+		bgXML += blipEl
 		bgXML += "          " + tileEl + "\n"
 		bgXML += "        </a:blipFill>\n        <a:effectLst/>\n      </p:bgPr>\n    </p:bg>\n"
 	} else if slide.background != nil && slide.background.Type != FillNone {

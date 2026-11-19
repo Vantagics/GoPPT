@@ -372,6 +372,14 @@ type themeFillStyle struct {
 	path  string // "" = linear; "circle"/"shape"/"rect" for path gradients
 	fillTo [4]int
 	tileTo [4]int
+	// blip marks a texture fill: the image lives in the theme part's own
+	// rels (blipRelID) and is duotone'd through the two colour transforms
+	// blipDuo — each entry is one <a:schemeClr>+ops inside <a:duotone>,
+	// resolved against the bgRef's scheme colour at application time.
+	blip      bool
+	blipRelID string
+	blipDuo   [][]themeColorOp
+	tile      bool
 }
 
 // themeLnStyle is one entry of <a:lnStyleLst>: a line weight and the transforms
@@ -408,6 +416,9 @@ func (r *PPTXReader) parseThemeFormatScheme(data []byte, ts *themeState) {
 		curStop                    *themeGradStop
 		inSchemeClr                bool
 		schemeOps                  []themeColorOp
+
+		inBlip, inDuotone bool
+		duoOps            [][]themeColorOp
 
 		inEffLst, inEffShadow bool
 		curEff                *themeEffectStyle
@@ -449,13 +460,32 @@ func (r *PPTXReader) parseThemeFormatScheme(data []byte, ts *themeState) {
 					curFillIsBg = inBgFillLst
 				}
 			case "blipFill":
-				// A bgFillStyleLst entry can be a tiled duotone texture; the
-				// model has no texture fill, so the entry degrades to a solid
-				// of its phClr — the texture's average tone.
+				// A bgFillStyleLst entry can be a tiled duotone texture: the
+				// image lives in the theme part's own rels and the duotone's
+				// two schemeClr+ops colour-map it through the bgRef's scheme
+				// colour. Captured whole — degrading it to a solid lost the
+				// texture grain the themed master backgrounds show.
 				if inBgFillLst && !inGrad {
-					curFill = &themeFillStyle{solid: true}
+					curFill = &themeFillStyle{blip: true}
 					curFillIsBg = true
-					curFill.stops = append(curFill.stops, themeGradStop{pos: 0})
+				}
+			case "blip":
+				if curFill != nil && curFill.blip && !inGrad {
+					for _, attr := range t.Attr {
+						if attr.Name.Local == "embed" {
+							curFill.blipRelID = attr.Value
+						}
+					}
+					inBlip = true
+				}
+			case "duotone":
+				if inBlip {
+					inDuotone = true
+					duoOps = nil
+				}
+			case "tile":
+				if curFill != nil && curFill.blip && !inGrad {
+					curFill.tile = true
 				}
 			case "solidFill":
 				if inLnLst && curLn != nil {
@@ -599,7 +629,10 @@ func (r *PPTXReader) parseThemeFormatScheme(data []byte, ts *themeState) {
 					}
 				}
 			case "schemeClr", "srgbClr":
-				if (inGrad && curStop != nil) || (inLnLst && curLn != nil) {
+				if inDuotone {
+					inSchemeClr = true
+					schemeOps = nil
+				} else if (inGrad && curStop != nil) || (inLnLst && curLn != nil) {
 					inSchemeClr = true
 					schemeOps = nil
 				} else if inEffShadow {
@@ -653,9 +686,20 @@ func (r *PPTXReader) parseThemeFormatScheme(data []byte, ts *themeState) {
 					}
 					curFill = nil
 				}
+			case "duotone":
+				if inDuotone {
+					inDuotone = false
+					if curFill != nil && curFill.blip {
+						curFill.blipDuo = duoOps
+					}
+					duoOps = nil
+				}
+			case "blip":
+				inBlip = false
 			case "blipFill":
 				if inBgFillLst && curFill != nil && !inGrad {
-					// close the degraded solid entry the start side opened
+					// close the texture entry the start side opened
+					inBlip = false
 					ts.bgFillStyles = append(ts.bgFillStyles, *curFill)
 					curFill = nil
 				}
@@ -667,6 +711,13 @@ func (r *PPTXReader) parseThemeFormatScheme(data []byte, ts *themeState) {
 					curLn = nil
 				}
 			case "schemeClr", "srgbClr":
+				if inDuotone && inSchemeClr {
+					// Each <a:schemeClr>+ops inside <a:duotone> is one of the
+					// texture's two colour transforms.
+					duoOps = append(duoOps, schemeOps)
+					schemeOps = nil
+					inSchemeClr = false
+				}
 				if inSchemeClr {
 					attachOps()
 				}
@@ -803,8 +854,44 @@ func resolveThemeFillStyle(pres *Presentation, idx int, scheme string, slideOps 
 // resolveThemeBgFillStyle resolves a bgRef's 1001-based index against the
 // theme's <a:bgFillStyleLst> — the list bgRef actually indexes (a shape
 // style's fillRef indexes fillStyleLst; the two lists differ).
-func resolveThemeBgFillStyle(pres *Presentation, idx int, scheme string, slideOps []themeColorOp) *Fill {
-	return resolveThemeStyleList(pres, pres.themeBgFillStyles, idx, scheme, slideOps)
+func resolveThemeBgFillStyle(pres *Presentation, idx int, scheme string, slideOps []themeColorOp) (*Fill, *DrawingShape) {
+	if pres != nil && idx >= 1 && idx <= len(pres.themeBgFillStyles) {
+		style := pres.themeBgFillStyles[idx-1]
+		if style.blip {
+			// A texture style: the image is duotone'd through the two
+			// colour transforms, each resolved against the bgRef's scheme
+			// colour, and returned as the background drawing — the same
+			// shape a blipFill bgPr produces — so the renderer's picture
+			// path (tile, duotone) runs it.
+			ds := NewDrawingShape()
+			if m, ok := pres.activeThemeMedia[style.blipRelID]; ok {
+				ds.data = m.data
+				switch m.ext {
+				case "png":
+					ds.mimeType = "image/png"
+				case "jpg", "jpeg":
+					ds.mimeType = "image/jpeg"
+				case "gif":
+					ds.mimeType = "image/gif"
+				}
+			}
+			argb := ""
+			if pres != nil && pres.themeColors != nil {
+				argb = pres.themeColors[scheme]
+			}
+			ph := applyColorOps(NewColor(argb), slideOps)
+			if len(style.blipDuo) > 0 {
+				ds.hasDuotone = true
+				ds.duotoneA = applyColorOps(ph, style.blipDuo[0])
+			}
+			if len(style.blipDuo) > 1 {
+				ds.duotoneB = applyColorOps(ph, style.blipDuo[1])
+			}
+			ds.tile = style.tile
+			return nil, ds
+		}
+	}
+	return resolveThemeStyleList(pres, pres.themeBgFillStyles, idx, scheme, slideOps), nil
 }
 
 func resolveThemeStyleList(pres *Presentation, styles []themeFillStyle, idx int, scheme string, slideOps []themeColorOp) *Fill {

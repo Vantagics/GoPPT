@@ -88,6 +88,10 @@ type Presentation struct {
 	// keyed by the master part path — the writer needs the mapping to emit a
 	// master part whose bg1/tx1 resolve the way the source's did.
 	masterClrMapCache map[string]string
+	// activeThemeMedia is the active theme's own image parts (duotone
+	// textures), keyed by the relationship id a bgFillStyleLst blipFill's
+	// <a:blip r:embed> names — the bgRef resolver looks textures up here.
+	activeThemeMedia map[string]themeMedia
 	// masterPhCache stores each master's raw placeholder <p:sp> elements
 	// (joined), keyed by the master part path. Placeholders are the
 	// inheritance definitions — geometry, bodyPr flags like
@@ -126,6 +130,16 @@ type themeState struct {
 	bgFillStyles []themeFillStyle
 	lnStyles     []themeLnStyle
 	effectStyles []themeEffectStyle
+	// media carries the theme part's own images (the duotone textures a
+	// bgFillStyleLst blipFill embeds), keyed by the relationship id the
+	// <a:blip r:embed> names.
+	media map[string]themeMedia
+}
+
+// themeMedia is one image part of a theme's own relationship file.
+type themeMedia struct {
+	data []byte
+	ext  string // "png"/"jpg"/..., drives the part name the writer emits
 }
 
 // layoutDeco is one slide layout's cached decoration: its non-placeholder
@@ -160,6 +174,7 @@ func (p *Presentation) applyThemeState(ts *themeState) {
 	p.themeColors = ts.colors
 	p.themeFonts = ts.fonts
 	p.themeFillStyles = ts.fillStyles
+	p.activeThemeMedia = ts.media
 	p.themeBgFillStyles = ts.bgFillStyles
 	p.themeLnStyles = ts.lnStyles
 	p.themeEffectStyles = ts.effectStyles
@@ -176,6 +191,7 @@ func (p *Presentation) activeTheme() *themeState {
 		bgFillStyles: p.themeBgFillStyles,
 		lnStyles:     p.themeLnStyles,
 		effectStyles: p.themeEffectStyles,
+		media:        p.activeThemeMedia,
 	}
 }
 

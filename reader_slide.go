@@ -5424,6 +5424,27 @@ func (r *PPTXReader) masterStateFor(zr *zip.Reader, masterPath string, pres *Pre
 			}
 			pres.masterThemeXMLCache[target] = b
 			st.themePath = target
+			// The theme's own images (duotone textures a bgFillStyleLst
+			// blipFill embeds) ride along: the bgRef resolver looks them up
+			// by the relationship id the <a:blip r:embed> names.
+			themeRelsPath := strings.Replace(target, "ppt/theme/", "ppt/theme/_rels/", 1) + ".rels"
+			if themeRels, err := r.readRelationships(zr, themeRelsPath); err == nil {
+				for _, rel := range themeRels {
+					if !strings.Contains(rel.Type, "image") {
+						continue
+					}
+					mp := rel.Target
+					if !strings.HasPrefix(mp, "ppt/") {
+						mp = resolveRelativePath("ppt/theme", mp)
+					}
+					if mb, err := readFileFromZip(zr, mp); err == nil {
+						if ts.media == nil {
+							ts.media = make(map[string]themeMedia)
+						}
+						ts.media[rel.ID] = themeMedia{data: mb, ext: extOf(mp)}
+					}
+				}
+			}
 			break
 		}
 	}
@@ -6729,9 +6750,12 @@ func (r *PPTXReader) parseLayoutBackground(data []byte, rels []xmlRelForRead, zr
 				if inBgRef {
 					inBgRef = false
 					// fillStyleLst entries are 1-based; a bgRef idx of 1001
-					// is the FIRST body.
-					if f := resolveThemeBgFillStyle(pres, bgRefIndex-1000, bgRefScheme, bgRefOps); f != nil {
+					// is the FIRST body. A texture style comes back as the
+					// background drawing instead of a colour fill.
+					if f, ds := resolveThemeBgFillStyle(pres, bgRefIndex-1000, bgRefScheme, bgRefOps); f != nil {
 						return f, nil
+					} else if ds != nil {
+						return nil, ds
 					}
 				}
 			case "bgPr":

@@ -178,6 +178,19 @@ alphaModFix 写回（r108）、母版装饰形状写回（r109）。
    失败根源即此，非 OPC 接线）。python-pptx 可开、PowerPoint COM 严格
    Open 通过（designs=4）。
    10 个 gen deck 复测零回退。剩余 slide8 24%（Trek 贴图 tile）。
+6o. **r152 主题贴图四件套（themes gen 3.85→1.58，slide8 24.1→1.54）**：
+   (1) 读取：theme 自带 rels 的图片按 blip r:embed 关系 id 缓存进
+   themeState.media；(2) 主题解析：bgFillStyleLst 的 blipFill 不再退化为
+   纯色——捕获 r:embed、duotone 的两组 schemeClr+ops、tile 标记；
+   (3) bgRef 解析：blip 样式产出一个背景 DrawingShape（贴图数据 +
+   duotone 两色（phClr 经 ops 解析）+ tile），走渲染端图片路径（支持
+   duotone/tile）；(4) 写出：master 的 bgImage 发 bgPr blipFill（duotone
+   内嵌 + tile + 媒体部件 + master rels），slide 的背景 DrawingShape
+   同样回发 duotone（此前 slide bg writer 丢 duotone——slide9 曾被
+   渲染成近白纹理）。L47 的 overrideClrMapping（bg2→dk2）经既有梯子
+   生效：slide9 暗棕、slide8 浅沙各自正确。
+   残余：minimal-gradient-fill-issue 0.19→1.27（标签文字像素漂移，
+   已知项 7 家族，非贴图回归）。
 6n. **r151 master 占位符逐字回写 + compatLnSpc 走梯 + fontNameSet
    （master-slides 3.94→2.01）**：master 的占位符 <p:sp>（继承定义——
    几何/bodyPr/每级 lstStyle）逐字缓存回写进 master 部件（deco 过滤器
