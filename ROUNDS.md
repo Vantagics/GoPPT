@@ -178,6 +178,12 @@ alphaModFix 写回（r108）、母版装饰形状写回（r109）。
    失败根源即此，非 OPC 接线）。python-pptx 可开、PowerPoint COM 严格
    Open 通过（designs=4）。
    10 个 gen deck 复测零回退。剩余 slide8 24%（Trek 贴图 tile）。
+6q. **r154 fontNameFromTheme（KEY02 残余归因）**：梯子解析出的字体名
+   （+mn-lt → "Segoe UI"）不再以显式 <a:latin> 回发——源 slide1 的 run
+   全部无 latin、靠 +mn-lt 继承，我们曾把解析名写成显式字体。KEY02
+   的标题残余 6% advance 宽度差在显式字体清除后仍在（同字号、同
+   y-range）——Office 对 +mn-lt 的字体绑定（Segoe UI 变体/字距特性）
+   与显式命名不同，文件层面不可修，归入文字度量家族。
 6p. **r153 行距 pin 实验组（负结果，全量回退）**：显式 <a:lnSpc><a:spcPct
    val="100000"/> 能把 alterman 的 body 行距钉回 1.2em（58→64px，与参考
    一致，7.59→5.36）——但同一 pin 在 KEY02（bodyStyle 声明了 90% 于

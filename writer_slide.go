@@ -955,7 +955,7 @@ func (w *PPTXWriter) runPropsXMLAt(tr *TextRun, inner string) string {
 	}
 
 	latin := ""
-	if font.Name != "" && (font.fontNameSet || font.Name != "Calibri") {
+	if font.Name != "" && (font.fontNameSet || (font.Name != "Calibri" && !font.fontNameFromTheme)) {
 		// "Calibri" is the library default a run carries when its markup
 		// named no font at all. Writing it explicitly replaces the theme's
 		// +mn-lt with Calibri, whose line metrics are tighter — the whole

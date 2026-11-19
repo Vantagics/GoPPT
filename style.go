@@ -127,6 +127,13 @@ type Font struct {
 	// pitch (the alterman deck's body drifted a line pitch of 64px→58px
 	// that way).
 	fontNameSet bool
+	// fontNameFromTheme records that the name arrived through the
+	// placeholder ladder's resolution of a theme reference (+mn-lt) or a
+	// master style — the written file inherits it from the verbatim
+	// txStyles/master placeholders, and re-emitting it as an explicit
+	// <a:latin> changes how Office measures the line (KEY02's title
+	// advanced a font-width narrower that way).
+	fontNameFromTheme bool
 	// runSizeSet / runColorSet likewise mark size and colour the run's own
 	// markup stated. The style ladder cannot tell a stated value from the
 	// library's substitution (18/10 for an unstated sz, black for an

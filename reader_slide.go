@@ -5263,6 +5263,7 @@ func applyPlaceholderFont(ph *PlaceholderShape, def *layoutPlaceholder) {
 			}
 			if !tr.font.fontNameSet && def.fontName != "" {
 				tr.font.Name = def.fontName
+				tr.font.fontNameFromTheme = true
 			}
 			if tr.font.NameEA == "" && def.fontEA != "" {
 				tr.font.NameEA = def.fontEA
@@ -6209,6 +6210,7 @@ func applyMasterTextStyles(ph *PlaceholderShape, m *masterTextStyles) {
 			}
 			if !tr.font.fontNameSet && s.fontName != "" {
 				tr.font.Name = s.fontName
+				tr.font.fontNameFromTheme = true
 			}
 			if tr.font.NameEA == "" && s.fontEA != "" {
 				tr.font.NameEA = s.fontEA
