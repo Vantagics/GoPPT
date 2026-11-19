@@ -178,6 +178,17 @@ alphaModFix 写回（r108）、母版装饰形状写回（r109）。
    失败根源即此，非 OPC 接线）。python-pptx 可开、PowerPoint COM 严格
    Open 通过（designs=4）。
    10 个 gen deck 复测零回退。剩余 slide8 24%（Trek 贴图 tile）。
+6p. **r153 行距 pin 实验组（负结果，全量回退）**：显式 <a:lnSpc><a:spcPct
+   val="100000"/> 能把 alterman 的 body 行距钉回 1.2em（58→64px，与参考
+   一致，7.59→5.36）——但同一 pin 在 KEY02（bodyStyle 声明了 90% 于
+   lvl1-5、lvl6-8 未声明）与 master-slides（表全静默）上回退：这些
+   deck 的原始渲染走字体度量行距，显式 100% 反而改变它们。三个变体
+   （无差别 pin / 表级门控 / 仅未声明级别）都无法同时满足两族——
+   Office 给"未声明行距"的段落哪种规则是包级/文档级判定，单件拼装
+   无法复现。保留 lnSpcPct 捕获（master txStyles 的 lnSpc 现在进
+   masterLevelStyle，梯子可推理），pin 全回退；各 deck 恢复 r152 值
+   （alterman 7.59、KEY02 4.40）。master-slides 的"2.01"是陈旧导出
+   对比的假值，真值 4.62（文字宽度漂移家族）。
 6o. **r152 主题贴图四件套（themes gen 3.85→1.58，slide8 24.1→1.54）**：
    (1) 读取：theme 自带 rels 的图片按 blip r:embed 关系 id 缓存进
    themeState.media；(2) 主题解析：bgFillStyleLst 的 blipFill 不再退化为

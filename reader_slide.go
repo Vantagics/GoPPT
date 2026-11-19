@@ -5317,6 +5317,10 @@ type masterLevelStyle struct {
 	// spcBefPct keeps the raw percentage when the level declared spcPct
 	// rather than spcPts; applyMasterTextStyles defers it to the paragraph.
 	spcBefPct int
+	// lnSpcPct keeps the level's <a:lnSpc><a:spcPct> percentage when it
+	// declares one — 0 means the level says nothing about line spacing and
+	// the paragraph inherits Office's default rule.
+	lnSpcPct int
 	// The level's bullet, exactly as the master declares it: buChar carries
 	// the character and buFont its typeface, buAutoNum an ordered list (with
 	// its startAt), buNone an explicit "no bullet". An empty buChar with no
@@ -5806,6 +5810,7 @@ func parseMasterTextStyles(data []byte, pres *Presentation) *masterTextStyles {
 	gradCaptured := false
 	inSpcBef := false
 	spcBefPct := 0
+	inLnSpc := false
 
 	for {
 		token, err := decoder.Token()
@@ -5897,6 +5902,10 @@ func parseMasterTextStyles(data []byte, pres *Presentation) *masterTextStyles {
 					inSpcBef = true
 					spcBefPct = 0
 				}
+			case "lnSpc":
+				if cur != nil {
+					inLnSpc = true
+				}
 			case "spcPts":
 				if inSpcBef && cur != nil {
 					for _, attr := range t.Attr {
@@ -5908,6 +5917,15 @@ func parseMasterTextStyles(data []byte, pres *Presentation) *masterTextStyles {
 					}
 				}
 			case "spcPct":
+				if inLnSpc && cur != nil {
+					for _, attr := range t.Attr {
+						if attr.Name.Local == "val" {
+							if v, err := strconv.Atoi(attr.Value); err == nil {
+								cur.lnSpcPct = v
+							}
+						}
+					}
+				}
 				if inSpcBef && cur != nil {
 					for _, attr := range t.Attr {
 						if attr.Name.Local == "val" {
@@ -6123,6 +6141,21 @@ func applyMasterTextStyles(ph *PlaceholderShape, m *masterTextStyles) {
 				para.inheritedSpaceBeforePct = s.spcBefPct
 			}
 		}
+
+		// Line spacing. A level that declares <a:lnSpc><a:spcPct> passes it
+		// down; one that says nothing leaves the paragraph on Office's
+		// default rule — which the written file must then PIN explicitly:
+		// a body paragraph without <a:lnSpc> re-pitches to the font's own
+		// metrics (24pt Arial: 1.0875em) while the original renders the
+		// standard 1.2em (the alterman deck's body drifted 58px→64px lines
+		// that way). 100% in the spcPct encoding is the negative form the
+		// paragraph model stores.
+		// The master's lnSpcPct (captured above) stays unpinned: decks
+		// disagree on which rule Office gives the undeclared levels — the
+		// alterman body pitches 1.2em while KEY02's undeclared levels and
+		// master-slides pitch on the font's own metrics — so emitting
+		// either rule universally regressed one family or the other. The
+		// capture stays for the ladder to reason with; see ROUNDS.md 6p.
 
 		// Bullets inherit on the same ladder. A paragraph that declared
 		// nothing (bullet == nil) takes the level's bullet; one that declared
