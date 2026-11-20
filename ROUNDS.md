@@ -184,6 +184,13 @@ alphaModFix 写回（r108）、母版装饰形状写回（r109）。
    的标题残余 6% advance 宽度差在显式字体清除后仍在（同字号、同
    y-range）——Office 对 +mn-lt 的字体绑定（Segoe UI 变体/字距特性）
    与显式命名不同，文件层面不可修，归入文字度量家族。
+6s. **r157 行距 pin 窄化定版（alterman 7.59→5.50）**：r153 的三个变体
+   之后收敛出可用规则——仅当 (a) 段落在 lvl1、(b) 级别自身未声明
+   lnSpc、(c) title/body 表全静默 时，pin 显式 100%。KEY02（lvl1 声明
+   90%）不触发 ✓；alterman（表全静默）触发 ✓ 7.59→5.50；master-slides
+   3.94/2411 2.51/with_japanese 1.54/themes 0.57 均在导出方差带内
+   （±0.3-0.7，KEY02 的 4.40→4.71 属同带）。渲染侧同步 1.2em。
+   导出方差提醒：单 deck 单次对比有 ±0.5 噪声，判定需多跑。
 6r. **r156 图表 3D 场景往返（LIBRE 5.55→5.09）**：LIBRE 的饼图是
    pie3DChart + <c:view3D>（rotX 30/perspective 30）+ floor/backWall
    （d9d9d9 场景墙）——chart.xml 丢了 view3D 后 Office 渲染成平面饼。

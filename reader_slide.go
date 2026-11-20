@@ -5415,6 +5415,34 @@ type masterTextStyles struct {
 // styleFor walks the ladder PowerPoint walks: the style a placeholder of this
 // type inherits at this outline level, falling back to level 1 and then to the
 // "other" list, both of which PowerPoint does too.
+// tableDeclaresLnSpc reports whether the txStyles table a placeholder of
+// this type resolves through declares a line spacing on any level. A table
+// that declares it on some levels (KEY02: 90% on lvl1-5) renders ALL its
+// levels through the declared-spacing machinery, while a fully silent table
+// (alterman) leaves the first level on the standard 1.2em pitch — which the
+// written file must pin explicitly or Office re-pitches to the font's
+// metrics.
+func (m *masterTextStyles) tableDeclaresLnSpc(phType string) bool {
+	if m == nil {
+		return false
+	}
+	table := &m.other
+	if phType == "title" || phType == "ctrTitle" {
+		table = &m.title
+	} else if phType == "body" || phType == "subTitle" {
+		table = &m.body
+	}
+	if table == nil {
+		return false
+	}
+	for i := range table {
+		if table[i] != nil && table[i].lnSpcPct > 0 {
+			return true
+		}
+	}
+	return false
+}
+
 func (m *masterTextStyles) styleFor(phType string, level int) *masterLevelStyle {
 	if m == nil {
 		return nil
@@ -6261,12 +6289,17 @@ func applyMasterTextStyles(ph *PlaceholderShape, m *masterTextStyles) {
 		// standard 1.2em (the alterman deck's body drifted 58px→64px lines
 		// that way). 100% in the spcPct encoding is the negative form the
 		// paragraph model stores.
-		// The master's lnSpcPct (captured above) stays unpinned: decks
-		// disagree on which rule Office gives the undeclared levels — the
-		// alterman body pitches 1.2em while KEY02's undeclared levels and
-		// master-slides pitch on the font's own metrics — so emitting
-		// either rule universally regressed one family or the other. The
-		// capture stays for the ladder to reason with; see ROUNDS.md 6p.
+		// The line-spacing pin, narrowed by the r153 experiments: only the
+		// FIRST level of a table that is silent about line spacing
+		// everywhere gets the explicit 1.2em — a table that declares lnSpc
+		// anywhere (KEY02: 90% on lvl1-5) drives all its levels through the
+		// declared machinery, and its undeclared deeper levels keep the
+		// font's metric pitch (pinning them drifted KEY02 4.40→4.71). The
+		// pin fixed the alterman body only (7.59→5.36, 64px pitch ✓).
+		if para.lineSpacing == 0 && s.lnSpcPct == 0 && level == 1 &&
+			!m.tableDeclaresLnSpc(string(ph.phType)) {
+			para.lineSpacing = -100000
+		}
 
 		// Bullets inherit on the same ladder. A paragraph that declared
 		// nothing (bullet == nil) takes the level's bullet; one that declared
