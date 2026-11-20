@@ -2134,7 +2134,6 @@ func (r *PPTXReader) parseSlideXML(decoder *xml.Decoder, slide *Slide, rels []xm
 					}
 				} else if state.inTcPrSolidFill {
 					// Table cell fill or border color
-					println("DBG tcPrSolidFill", state.inTcPr, state.inTcRun, state.inRunProps)
 					for _, attr := range t.Attr {
 						if attr.Name.Local == "val" {
 							c := NewColor("FF" + attr.Value)

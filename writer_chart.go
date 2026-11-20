@@ -40,6 +40,37 @@ func getCategories(series []*ChartSeries) []string {
 	return series[0].Categories
 }
 
+// chart3DSceneXML builds the <c:view3D>/<c:floor>/<c:backWall> block for a
+// 3D chart: the camera angles and scene walls the reference renders the
+// extrusion over. Empty for 2D charts.
+func chart3DSceneXML(chart *ChartShape, ct ChartType) string {
+	_, isPie3D := ct.(*Pie3DChart)
+	_, isBar3D := ct.(*Bar3DChart)
+	if !isPie3D && !isBar3D {
+		return ""
+	}
+	v := chart.view3D
+	var b strings.Builder
+	b.WriteString("  <c:view3D>\n")
+	fmt.Fprintf(&b, `    <c:rotX val="%d"/>`+"\n", v.RotX)
+	fmt.Fprintf(&b, `    <c:rotY val="%d"/>`+"\n", v.RotY)
+	if v.DepthPercent > 0 {
+		fmt.Fprintf(&b, `    <c:depthPercent val="%d"/>`+"\n", v.DepthPercent)
+	}
+	ra := 0
+	if v.RightAngleAxes {
+		ra = 1
+	}
+	fmt.Fprintf(&b, `    <c:rAngAx val="%d"/>`+"\n", ra)
+	if v.Perspective > 0 {
+		fmt.Fprintf(&b, `    <c:perspective val="%d"/>`+"\n", v.Perspective)
+	}
+	b.WriteString("  </c:view3D>\n")
+	b.WriteString(chart.floorXML)
+	b.WriteString(chart.backWallXML)
+	return b.String()
+}
+
 func (w *PPTXWriter) writeChartPart(zw *zip.Writer, chart *ChartShape, chartIdx int) error {
 	defer func() {
 		// The chart's own rels file: PowerPoint requires it to exist for any
@@ -140,7 +171,7 @@ func (w *PPTXWriter) writeChartPart(zw *zip.Writer, chart *ChartShape, chartIdx 
   <c:lang val="en-US"/>
   <c:roundedCorners val="0"/>
   <c:chart>
-%s    <c:plotArea>
+%s%s    <c:plotArea>
       <c:layout/>
 %s%s    </c:plotArea>
 %s    <c:plotVisOnly val="1"/>
@@ -159,6 +190,7 @@ func (w *PPTXWriter) writeChartPart(zw *zip.Writer, chart *ChartShape, chartIdx 
 %s</c:chartSpace>`,
 		nsDrawingML, nsOfficeDocRels,
 		titleXML,
+		chart3DSceneXML(chart, ct),
 		chartTypeXML.String(), axisXML,
 		legendXML,
 		chart.displayBlankAs,
@@ -479,11 +511,15 @@ func (w *PPTXWriter) writeSeriesXML(series []*ChartSeries, categories []string, 
 	for idx, s := range series {
 		spPrXML := w.writeSeriesSpPrXML(s, lineSeries)
 
+		explosionXML := ""
+		if s.Explosion > 0 {
+			explosionXML = fmt.Sprintf("          <c:explosion val=\"%d\"/>\n", s.Explosion)
+		}
 		sb.WriteString(fmt.Sprintf(`        <c:ser>
           <c:idx val="%d"/>
           <c:order val="%d"/>
           <c:tx><c:strRef><c:f>Sheet1!$B$1</c:f><c:strCache><c:ptCount val="1"/><c:pt idx="0"><c:v>%s</c:v></c:pt></c:strCache></c:strRef></c:tx>
-%s`, idx, idx, xmlEscape(s.Title), spPrXML))
+%s%s`, idx, idx, xmlEscape(s.Title), spPrXML, explosionXML))
 
 		// Per-point overrides. CT_BarSer/CT_PieSer put the <c:dPt> run after
 		// <c:spPr> and before <c:dLbls>; each carries the point's fill.
@@ -645,11 +681,15 @@ func (w *PPTXWriter) writeScatterChartXML(c *ScatterChart, cats []string) string
 		// A scatter series is plotted as a stroked line with markers, so its
 		// colour belongs on the outline, like a line chart's.
 		spPrXML := w.writeSeriesSpPrXML(s, true)
+		explosionXML := ""
+		if s.Explosion > 0 {
+			explosionXML = fmt.Sprintf("          <c:explosion val=\"%d\"/>\n", s.Explosion)
+		}
 		sb.WriteString(fmt.Sprintf(`        <c:ser>
           <c:idx val="%d"/>
           <c:order val="%d"/>
           <c:tx><c:strRef><c:f>Sheet1!$B$1</c:f><c:strCache><c:ptCount val="1"/><c:pt idx="0"><c:v>%s</c:v></c:pt></c:strCache></c:strRef></c:tx>
-%s`, idx, idx, xmlEscape(s.Title), spPrXML))
+%s%s`, idx, idx, xmlEscape(s.Title), spPrXML, explosionXML))
 
 		// X values
 		sb.WriteString("          <c:xVal>\n            <c:numRef><c:f>Sheet1!$A$2</c:f><c:numCache>\n")

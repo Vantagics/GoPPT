@@ -151,6 +151,12 @@ func parseChartXML(data []byte, themeColors map[string]string) *ChartShape {
 		valueCtx       string // "", "serTitle", "cat", "val", "xval", "yval"
 
 		plotType    string
+	hasView3D   bool
+	vRotX, vRotY, vDepthPct, vPerspective int
+	vRAngAx     bool
+	floorXML    string
+	backWallXML string
+	explosion   int
 		barDir      string
 		barGrouping string
 		gapWidth    *int
@@ -257,6 +263,7 @@ func parseChartXML(data []byte, themeColors map[string]string) *ChartShape {
 		vals = &seriesPoints{}
 		xVals = &seriesPoints{}
 		yVals = &seriesPoints{}
+		explosion = 0
 		serTitle.Reset()
 		serFill = nil
 		serLine = nil
@@ -312,6 +319,7 @@ func parseChartXML(data []byte, themeColors map[string]string) *ChartShape {
 		}
 
 		s := NewChartSeriesOrdered(strings.TrimSpace(serTitle.String()), catList, floats)
+		s.Explosion = explosion
 		if serFont != nil {
 			// The series carried a <c:txPr>, which is where its data labels'
 			// font lives. NewChartSeriesOrdered seeds a default font, so the
@@ -443,6 +451,72 @@ func parseChartXML(data []byte, themeColors map[string]string) *ChartShape {
 			case "pie3DChart":
 				if plotType == "" {
 					plotType = "pie3D"
+				}
+			case "view3D":
+				hasView3D = true
+			case "rotX":
+				if hasView3D {
+					for _, attr := range t.Attr {
+						if attr.Name.Local == "val" {
+							if v, err := strconv.Atoi(attr.Value); err == nil {
+								vRotX = v
+							}
+						}
+					}
+				}
+			case "rotY":
+				if hasView3D {
+					for _, attr := range t.Attr {
+						if attr.Name.Local == "val" {
+							if v, err := strconv.Atoi(attr.Value); err == nil {
+								vRotY = v
+							}
+						}
+					}
+				}
+			case "rAngAx":
+				if hasView3D {
+					for _, attr := range t.Attr {
+						if attr.Name.Local == "val" {
+							if v, err := strconv.Atoi(attr.Value); err == nil {
+								vRAngAx = v != 0
+							}
+						}
+					}
+				}
+			case "perspective":
+				if hasView3D {
+					for _, attr := range t.Attr {
+						if attr.Name.Local == "val" {
+							if v, err := strconv.Atoi(attr.Value); err == nil {
+								vPerspective = v
+							}
+						}
+					}
+				}
+			case "depthPercent":
+				if hasView3D {
+					for _, attr := range t.Attr {
+						if attr.Name.Local == "val" {
+							if v, err := strconv.Atoi(attr.Value); err == nil {
+								vDepthPct = v
+							}
+						}
+					}
+				}
+			case "floor":
+				floorXML = captureElementXML(dec, t, "c:")
+			case "backWall":
+				backWallXML = captureElementXML(dec, t, "c:")
+			case "explosion":
+				if inSeries {
+					for _, attr := range t.Attr {
+						if attr.Name.Local == "val" {
+							if v, err := strconv.Atoi(attr.Value); err == nil {
+								explosion = v
+							}
+						}
+					}
 				}
 			case "doughnutChart":
 				if plotType == "" {
@@ -1322,6 +1396,15 @@ func parseChartXML(data []byte, themeColors map[string]string) *ChartShape {
 		chart.border = (&Border{}).SetSolidFill(*chartLineColor).SetWidth(width)
 	}
 
+	if hasView3D {
+		chart.view3D.RotX = vRotX
+		chart.view3D.RotY = vRotY
+		chart.view3D.DepthPercent = vDepthPct
+		chart.view3D.Perspective = vPerspective
+		chart.view3D.RightAngleAxes = vRAngAx
+	}
+	chart.floorXML = floorXML
+	chart.backWallXML = backWallXML
 	return chart
 }
 

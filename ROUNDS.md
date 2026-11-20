@@ -184,6 +184,13 @@ alphaModFix 写回（r108）、母版装饰形状写回（r109）。
    的标题残余 6% advance 宽度差在显式字体清除后仍在（同字号、同
    y-range）——Office 对 +mn-lt 的字体绑定（Segoe UI 变体/字距特性）
    与显式命名不同，文件层面不可修，归入文字度量家族。
+6r. **r156 图表 3D 场景往返（LIBRE 5.55→5.09）**：LIBRE 的饼图是
+   pie3DChart + <c:view3D>（rotX 30/perspective 30）+ floor/backWall
+   （d9d9d9 场景墙）——chart.xml 丢了 view3D 后 Office 渲染成平面饼。
+   解析：view3D 的 rotX/rotY/rAngAx/perspective/depthPercent 进
+   View3D（新增 Perspective 字段），floor/backWall 逐字捕获；写出：
+   3D 类型在 title 后发 view3D+floor+backWall 块。同时清掉 FS 损坏
+   时代回归的 tcPrSolidFill DBG 打印。
 6q. **r155 WordArt 3D 逐字往返（tdf140865Wordart3D 7.63→1.89）**：读取侧
    逐字捕获 bodyPr 的 <a:prstTxWarp>（textCurveDown 级联）、bodyPr 内的
    <a:scene3d>（相机+灯架）与 <a:sp3d>（extrusionH/contourW/bevelT/

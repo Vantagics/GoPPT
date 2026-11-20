@@ -14,6 +14,11 @@ type ChartShape struct {
 	// authored in stores date serial numbers against the 1904 epoch instead
 	// of the 1900 one, which shifts every serial-formatted category label.
 	date1904 bool
+	// floorXML/backWallXML are the 3D scene's <c:floor>/<c:backWall>
+	// elements, kept verbatim (their spPr carries the scene's wall fill).
+	// Empty for 2D charts.
+	floorXML    string
+	backWallXML string
 }
 
 // Chart display blank constants.
@@ -335,6 +340,7 @@ type View3D struct {
 	DepthPercent   int
 	HeightPercent  *int
 	RightAngleAxes bool
+	Perspective    int
 }
 
 // NewView3D creates new 3D view settings.
@@ -382,6 +388,9 @@ type ChartSeries struct {
 	// line: "dash", "sysDash", "dot", ... Empty means a solid stroke.
 	LineDash string
 	Marker   *SeriesMarker
+	// Explosion separates a pie/doughnut slice from the centre, in percent
+	// of the pie radius. Zero means an un-exploded slice.
+	Explosion int
 }
 
 // Series label position constants.
