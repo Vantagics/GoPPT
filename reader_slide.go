@@ -807,6 +807,11 @@ func (r *PPTXReader) parseSlideXML(decoder *xml.Decoder, slide *Slide, rels []xm
 	var pendingBevelW, pendingBevelH int64
 	// Deferred 3D surface material from an explicit <a:sp3d prstMaterial="..">.
 	var pendingPrstMaterial string
+	// Deferred WordArt warp / 3D scene elements, kept as verbatim XML.
+	var pendingTxWarpXML, pendingScene3dXML string
+	var pendingSp3dExtrusionH, pendingSp3dContourW int64
+	var pendingBevelTPrst string
+	var pendingBodyScene3dXML, pendingBodySp3dXML string
 
 	// duotoneIdx is the slot (0 or 1) the next <a:duotone> colour lands in.
 	// The element is a bare sequence of colour choices; the parser only knows
@@ -3110,12 +3115,37 @@ func (r *PPTXReader) parseSlideXML(decoder *xml.Decoder, slide *Slide, rels []xm
 						}
 					}
 				}
-			case "sp3d":
+			case "prstTxWarp":
+				pendingTxWarpXML = captureElementXML(decoder, t, "a:")
+			case "scene3d":
 				if state.inSpPr {
+					pendingScene3dXML = captureElementXML(decoder, t, "a:")
+				} else if state.inTxBody {
+					pendingBodyScene3dXML = captureElementXML(decoder, t, "a:")
+				}
+			case "sp3d":
+				if state.inTxBody && !state.inSpPr {
+					// The TEXT BODY's 3D (extrusion colour, contour, bevels
+					// — the WordArt deck's red sides live here). No other
+					// parser consumes bodyPr's sp3d children, so a verbatim
+					// capture is safe.
+					pendingBodySp3dXML = captureElementXML(decoder, t, "a:")
+				} else if state.inSpPr {
 					state.inSp3d = true
 					for _, attr := range t.Attr {
-						if attr.Name.Local == "prstMaterial" && attr.Value != "" {
-							pendingPrstMaterial = attr.Value
+						switch attr.Name.Local {
+						case "prstMaterial":
+							if attr.Value != "" {
+								pendingPrstMaterial = attr.Value
+							}
+						case "extrusionH":
+							if v, err := strconv.ParseInt(attr.Value, 10, 64); err == nil {
+								pendingSp3dExtrusionH = v
+							}
+						case "contourW":
+							if v, err := strconv.ParseInt(attr.Value, 10, 64); err == nil {
+								pendingSp3dContourW = v
+							}
 						}
 					}
 				}
@@ -3146,6 +3176,8 @@ func (r *PPTXReader) parseSlideXML(decoder *xml.Decoder, slide *Slide, rels []xm
 							if v, err := strconv.ParseInt(attr.Value, 10, 64); err == nil {
 								pendingBevelH = v
 							}
+						case "prst":
+							pendingBevelTPrst = attr.Value
 						}
 					}
 				}
@@ -3693,6 +3725,9 @@ func (r *PPTXReader) parseSlideXML(decoder *xml.Decoder, slide *Slide, rels []xm
 						if pendingShapeFill != nil {
 							currentPlaceholder.fill = pendingShapeFill
 							pendingShapeFill = nil
+							currentPlaceholder.txWarpXML = pendingTxWarpXML
+							currentPlaceholder.bodyScene3dXML = pendingBodyScene3dXML
+							currentPlaceholder.bodySp3dXML = pendingBodySp3dXML
 						}
 						if pendingBorder != nil {
 							currentPlaceholder.border = pendingBorder
@@ -3760,6 +3795,15 @@ func (r *PPTXReader) parseSlideXML(decoder *xml.Decoder, slide *Slide, rels []xm
 							autoShape.prstMaterial = pendingPrstMaterial
 							pendingBevelW, pendingBevelH = 0, 0
 						}
+						autoShape.txWarpXML = pendingTxWarpXML
+						autoShape.scene3dXML = pendingScene3dXML
+						autoShape.sp3dExtrusionH = pendingSp3dExtrusionH
+						autoShape.sp3dContourW = pendingSp3dContourW
+						autoShape.bevelTPrst = pendingBevelTPrst
+						autoShape.bodyScene3dXML = pendingBodyScene3dXML
+						autoShape.bodySp3dXML = pendingBodySp3dXML
+						pendingTxWarpXML, pendingScene3dXML, pendingBodyScene3dXML, pendingBodySp3dXML = "", "", "", ""
+						pendingSp3dExtrusionH, pendingSp3dContourW = 0, 0
 						// blipFill on an AutoShape: the image fills the shape
 						// geometry (the smartart-simple deck's ocean-photo
 						// circle — Office's cached drawing carries the image
@@ -3884,6 +3928,15 @@ func (r *PPTXReader) parseSlideXML(decoder *xml.Decoder, slide *Slide, rels []xm
 							currentRichText.prstMaterial = pendingPrstMaterial
 							pendingBevelW, pendingBevelH = 0, 0
 						}
+						currentRichText.txWarpXML = pendingTxWarpXML
+						currentRichText.scene3dXML = pendingScene3dXML
+						currentRichText.sp3dExtrusionH = pendingSp3dExtrusionH
+						currentRichText.sp3dContourW = pendingSp3dContourW
+						currentRichText.bevelTPrst = pendingBevelTPrst
+						currentRichText.bodyScene3dXML = pendingBodyScene3dXML
+						currentRichText.bodySp3dXML = pendingBodySp3dXML
+						pendingTxWarpXML, pendingScene3dXML, pendingBodyScene3dXML, pendingBodySp3dXML = "", "", "", ""
+						pendingSp3dExtrusionH, pendingSp3dContourW = 0, 0
 						// Apply deferred arrow ends
 						if pendingHeadEnd != nil {
 							currentRichText.headEnd = pendingHeadEnd
@@ -3936,6 +3989,15 @@ func (r *PPTXReader) parseSlideXML(decoder *xml.Decoder, slide *Slide, rels []xm
 							rt.prstMaterial = pendingPrstMaterial
 							pendingBevelW, pendingBevelH = 0, 0
 						}
+						rt.txWarpXML = pendingTxWarpXML
+						rt.scene3dXML = pendingScene3dXML
+						rt.sp3dExtrusionH = pendingSp3dExtrusionH
+						rt.sp3dContourW = pendingSp3dContourW
+						rt.bevelTPrst = pendingBevelTPrst
+						rt.bodyScene3dXML = pendingBodyScene3dXML
+						rt.bodySp3dXML = pendingBodySp3dXML
+						pendingTxWarpXML, pendingScene3dXML, pendingBodyScene3dXML, pendingBodySp3dXML = "", "", "", ""
+						pendingSp3dExtrusionH, pendingSp3dContourW = 0, 0
 						if pendingHeadEnd != nil {
 							rt.headEnd = pendingHeadEnd
 							pendingHeadEnd = nil
@@ -3985,6 +4047,15 @@ func (r *PPTXReader) parseSlideXML(decoder *xml.Decoder, slide *Slide, rels []xm
 							autoShape.prstMaterial = pendingPrstMaterial
 							pendingBevelW, pendingBevelH = 0, 0
 						}
+						autoShape.txWarpXML = pendingTxWarpXML
+						autoShape.scene3dXML = pendingScene3dXML
+						autoShape.sp3dExtrusionH = pendingSp3dExtrusionH
+						autoShape.sp3dContourW = pendingSp3dContourW
+						autoShape.bevelTPrst = pendingBevelTPrst
+						autoShape.bodyScene3dXML = pendingBodyScene3dXML
+						autoShape.bodySp3dXML = pendingBodySp3dXML
+						pendingTxWarpXML, pendingScene3dXML, pendingBodyScene3dXML, pendingBodySp3dXML = "", "", "", ""
+						pendingSp3dExtrusionH, pendingSp3dContourW = 0, 0
 						// Apply deferred arrow ends
 						if pendingHeadEnd != nil {
 							autoShape.headEnd = pendingHeadEnd
@@ -5647,6 +5718,46 @@ func phSpMatches(tree []byte) [][]byte {
 		pos = end
 	}
 	return out
+}
+
+// captureElementXML consumes tokens through the matching end of the given
+// start element (which the caller has already read) and reconstructs the
+// subtree as XML text, prefixing every element with prefix — the DrawingML
+// elements this captures all live in the `a` namespace. Used for elements
+// the model carries verbatim (the WordArt warp, the 3D scene): their inner
+// forms vary too widely to model field by field.
+func captureElementXML(decoder *xml.Decoder, start xml.StartElement, prefix string) string {
+	var b strings.Builder
+	attrs := ""
+	for _, attr := range start.Attr {
+		attrs += " " + attr.Name.Local + "=" + strconv.Quote(attr.Value)
+	}
+	b.WriteString("<" + prefix + start.Name.Local + attrs + ">")
+	depth := 0
+	for {
+		token, err := decoder.Token()
+		if err != nil {
+			return b.String()
+		}
+		switch t := token.(type) {
+		case xml.StartElement:
+			depth++
+			attrs := ""
+			for _, attr := range t.Attr {
+				attrs += " " + attr.Name.Local + "=" + strconv.Quote(attr.Value)
+			}
+			b.WriteString("<" + prefix + t.Name.Local + attrs + ">")
+		case xml.EndElement:
+			if depth == 0 {
+				b.WriteString("</" + prefix + t.Name.Local + ">")
+				return b.String()
+			}
+			depth--
+			b.WriteString("</" + prefix + t.Name.Local + ">")
+		case xml.CharData:
+			b.Write(t)
+		}
+	}
 }
 
 // masterTxStylesXML returns a master part's raw <p:txStyles> element body

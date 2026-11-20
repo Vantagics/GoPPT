@@ -621,7 +621,7 @@ func (w *PPTXWriter) writeRichTextShapeXML(s *RichTextShape, shapeID *int) strin
 `, id, xmlEscape(name), descrAttr, xfAttrs,
 		s.offsetX, s.offsetY, s.width, s.height,
 		shapeGeomXML("rect", nil, s.customPath, "          "),
-		fillXML, borderXML, shapeEffectXML(s.GetShadow(), 0, "          "),
+		fillXML, borderXML, shapeEffectXML(s.GetShadow(), 0, "          ")+s.scene3dXML+sp3dXMLFor(s.bevelW, s.bevelH, s.sp3dExtrusionH, s.sp3dContourW, s.bevelTPrst, s.prstMaterial),
 		bodyPrXML(bodyPrAttrs{
 			wrap:           boolToWrap(s.wordWrap),
 			columns:        s.columns,
@@ -635,6 +635,9 @@ func (w *PPTXWriter) writeRichTextShapeXML(s *RichTextShape, shapeID *int) strin
 			rIns:           s.insetRight,
 			tIns:           s.insetTop,
 			bIns:           s.insetBottom,
+			txWarpXML:      s.txWarpXML,
+			bodyScene3dXML: s.bodyScene3dXML,
+			bodySp3dXML:    s.bodySp3dXML,
 		}),
 		paragraphsXML.String())
 }
@@ -667,6 +670,13 @@ type bodyPrAttrs struct {
 	// spacing inherited through the placeholder ladder. Without it Office
 	// re-pitches the body's lines to the tighter modern metrics.
 	compatLnSpc bool
+	// txWarpXML is the verbatim <a:prstTxWarp> element (the WordArt warp)
+	// — it precedes the auto-fit child in CT_TextBodyProperties.
+	txWarpXML string
+	// The TEXT BODY's 3D: bodyPr carries scene3d/sp3d after the auto-fit
+	// child — the WordArt deck's red extrusion and teal contour live here.
+	bodyScene3dXML string
+	bodySp3dXML    string
 }
 
 // bodyPrXML serialises a shape's <a:bodyPr>.
@@ -706,12 +716,15 @@ func bodyPrXML(a bodyPrAttrs) string {
 	}
 
 	child := autoFitXML(a.autoFit, a.fontScale, a.lnSpcReduction)
-	if child == "" {
+	if child == "" && a.bodyScene3dXML == "" && a.bodySp3dXML == "" && a.txWarpXML == "" {
 		b.WriteString("/>")
 		return b.String()
 	}
 	b.WriteString(">")
+	b.WriteString(a.txWarpXML)
 	b.WriteString(child)
+	b.WriteString(a.bodyScene3dXML)
+	b.WriteString(a.bodySp3dXML)
 	b.WriteString("</a:bodyPr>")
 	return b.String()
 }
@@ -1241,6 +1254,33 @@ func (w *PPTXWriter) writeDrawingShapeXML(s *DrawingShape, shapeID *int, slideNu
 // order effectLst after a:ln; either chunk may be empty, and a shape with
 // neither returns "". AutoShape and RichTextShape used to drop their shadow
 // here entirely, so a saved deck lost every shape glow.
+// sp3dXMLFor reconstructs the <a:sp3d> element from the model's extrusion,
+// contour and bevel fields. Empty when the shape carries no 3D.
+func sp3dXMLFor(bevelW, bevelH, extrusionH, contourW int64, bevelTPrst, prstMaterial string) string {
+	if extrusionH <= 0 && contourW <= 0 && bevelW <= 0 {
+		return ""
+	}
+	attrs := ""
+	if extrusionH > 0 {
+		attrs += fmt.Sprintf(` extrusionH="%d"`, extrusionH)
+	}
+	if contourW > 0 {
+		attrs += fmt.Sprintf(` contourW="%d"`, contourW)
+	}
+	if prstMaterial != "" {
+		attrs += fmt.Sprintf(` prstMaterial="%s"`, xmlEscape(prstMaterial))
+	}
+	inner := ""
+	if bevelW > 0 {
+		prstAttr := ""
+		if bevelTPrst != "" {
+			prstAttr = fmt.Sprintf(` prst="%s"`, xmlEscape(bevelTPrst))
+		}
+		inner = fmt.Sprintf(`<a:bevelT w="%d" h="%d"%s/>`, bevelW, bevelH, prstAttr)
+	}
+	return "<a:sp3d" + attrs + ">" + inner + "</a:sp3d>"
+}
+
 func shapeEffectXML(sh *Shadow, softEdgeRad int64, indent string) string {
 	chunks := ""
 	if sh != nil && sh.Visible {
@@ -1376,7 +1416,7 @@ func (w *PPTXWriter) writeAutoShapeXML(s *AutoShape, shapeID *int) string {
 		xfrmAttrs(&s.BaseShape),
 		s.offsetX, s.offsetY, s.width, s.height,
 		shapeGeomXML(string(s.shapeType), s.adjustValues, nil, "          "),
-		fillXML, borderXML, shapeEffectXML(s.GetShadow(), 0, "          "), textXML)
+		fillXML, borderXML, shapeEffectXML(s.GetShadow(), 0, "          ")+s.scene3dXML+sp3dXMLFor(s.bevelW, s.bevelH, s.sp3dExtrusionH, s.sp3dContourW, s.bevelTPrst, s.prstMaterial), textXML)
 }
 
 // autoShapeBodyPr gathers the <a:bodyPr> values an AutoShape carries. The
@@ -1396,6 +1436,9 @@ func autoShapeBodyPr(s *AutoShape) string {
 		rIns:           s.insetRight,
 		tIns:           s.insetTop,
 		bIns:           s.insetBottom,
+		txWarpXML:      s.txWarpXML,
+		bodyScene3dXML: s.bodyScene3dXML,
+		bodySp3dXML:    s.bodySp3dXML,
 	})
 }
 
@@ -2206,6 +2249,9 @@ func (w *PPTXWriter) writePlaceholderShapeXML(s *PlaceholderShape, shapeID *int)
 			tIns:           s.insetTop,
 			bIns:           s.insetBottom,
 			compatLnSpc:    s.compatLnSpc,
+			txWarpXML:      s.txWarpXML,
+			bodyScene3dXML: s.bodyScene3dXML,
+			bodySp3dXML:    s.bodySp3dXML,
 		}),
 		paragraphsXML.String())
 }

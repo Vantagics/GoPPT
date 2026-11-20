@@ -227,6 +227,26 @@ type RichTextShape struct {
 	// PowerPoint lights a "dkEdge" face flat (no gain) and a "translucentPowder"
 	// face only mildly, where a matte/metal face gets the full rig gain.
 	prstMaterial string
+	// WordArt text warp: the bodyPr's <a:prstTxWarp> element, kept verbatim
+	// so the written file carries the same warp (the tdf140865Wordart3D
+	// deck's textCurveDown cascade).
+	txWarpXML string
+	// bevelTPrst is the <a:bevelT prst="..."> the shape's own sp3d declared.
+	bevelTPrst string
+	// The TEXT BODY's own 3D: bodyPr carries scene3d/sp3d for text-level
+	// extrusion (the WordArt deck's red extrusion + teal contour live
+	// here). Kept verbatim — the inner forms vary too widely to model.
+	bodyScene3dXML string
+	bodySp3dXML    string
+	// sp3d extrusion and contour widths, EMU — the extrusion depth and
+	// outline width of a 3D shape. The writer reconstructs the
+	// <a:sp3d extrusionH= contourW=><a:bevelT .../></a:sp3d> from these and
+	// the bevel fields above.
+	sp3dExtrusionH int64
+	sp3dContourW   int64
+	// scene3d is the spPr's <a:scene3d> element (camera + light rig), kept
+	// verbatim — Office lights the extrusion from it.
+	scene3dXML string
 }
 
 // GetBevelWidth returns the top-bevel width in EMU (0 = no bevel).
@@ -813,6 +833,15 @@ type AutoShape struct {
 	// "dkEdge" renders flat (no gain) and "translucentPowder" only mildly,
 	// while the matte/metal default gets the full rig gain.
 	prstMaterial string
+	// WordArt text warp / 3D extrusion, the same fields RichTextShape
+	// carries (see its declarations).
+	txWarpXML      string
+	scene3dXML     string
+	sp3dExtrusionH int64
+	sp3dContourW   int64
+	bevelTPrst     string
+	bodyScene3dXML string
+	bodySp3dXML    string
 }
 
 // GetBevelWidth returns the top-bevel width in EMU (0 = no bevel).

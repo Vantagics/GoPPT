@@ -184,6 +184,15 @@ alphaModFix 写回（r108）、母版装饰形状写回（r109）。
    的标题残余 6% advance 宽度差在显式字体清除后仍在（同字号、同
    y-range）——Office 对 +mn-lt 的字体绑定（Segoe UI 变体/字距特性）
    与显式命名不同，文件层面不可修，归入文字度量家族。
+6q. **r155 WordArt 3D 逐字往返（tdf140865Wordart3D 7.63→1.89）**：读取侧
+   逐字捕获 bodyPr 的 <a:prstTxWarp>（textCurveDown 级联）、bodyPr 内的
+   <a:scene3d>（相机+灯架）与 <a:sp3d>（extrusionH/contourW/bevelT/
+   bevelB/extrusionClr/contourClr——红色挤出+青色轮廓）——bodyPr 里的
+   文本级 3D 之前整体丢失，Office 把形状渲染成平面小字。写出侧按
+   CT_TextBodyProperties 顺序（warp→autofit→scene3d→sp3d）回发；
+   spPr 级 sp3d 从模型字段重建（extrusionH/contourW/bevelT/prst）。
+   Office 替我们完成 3D 渲染；Go 渲染端的 3D 文字仍是 roadmap 项。
+   残余 1.89：Office 的 3D 文字描边/光照细节。
 6p. **r153 行距 pin 实验组（负结果，全量回退）**：显式 <a:lnSpc><a:spcPct
    val="100000"/> 能把 alterman 的 body 行距钉回 1.2em（58→64px，与参考
    一致，7.59→5.36）——但同一 pin 在 KEY02（bodyStyle 声明了 90% 于
